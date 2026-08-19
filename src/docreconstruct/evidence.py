@@ -577,7 +577,26 @@ def _score_mineru(payload: Any, provider: str) -> DetectionCandidate | None:
         and any("bbox" in record and "type" in record for record in records)
     ):
         return _candidate(provider, 0.88, "MinerU flat content-list page/bbox/type records")
+    if _mineru_content_list_v2(payload):
+        return _candidate(provider, 0.93, "MinerU page-grouped content-list-v2 records")
     return None
+
+
+def _mineru_content_list_v2(payload: Any) -> bool:
+    if not isinstance(payload, Sequence) or isinstance(payload, _SEQUENCE_EXCLUSIONS):
+        return False
+    pages = list(payload)
+    if not pages or not all(
+        isinstance(page, Sequence) and not isinstance(page, _SEQUENCE_EXCLUSIONS) for page in pages
+    ):
+        return False
+    blocks = [block for page in pages for block in page]
+    return bool(blocks) and all(
+        isinstance(block, Mapping)
+        and isinstance(block.get("type"), str)
+        and isinstance(block.get("content"), Mapping)
+        for block in blocks
+    )
 
 
 def _score_paddle(payload: Any, provider: str) -> DetectionCandidate | None:

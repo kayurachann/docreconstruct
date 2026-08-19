@@ -129,6 +129,110 @@ def test_paddleocr_saved_array_shape() -> None:
     assert page.elements[0].provenance.engine == "paddleocr"
 
 
+def test_paddleocr_ppstructure_v3_preserves_structured_evidence() -> None:
+    payload = {
+        "res": {
+            "page_index": 0,
+            "width": 1000,
+            "height": 1400,
+            "doc_preprocessor_res": {
+                "page_index": 0,
+                "model_settings": {
+                    "use_doc_orientation_classify": True,
+                    "use_doc_unwarping": True,
+                    "unrelated_setting": "not persisted",
+                },
+                "angle": 90,
+                "output_img": "large-raster-placeholder",
+            },
+            "parsing_res_list": [
+                {
+                    "block_bbox": [100, 80, 900, 180],
+                    "block_label": "doc_title",
+                    "block_content": "Structured annual report",
+                    "block_id": 41,
+                    "block_order": 2,
+                },
+                {
+                    "block_bbox": [200, 260, 800, 360],
+                    "block_label": "formula",
+                    "block_content": r"x^2 + y^2 = 1",
+                    "block_id": 42,
+                    "block_order": 1,
+                },
+            ],
+            "layout_det_res": {
+                "boxes": [
+                    {
+                        "cls_id": 11,
+                        "label": "doc_title",
+                        "score": 0.91,
+                        "coordinate": [100, 80, 900, 180],
+                    },
+                    {
+                        "cls_id": 1,
+                        "label": "image",
+                        "score": 0.87,
+                        "coordinate": [100, 500, 900, 900],
+                    },
+                ]
+            },
+            "overall_ocr_res": {
+                "dt_polys": [[[110, 100], [500, 100], [500, 140], [110, 140]]],
+                "dt_scores": [0.88],
+                "rec_polys": [[[110, 100], [500, 100], [500, 140], [110, 140]]],
+                "rec_texts": ["Structured annual report"],
+                "rec_scores": [0.97],
+            },
+        }
+    }
+
+    page = PaddleOCRProvider().normalize(payload).pages[0]
+    title = next(element for element in page.elements if element.type is ElementType.TITLE)
+    formula = next(element for element in page.elements if element.type is ElementType.FORMULA)
+    image = next(element for element in page.elements if element.type is ElementType.IMAGE)
+    ocr_line = next(
+        element
+        for element in page.elements
+        if element.metadata.get("paddle_section") == "overall_ocr_res"
+    )
+
+    assert title.text == "Structured annual report"
+    assert title.bbox == BBox(x0=100, y0=80, x1=900, y1=180)
+    assert title.reading_order == 2
+    assert title.metadata["block_id"] == 41
+    assert title.metadata["block_order"] == 2
+    assert title.metadata["layout_detection"] == {
+        "source_id": "root.layout_det_res.boxes[0]",
+        "confidence": 0.91,
+        "cls_id": 11,
+    }
+    assert title.provenance is not None
+    assert title.provenance.layout_confidence == pytest.approx(0.91)
+
+    assert formula.text == r"x^2 + y^2 = 1"
+    assert formula.metadata["latex"] == r"x^2 + y^2 = 1"
+    assert formula.reading_order == 1
+    assert image.confidence == pytest.approx(0.87)
+
+    assert ocr_line.polygon[0].x == 110
+    assert ocr_line.confidence == pytest.approx(0.97)
+    assert ocr_line.provenance is not None
+    assert ocr_line.provenance.text_confidence == pytest.approx(0.97)
+    assert ocr_line.provenance.layout_confidence == pytest.approx(0.88)
+    assert ocr_line.relationships.parent == title.id
+    assert ocr_line.id in title.relationships.children
+
+    assert page.metadata["doc_preprocessor"] == {
+        "angle": 90,
+        "page_index": 0,
+        "model_settings": {
+            "use_doc_orientation_classify": True,
+            "use_doc_unwarping": True,
+        },
+    }
+
+
 def test_mineru_middle_json_and_content_list_shapes() -> None:
     middle_json = {
         "pdf_info": [

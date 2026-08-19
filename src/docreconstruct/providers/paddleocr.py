@@ -9,8 +9,10 @@ from docreconstruct.ir import (
     Document,
     Element,
     ElementStyle,
+    ElementType,
     Page,
     Provenance,
+    Relationship,
     SourceType,
     TextCandidate,
 )
@@ -96,7 +98,6 @@ class PaddleOCRProvider(SavedJSONProvider):
         used_numbers: set[int] = set()
         for page_index, page_payload in enumerate(pages_payload):
             elements = self._elements(page_payload, page_index)
-            elements = unique_elements(elements)
             candidate_number = page_number(page_payload, page_index)
             number = candidate_number
             while number in used_numbers:
@@ -114,6 +115,13 @@ class PaddleOCRProvider(SavedJSONProvider):
             rotation = 0.0
             if isinstance(page_payload, Mapping):
                 rotation = float(page_payload.get("rotation") or page_payload.get("angle") or 0)
+            page_metadata: dict[str, Any] = {
+                "provider": self.name,
+                "source_page_number": candidate_number,
+            }
+            preprocessor = _doc_preprocessor_metadata(data)
+            if preprocessor:
+                page_metadata["doc_preprocessor"] = preprocessor
             pages.append(
                 Page(
                     id=f"page-{number}",
@@ -123,10 +131,7 @@ class PaddleOCRProvider(SavedJSONProvider):
                     rotation=rotation,
                     elements=elements,
                     source_type=SourceType.IMAGE,
-                    metadata={
-                        "provider": self.name,
-                        "source_page_number": candidate_number,
-                    },
+                    metadata=page_metadata,
                 )
             )
 
@@ -196,6 +201,75 @@ class PaddleOCRProvider(SavedJSONProvider):
             )
             if element:
                 elements.append(element)
+
+        elements = unique_elements(elements)
+        next_element_index = len(elements)
+        elements = _merge_layout_detection(elements)
+        if isinstance(data, Mapping):
+            elements.extend(
+                self._overall_ocr_elements(
+                    data.get("overall_ocr_res"),
+                    page_index,
+                    start_index=next_element_index,
+                )
+            )
+        _restore_provider_reading_order(elements)
+        _link_ocr_lines_to_blocks(elements)
+        return elements
+
+    def _overall_ocr_elements(
+        self,
+        payload: Any,
+        page_index: int,
+        *,
+        start_index: int,
+    ) -> list[Element]:
+        """Preserve PP-StructureV3 line polygons and recognition confidence."""
+
+        if not isinstance(payload, Mapping):
+            return []
+        texts = _sequence(payload.get("rec_texts"))
+        boxes = _first_sequence(
+            payload,
+            "rec_polys",
+            "rec_boxes",
+            "dt_polys",
+        )
+        if texts is None or boxes is None:
+            return []
+        recognition_scores = _sequence(payload.get("rec_scores")) or []
+        detection_scores = _sequence(payload.get("dt_scores")) or []
+        elements: list[Element] = []
+        for index, (raw_text, box_value) in enumerate(zip(texts, boxes, strict=False)):
+            text = raw_text if isinstance(raw_text, str) else str(raw_text)
+            text_score = recognition_scores[index] if index < len(recognition_scores) else None
+            detection_score = confidence(
+                detection_scores[index] if index < len(detection_scores) else None
+            )
+            metadata: dict[str, Any] = {
+                "paddle_section": "overall_ocr_res",
+                "block_type": "WORD",
+                "ocr_line_index": index,
+            }
+            if detection_score is not None:
+                metadata["detection_confidence"] = detection_score
+            element = self._make_element(
+                page_index,
+                start_index + len(elements),
+                box_value,
+                text,
+                text_score,
+                "text",
+                source_id=f"overall_ocr_res.rec_texts[{index}]",
+                metadata=metadata,
+            )
+            if element is None:
+                continue
+            if element.provenance is not None:
+                element.provenance = element.provenance.model_copy(
+                    update={"layout_confidence": detection_score}
+                )
+            elements.append(element)
         return elements
 
     def _make_element(
@@ -227,13 +301,14 @@ class PaddleOCRProvider(SavedJSONProvider):
                 }
             )
         clean_text = text if isinstance(text, str) and text != "" else None
+        reading_order = _reading_order((metadata or {}).get("block_order"), element_index)
         return Element(
             id=element_id,
             type=element_type(label),
             bbox=bbox,
             polygon=coerce_polygon(box_value),
             text=clean_text,
-            reading_order=element_index,
+            reading_order=reading_order,
             confidence=score_value,
             style=style,
             provenance=Provenance(
@@ -329,19 +404,53 @@ def _walk_paddle_items(
         return results
     if isinstance(value, Mapping):
         box_value = None
-        for key in ("bbox", "box", "coordinate", "coordinates", "polygon", "poly", "dt_poly"):
+        for key in (
+            "block_bbox",
+            "bbox",
+            "box",
+            "coordinate",
+            "coordinates",
+            "polygon",
+            "poly",
+            "dt_poly",
+        ):
             if key in value and coerce_bbox(value[key]) is not None:
                 box_value = value[key]
                 break
         if box_value is not None:
-            text = text_from(value)
-            label = value.get("type") or value.get("label") or value.get("block_type") or "text"
+            block_content = value.get("block_content")
+            text = block_content if isinstance(block_content, str) else text_from(value)
+            label = (
+                value.get("block_label")
+                or value.get("type")
+                or value.get("label")
+                or value.get("block_type")
+                or "text"
+            )
             score = value.get("score", value.get("confidence", value.get("rec_score")))
             metadata: dict[str, Any] = {
                 key: value[key]
-                for key in ("html", "table_html", "image_path", "latex", "style")
+                for key in (
+                    "html",
+                    "table_html",
+                    "image_path",
+                    "latex",
+                    "style",
+                    "block_id",
+                    "block_order",
+                    "block_label",
+                    "cls_id",
+                )
                 if key in value
             }
+            section = _paddle_section(path)
+            if section is not None:
+                metadata["paddle_section"] = section
+            kind = element_type(label)
+            if kind is ElementType.TABLE and isinstance(text, str) and "<table" in text.lower():
+                metadata.setdefault("html", text)
+            if kind is ElementType.FORMULA and isinstance(text, str):
+                metadata.setdefault("latex", text)
             nested_result = value.get("res")
             if isinstance(nested_result, Mapping):
                 for key in ("html", "table_html", "image_path", "latex", "style"):
@@ -357,6 +466,140 @@ def _walk_paddle_items(
         for index, child in enumerate(value):
             results.extend(_walk_paddle_items(child, f"{path}[{index}]"))
     return results
+
+
+def _sequence(value: Any) -> list[Any] | None:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(value)
+    return None
+
+
+def _first_sequence(payload: Mapping[str, Any], *keys: str) -> list[Any] | None:
+    for key in keys:
+        result = _sequence(payload.get(key))
+        if result:
+            return result
+    return None
+
+
+def _reading_order(value: Any, fallback: int) -> int:
+    if isinstance(value, bool):
+        return fallback
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return result if result >= 0 else fallback
+
+
+def _paddle_section(path: str) -> str | None:
+    for section in (
+        "parsing_res_list",
+        "layout_det_res",
+        "table_res_list",
+        "formula_res_list",
+        "seal_res_list",
+    ):
+        if f".{section}" in path or path.startswith(section):
+            return section
+    return None
+
+
+def _merge_layout_detection(elements: list[Element]) -> list[Element]:
+    """Attach layout-only detections to equivalent parsed blocks.
+
+    PP-StructureV3 repeats many regions in both ``layout_det_res`` and
+    ``parsing_res_list``. Keeping two independent visual elements for the same
+    box creates false duplicate tables and figures, so the raw layout score is
+    retained on the richer parsed block instead.
+    """
+
+    parsed = [
+        element
+        for element in elements
+        if element.metadata.get("paddle_section") == "parsing_res_list"
+    ]
+    result: list[Element] = []
+    for element in elements:
+        if element.metadata.get("paddle_section") != "layout_det_res":
+            result.append(element)
+            continue
+        match = next(
+            (
+                candidate
+                for candidate in parsed
+                if candidate.type is element.type and candidate.bbox.iou(element.bbox) >= 0.98
+            ),
+            None,
+        )
+        if match is None:
+            result.append(element)
+            continue
+        layout_confidence = element.confidence
+        match.confidence = match.confidence or layout_confidence
+        if match.provenance is not None:
+            match.provenance = match.provenance.model_copy(
+                update={"layout_confidence": layout_confidence}
+            )
+        match.metadata["layout_detection"] = {
+            "source_id": element.provenance.source_id if element.provenance else None,
+            "confidence": layout_confidence,
+            "cls_id": element.metadata.get("cls_id"),
+        }
+    return result
+
+
+def _link_ocr_lines_to_blocks(elements: list[Element]) -> None:
+    """Relate retained OCR-line evidence to the smallest containing block."""
+
+    blocks = [
+        element
+        for element in elements
+        if element.metadata.get("paddle_section") == "parsing_res_list" and element.text
+    ]
+    for line in elements:
+        if line.metadata.get("paddle_section") != "overall_ocr_res":
+            continue
+        containing = [
+            block
+            for block in blocks
+            if block.bbox.x0 <= line.bbox.center_x <= block.bbox.x1
+            and block.bbox.y0 <= line.bbox.center_y <= block.bbox.y1
+        ]
+        if not containing:
+            continue
+        parent = min(containing, key=lambda block: block.bbox.area)
+        line.relationships = Relationship(parent=parent.id)
+        if line.id not in parent.relationships.children:
+            parent.relationships.children.append(line.id)
+
+
+def _restore_provider_reading_order(elements: list[Element]) -> None:
+    for fallback, element in enumerate(elements):
+        element.reading_order = _reading_order(element.metadata.get("block_order"), fallback)
+
+
+def _doc_preprocessor_metadata(data: Any) -> dict[str, Any]:
+    if not isinstance(data, Mapping):
+        return {}
+    payload = data.get("doc_preprocessor_res")
+    if not isinstance(payload, Mapping):
+        return {}
+    result: dict[str, Any] = {}
+    if "angle" in payload:
+        result["angle"] = payload["angle"]
+    if "page_index" in payload:
+        result["page_index"] = payload["page_index"]
+    settings = payload.get("model_settings")
+    if isinstance(settings, Mapping):
+        retained = {
+            key: settings[key]
+            for key in ("use_doc_orientation_classify", "use_doc_unwarping")
+            if key in settings
+        }
+        if retained:
+            result["model_settings"] = retained
+    return result
 
 
 # Alternate class name used by some integrations.

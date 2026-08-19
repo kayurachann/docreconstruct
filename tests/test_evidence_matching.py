@@ -69,6 +69,27 @@ def _layout(width: int = 1000, height: int = 2000) -> ScanDocumentLayout:
     return ScanDocumentLayout(source="scan.png", pages=[page])
 
 
+def _multi_page_layout(
+    *, pages: int = 2, width: int = 1000, height: int = 2000
+) -> ScanDocumentLayout:
+    return ScanDocumentLayout(
+        source="scan.pdf",
+        pages=[
+            ScanPageLayout(
+                number=number,
+                width=width,
+                height=height,
+                pdf_width=500,
+                pdf_height=1000,
+                content_bbox=PixelBox(x0=0, y0=0, x1=width, y1=height),
+                line_pitch=40,
+                image=Image.new("RGB", (width, height), "white"),
+            )
+            for number in range(1, pages + 1)
+        ],
+    )
+
+
 def _document(
     provider: str,
     elements: list[Element],
@@ -331,6 +352,105 @@ def test_contiguous_provider_lines_form_one_markdown_block_and_two_source_rows()
         PixelBox(x0=100, y0=270, x1=520, y1=320),
     ]
     assert match.match_score > 0.9
+
+
+def test_complete_offset_page_sequence_maps_to_layout_pages_by_ordinal() -> None:
+    content = _content(
+        (MarkdownBlockKind.PARAGRAPH, "First cropped page", None),
+        (MarkdownBlockKind.PARAGRAPH, "Second cropped page", None),
+    )
+    document = Document(
+        id="offset-pages",
+        pages=[
+            Page(
+                id="source-page-5",
+                number=5,
+                width=1000,
+                height=2000,
+                elements=[
+                    _element(
+                        "page-5-text",
+                        "First cropped page",
+                        (100, 200, 500, 300),
+                        provider="provider",
+                    )
+                ],
+            ),
+            Page(
+                id="source-page-6",
+                number=6,
+                width=1000,
+                height=2000,
+                elements=[
+                    _element(
+                        "page-6-text",
+                        "Second cropped page",
+                        (100, 400, 500, 500),
+                        provider="provider",
+                    )
+                ],
+            ),
+        ],
+        metadata={"provider": "provider"},
+    )
+
+    matches = match_sidecar_evidence(content, _multi_page_layout(), document)
+
+    assert [match.page_number for match in matches] == [1, 2]
+    assert [match.element_ids for match in matches] == [("page-5-text",), ("page-6-text",)]
+    assert all(
+        any("mapped by complete ordinal sequence" in warning for warning in match.warnings)
+        for match in matches
+    )
+
+
+def test_irregular_or_partial_page_sequences_are_not_remapped_by_ordinal() -> None:
+    content = _content(
+        (MarkdownBlockKind.PARAGRAPH, "Irregular exact page", None),
+        (MarkdownBlockKind.PARAGRAPH, "Ambiguous missing page", None),
+    )
+    document = Document(
+        id="irregular-pages",
+        pages=[
+            Page(
+                id="source-page-1",
+                number=1,
+                width=1000,
+                height=2000,
+                elements=[
+                    _element(
+                        "page-1-text",
+                        "Irregular exact page",
+                        (100, 200, 500, 300),
+                        provider="provider",
+                    )
+                ],
+            ),
+            Page(
+                id="source-page-3",
+                number=3,
+                width=1000,
+                height=2000,
+                elements=[
+                    _element(
+                        "page-3-text",
+                        "Ambiguous missing page",
+                        (100, 400, 500, 500),
+                        provider="provider",
+                    )
+                ],
+            ),
+        ],
+        metadata={"provider": "provider"},
+    )
+
+    matches = match_sidecar_evidence(content, _multi_page_layout(), document)
+
+    assert [match.block_id for match in matches] == ["md-1"]
+    assert matches[0].page_number == 1
+    assert not any(
+        "mapped by complete ordinal sequence" in warning for warning in matches[0].warnings
+    )
 
 
 def test_monotonic_matching_supports_headings_equations_and_tables() -> None:

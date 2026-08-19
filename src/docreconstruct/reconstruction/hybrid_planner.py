@@ -8,7 +8,7 @@ import statistics
 from collections.abc import Sequence
 from functools import cache
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from docreconstruct.ir import ElementStyle
 from docreconstruct.reconstruction.asset_matching import AssetMatch
@@ -61,6 +61,20 @@ class HybridPagePlan(BaseModel):
     content_bbox: PixelBox
     line_pitch: float = Field(gt=0)
     placements: list[HybridBlockPlacement]
+
+    @model_validator(mode="after")
+    def placements_must_belong_to_this_page(self) -> HybridPagePlan:
+        misplaced = [
+            placement.block_id
+            for placement in self.placements
+            if placement.page_number != self.number
+        ]
+        if misplaced:
+            raise ValueError(
+                f"page {self.number} contains placement(s) bound to another page: "
+                + ", ".join(misplaced)
+            )
+        return self
 
 
 class HybridLayoutPlan(BaseModel):
@@ -1007,11 +1021,22 @@ def _segment_cost(
     end: int,
     target: float,
 ) -> float:
-    if start >= end:
+    if start > end:
         return math.inf
     page_anchor_indices = [
         index for index, fixed_page in fixed_pages.items() if fixed_page == page_number
     ]
+    if start == end:
+        # A source PDF can contain an intentionally blank page, or a page whose
+        # only pixels were omitted by the Markdown extractor.  Preserve that
+        # physical page instead of stealing the next page's first editable
+        # block merely to satisfy a non-empty partition.  The large finite
+        # penalty keeps ordinary unanchored documents densely partitioned and
+        # makes an empty page a fallback only when page anchors or cardinality
+        # require it.
+        # In the absence of any anchor, prefer a trailing empty page over a
+        # leading one; normal reading order starts content on the first page.
+        return math.inf if page_anchor_indices else 25.0 + 1.0 / page_number
     if page_anchor_indices and not (
         start <= min(page_anchor_indices) and max(page_anchor_indices) < end
     ):
@@ -1085,19 +1110,20 @@ def build_hybrid_layout_plan(
         if table_match:
             fixed_pages[block.index] = table_match.page_number
             match_by_index[block.index] = table_match
-    group_pages: dict[str, int] = {}
+    asset_group_pages: dict[str, set[int]] = {}
     for block in blocks:
-        match = match_by_id.get(block.id) or evidence_match_by_id.get(block.id)
+        match = match_by_id.get(block.id)
         if match and block.group_id:
-            previous = group_pages.get(block.group_id)
-            if previous is not None and previous != match.page_number:
-                raise ValueError(
-                    f"content group {block.group_id!r} matched more than one scan page"
-                )
-            group_pages[block.group_id] = match.page_number
+            asset_group_pages.setdefault(block.group_id, set()).add(match.page_number)
     for block in blocks:
-        if block.group_id in group_pages:
-            fixed_pages[block.index] = group_pages[block.group_id]
+        anchored_pages = asset_group_pages.get(block.group_id or "", set())
+        # A compact question/figure group with one matched source asset should
+        # remain together.  Text evidence is intentionally not propagated to
+        # every sibling: one recognized line does not prove that a long
+        # article or question cannot continue onto the following source page.
+        # Every JSON-evidenced block still keeps its own fixed page above.
+        if len(anchored_pages) == 1:
+            fixed_pages[block.index] = next(iter(anchored_pages))
     global_pitch = sorted(page.line_pitch for page in layout.pages)[page_count // 2]
     average_width = sum(page.content_bbox.width for page in layout.pages) / page_count
     characters_per_line = max(36.0, average_width / max(1.0, global_pitch * 0.42))
@@ -1133,11 +1159,9 @@ def build_hybrid_layout_plan(
                 targets[page_number - 1],
             )
             return cost, (len(blocks),)
-        remaining_pages = page_count - page_number
         best_cost = math.inf
         best_boundaries: tuple[int, ...] = ()
-        maximum = len(blocks) - remaining_pages
-        for end in range(start + 1, maximum + 1):
+        for end in range(start, len(blocks) + 1):
             current = _segment_cost(
                 blocks,
                 weights,

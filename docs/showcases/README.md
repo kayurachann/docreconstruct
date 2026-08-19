@@ -10,6 +10,12 @@ project's LibreOffice-backed rendering API. They are not manually retouched
 screenshots. The DOCX files retain native editable paragraphs, tables, and/or
 Office Math where supported.
 
+Contributor-supplied source attributions are: VietnamNet for the Tuyen Quang
+math exam image, PaddleOCR for the calculus OCR/export example, and VNExpress
+for the Vietnamese exam image. These labels document provenance claims; they
+do not grant a license, imply endorsement, or replace verification against the
+original publisher.
+
 ## Important accuracy notice
 
 These artifacts are demonstrations, not ground-truth transcriptions. OCR and

@@ -1,5 +1,8 @@
 # docreconstruct
 
+[English](README.md) · [Tiếng Việt](docs/i18n/README.vi.md) ·
+[简体中文](docs/i18n/README.zh-CN.md) · [Русский](docs/i18n/README.ru.md)
+
 **Turn document pixels into editable document structure.**
 
 `docreconstruct` is a model-agnostic Python framework for reconstructing PDFs,
@@ -34,7 +37,9 @@ choose.
   PDF or raster-image layout authority. The hybrid path keeps paragraphs,
   tables, and Office Math equations native; reuses cached Markdown image URLs;
   rectifies photographed pages; recovers multi-column geometry; and uses the
-  scan to retain complete source figures.
+  scan to retain complete source figures. Multi-page PDFs retain one Word
+  section per source page, including evidenced cross-page continuations and
+  blank/OCR-omitted pages.
 - Score text, layout, structure, visual evidence, and editability when the
   required reference data is available.
 - Use the same synchronous pipeline from Python, the CLI, or an optional
@@ -47,6 +52,62 @@ live heavyweight OCR inference, and an automatic render/compare/correct critic
 are roadmap work. The current DOCX renderer favors native paragraphs and tables
 over hundreds of hard-to-edit positioned text boxes, so it should not be
 described as pixel-perfect.
+
+## Best-evidence input: Markdown + JSON + original
+
+Reconstruction normally works best when all three complementary inputs are
+available. They are not interchangeable:
+
+| Input | Authority retained by the project |
+| --- | --- |
+| Reviewed `content.md` | Exact wording and intended reading sequence; never silently rewritten |
+| One or more OCR/layout `.json` sidecars | Page/block association, coordinates, semantic type, style, confidence, and provenance |
+| Original PDF or raster image | Physical page geometry, pixels, columns, tables, figures, and source crops |
+
+Each JSON provider is normalized and aligned independently before consensus.
+JSON may improve geometry or structure but cannot replace Markdown wording;
+the original file remains the final pixel and page-geometry authority. A
+missing source can still be processed, but fewer fidelity dimensions can be
+measured and the output should be treated as lower-confidence.
+
+```bash
+docreconstruct hybrid content.md original.pdf \
+  --evidence paddleocr.json \
+  --evidence mineru.json \
+  --output output/result.docx \
+  --qa-report output/result.qa.json
+```
+
+Repeat `--evidence` for independent providers. If automatic schema detection
+is ambiguous, bind a file explicitly with
+`--evidence-provider result.json=paddleocr` rather than allowing the project to
+guess.
+
+Provider page labels are matched exactly by default. A complete, same-length,
+consecutive sequence may be rebound by ordinal position (for example OCR pages
+5–6 beside a two-page crop numbered 1–2), with an audit warning. Partial or
+irregular sequences are never remapped speculatively. Provider-specific
+coordinate units and preprocessing metadata are retained during normalization
+so geometry can be projected back to the original page rather than treated as
+untyped pixels.
+
+### Multi-page originals
+
+Multi-page PDFs are analyzed and planned one page at a time. Each source page
+becomes a separate Word section with its own physical page size and a forced
+new-page boundary. A semantic group may continue across pages when independent
+evidence anchors prove the continuation, and a blank or OCR-omitted source page
+is preserved as an empty section rather than stealing content from the next
+page. Native QA verifies the planned section count; explicit LibreOffice QA
+also requires the rendered page count to equal the source page count.
+
+```bash
+docreconstruct hybrid complete-document.md multi-page-original.pdf \
+  --evidence provider-result.json \
+  --output output/complete-document.docx \
+  --qa-backend libreoffice \
+  --qa-report output/complete-document.qa.json
+```
 
 ## Successful reconstruction examples
 
@@ -62,7 +123,10 @@ and [SHA-256 manifest](docs/showcases/SHA256SUMS.txt) for provenance details.
 > authority. Always compare the editable result with the original source before
 > relying on it.
 
-### Tuyen Quang gifted school Math exam - Page 1 - Exam code: 0110
+### Tuyen Quang gifted school Math exam - Page 1 - Exam code: 0110 (Source: VietnamNet)
+
+**Source:** [VietnamNet](https://vietnamnet.vn/) — attribution supplied by the
+contributor; see the showcase rights notice.
 
 | Original photographed page | Editable DOCX rendered by the project |
 | :---: | :---: |
@@ -77,7 +141,10 @@ Word tables, editable Office Math, four-choice answer layouts, and reuse of the
 source variation chart. Handwriting, photo distortion, missing OCR text, and
 some source furniture are not guaranteed to be reproduced as editable content.
 
-### Calculus derivation - editable Office Math
+### Calculus derivation - editable Office Math (Source: PaddleOCR)
+
+**Source:** [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) — OCR/export
+attribution supplied by the contributor.
 
 | Original source | Editable DOCX rendered by the project |
 | :---: | :---: |
@@ -96,7 +163,10 @@ gates with a foreground-normalized visual score of 92.58%. This score is
 evidence of improvement, not proof that every glyph or mathematical statement
 is semantically correct.
 
-### Tuyen Quang gifted school - Vietnamese 2nd exam
+### Tuyen Quang gifted school - Vietnamese 2nd exam (Source: VNExpress)
+
+**Source:** [VNExpress](https://vnexpress.net/) — attribution supplied by the
+contributor; see the showcase rights notice.
 
 | Original source | Editable DOCX rendered by the project |
 | :---: | :---: |
@@ -523,6 +593,33 @@ docreconstruct benchmark-ocr benchmark/ocr-benchmark.json \
 Renderers implement `docreconstruct.renderers.Renderer`. Rendering should be
 deterministic and should prefer genuinely editable target objects. Optional
 dependencies must be checked only when their renderer is requested.
+
+## Research acknowledgements
+
+`docreconstruct` is an independent implementation. Its evidence model,
+provider-normalization boundaries, reconstruction pipeline, and QA strategy
+were informed by the public documentation, published interfaces, and
+evaluation methods of the projects below. Acknowledgement does not imply that
+their source code or model weights are bundled, copied, or required, and it
+does not imply affiliation or endorsement.
+
+| Project | Public design ideas studied | License note |
+| --- | --- | --- |
+| [PaddleOCR / PP-StructureV3](https://github.com/PaddlePaddle/PaddleOCR) | Modular orientation correction, document unwarping, layout/OCR/table/formula analysis, reading order, and paired [JSON/Markdown output](https://github.com/PaddlePaddle/PaddleOCR/blob/main/docs/version3.x/pipeline_usage/PP-StructureV3.en.md) | Code: Apache-2.0; independently verify the terms of any selected model or hosted service |
+| [MinerU](https://github.com/opendatalab/MinerU) | Hybrid native-text/OCR/VLM routing, rich intermediate evidence, cross-page structures, and documented [content-list geometry](https://github.com/opendatalab/MinerU/blob/master/docs/en/reference/output_files.md) | [Custom Apache-2.0-based license](https://github.com/opendatalab/MinerU/blob/master/LICENSE.md) with additional commercial-threshold and online-service attribution terms |
+| [Docling](https://github.com/docling-project/docling) | Unified lossless document representation, hierarchy, provenance, coordinate origins, and multi-format conversion | Code: MIT; Docling explicitly requires users to check individual model licenses |
+| [Marker](https://github.com/datalab-to/marker) | Hierarchical page/block JSON, native-text-first processing, targeted OCR repair, and optional escalation for difficult blocks | Code: Apache-2.0; [model weights have separate modified OpenRAIL terms](https://github.com/datalab-to/marker/blob/master/MODEL_LICENSE) |
+| [olmOCR and olmOCR-Bench](https://github.com/allenai/olmocr) | Natural reading-order linearization and fact-level tests for text presence/absence, reading order, tables, formulas, scans, and dense text | Code: Apache-2.0; datasets and externally served models may have separate terms |
+| [Surya](https://github.com/datalab-to/surya) | Polygon geometry, block labels, reading-order positions, confidence, multilingual OCR, table structure, math, and page-to-block fallback | Code: Apache-2.0; model weights use separate modified OpenRAIL terms |
+| [Unstructured](https://github.com/Unstructured-IO/unstructured) | Input-type partitioning and per-element page, coordinate-system, and detection-origin metadata | Code: Apache-2.0; hosted platform terms are separate |
+| [LayoutParser](https://github.com/Layout-Parser/layout-parser) | Provider-neutral spatial data structures, region operations, model adapters, and layout visualizations | Code: Apache-2.0; third-party models/backends retain their own terms |
+| [OCRmyPDF](https://github.com/ocrmypdf/OCRmyPDF) | Conservative rotation, deskewing, cleanup, and preservation-first preprocessing for scanned PDFs | Code: MPL-2.0; its documentation warns that aggressive cleanup can remove content and must be reviewed |
+| [OmniDocBench](https://github.com/opendatalab/OmniDocBench) | Attribute-aware evaluation of text, tables, formulas, layout, and reading order across diverse document classes | Code: Apache-2.0; dataset terms and source-document rights must also be checked |
+
+Project names and trademarks belong to their respective owners. License notes
+above are concise engineering reminders, not legal advice. Before enabling an
+optional adapter, model, dataset, or hosted OCR service, review its current
+code license, model/data license, privacy policy, and service terms directly.
 
 ## Development and safety
 

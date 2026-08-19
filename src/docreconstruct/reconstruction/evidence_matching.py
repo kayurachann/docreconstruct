@@ -142,6 +142,15 @@ class _DocumentSource:
 
 
 @dataclass(frozen=True, slots=True)
+class _PageBinding:
+    """One provider page bound to the corresponding layout page."""
+
+    page: Page
+    scan_page: ScanPageLayout
+    warning: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _Unit:
     position: int
     page_number: int
@@ -273,9 +282,10 @@ def _evidence_units(
 
     units: list[_Unit] = []
     position = 0
-    for page in sorted(source.document.pages, key=lambda item: item.number):
-        scan_page = scan_pages.get(page.number)
-        if scan_page is None or _coordinate_system(page.metadata) in _IGNORED_COORDINATE_SYSTEMS:
+    for binding in _bind_document_pages(source.document, scan_pages):
+        page = binding.page
+        scan_page = binding.scan_page
+        if _coordinate_system(page.metadata) in _IGNORED_COORDINATE_SYSTEMS:
             continue
         indexed_elements = list(enumerate(page.elements))
         ordered = sorted(
@@ -302,6 +312,8 @@ def _evidence_units(
             if projected is None or projected.x1 <= projected.x0 or projected.y1 <= projected.y0:
                 continue
             warnings = list(source.warnings)
+            if binding.warning is not None:
+                warnings.append(binding.warning)
             if (
                 element.bbox.x0 < 0
                 or element.bbox.y0 < 0
@@ -315,7 +327,7 @@ def _evidence_units(
             units.append(
                 _Unit(
                     position=position,
-                    page_number=page.number,
+                    page_number=scan_page.number,
                     element_id=element.id,
                     text=text,
                     normalized_text=normalized,
@@ -331,6 +343,65 @@ def _evidence_units(
             )
             position += 1
     return units
+
+
+def _bind_document_pages(
+    document: Document,
+    scan_pages: Mapping[int, ScanPageLayout],
+) -> list[_PageBinding]:
+    """Bind canonical evidence pages to layout pages without guessing subsets.
+
+    Provider APIs do not always retain the original document's one-based page
+    labels.  A saved result for pages 5--6, for example, may be supplied next
+    to a two-page cropped PDF whose layout pages are numbered 1--2.  Exact
+    labels remain authoritative when the sequences agree.  A constant-offset
+    ordinal mapping is accepted only when both complete sequences are the same
+    length and consecutive; partial or irregular sequences use exact matches
+    only, because their missing-page correspondence is ambiguous.
+    """
+
+    indexed_pages = list(enumerate(document.pages))
+    provider_pages = [
+        page for _, page in sorted(indexed_pages, key=lambda item: (item[1].number, item[0]))
+    ]
+    layout_pages = sorted(scan_pages.values(), key=lambda page: page.number)
+    provider_numbers = [page.number for page in provider_pages]
+    layout_numbers = [page.number for page in layout_pages]
+
+    if provider_numbers == layout_numbers:
+        return [
+            _PageBinding(page=page, scan_page=scan_pages[page.number]) for page in provider_pages
+        ]
+
+    complete_consecutive_sequences = (
+        len(provider_pages) == len(layout_pages)
+        and bool(provider_pages)
+        and _consecutive(provider_numbers)
+        and _consecutive(layout_numbers)
+    )
+    if complete_consecutive_sequences:
+        return [
+            _PageBinding(
+                page=page,
+                scan_page=scan_page,
+                warning=(
+                    "provider page "
+                    f"{page.number} mapped by complete ordinal sequence to layout page "
+                    f"{scan_page.number}"
+                ),
+            )
+            for page, scan_page in zip(provider_pages, layout_pages, strict=True)
+        ]
+
+    return [
+        _PageBinding(page=page, scan_page=scan_pages[page.number])
+        for page in provider_pages
+        if page.number in scan_pages
+    ]
+
+
+def _consecutive(numbers: Sequence[int]) -> bool:
+    return all(right == left + 1 for left, right in zip(numbers, numbers[1:], strict=False))
 
 
 def _provider_name(document: Document, hint: str | None) -> str:
