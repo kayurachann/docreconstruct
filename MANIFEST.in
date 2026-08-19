@@ -1,0 +1,10 @@
+include CONTRIBUTING.md
+include .dockerignore
+include Dockerfile
+include SECURITY.md
+include docker-compose.yml
+recursive-include examples *.json *.md *.py
+recursive-include docs *.md
+recursive-include schemas *.json *.md
+recursive-include tests *.py
+recursive-include tests/fixtures *.json

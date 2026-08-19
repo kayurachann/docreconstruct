@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "OutputFormat": {
+      "description": "Formats exposed by the v0.1 renderer surface.",
+      "enum": [
+        "json",
+        "html",
+        "docx",
+        "markdown"
+      ],
+      "title": "OutputFormat",
+      "type": "string"
+    },
+    "ReconstructionMode": {
+      "description": "How the pipeline balances appearance and native editability.",
+      "enum": [
+        "visual",
+        "fidelity",
+        "replica",
+        "balanced",
+        "semantic",
+        "pixel-perfect",
+        "editable",
+        "data",
+        "archival",
+        "presentation"
+      ],
+      "title": "ReconstructionMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Options encoded in the ``options`` field of a comparison upload.",
+  "properties": {
+    "output_format": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OutputFormat"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "profile": {
+      "$ref": "#/$defs/ReconstructionMode",
+      "default": "balanced"
+    }
+  },
+  "title": "CompareOptions",
+  "type": "object"
+}

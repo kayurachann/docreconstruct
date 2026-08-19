@@ -1,0 +1,369 @@
+{
+  "DocumentMetadata": {"Pages": 1},
+  "AnalyzeDocumentModelVersion": "1.0-test",
+  "Blocks": [
+    {
+      "BlockType": "PAGE",
+      "Id": "analysis-page-1",
+      "Page": 1,
+      "Geometry": {"BoundingBox": {"Width": 1.0, "Height": 1.0, "Left": 0.0, "Top": 0.0}},
+      "Relationships": [
+        {
+          "Type": "CHILD",
+          "Ids": [
+            "line-title",
+            "table-1",
+            "key-name",
+            "value-name",
+            "signature-1",
+            "query-1",
+            "query-result-1",
+            "selection-1",
+            "layout-title",
+            "layout-header",
+            "layout-section",
+            "layout-text",
+            "layout-list",
+            "layout-figure",
+            "layout-table",
+            "layout-key-value",
+            "layout-footer",
+            "layout-page-number"
+          ]
+        }
+      ]
+    },
+    {
+      "BlockType": "LINE",
+      "Id": "line-title",
+      "Page": 1,
+      "Text": "Sample Invoice",
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.05, "Left": 0.1, "Top": 0.05}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-sample", "word-invoice"]}]
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-sample",
+      "Page": 1,
+      "Text": "Sample",
+      "TextType": "PRINTED",
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.18, "Height": 0.05, "Left": 0.1, "Top": 0.05}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-invoice",
+      "Page": 1,
+      "Text": "Invoice",
+      "TextType": "PRINTED",
+      "Confidence": 98.0,
+      "Geometry": {"BoundingBox": {"Width": 0.18, "Height": 0.05, "Left": 0.3, "Top": 0.05}}
+    },
+    {
+      "BlockType": "TABLE",
+      "Id": "table-1",
+      "Page": 1,
+      "Confidence": 96.0,
+      "EntityTypes": ["STRUCTURED_TABLE"],
+      "Geometry": {"BoundingBox": {"Width": 0.8, "Height": 0.3, "Left": 0.1, "Top": 0.2}},
+      "Relationships": [
+        {"Type": "CHILD", "Ids": ["cell-11", "cell-12", "cell-21", "cell-22"]},
+        {"Type": "MERGED_CELL", "Ids": ["merged-cell-1"]},
+        {"Type": "TABLE_TITLE", "Ids": ["table-title-1"]},
+        {"Type": "TABLE_FOOTER", "Ids": ["table-footer-1"]}
+      ]
+    },
+    {
+      "BlockType": "CELL",
+      "Id": "cell-11",
+      "Page": 1,
+      "Confidence": 95.0,
+      "RowIndex": 1,
+      "ColumnIndex": 1,
+      "RowSpan": 1,
+      "ColumnSpan": 1,
+      "EntityTypes": ["COLUMN_HEADER"],
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.1, "Left": 0.1, "Top": 0.2}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-item"]}]
+    },
+    {
+      "BlockType": "CELL",
+      "Id": "cell-12",
+      "Page": 1,
+      "Confidence": 95.0,
+      "RowIndex": 1,
+      "ColumnIndex": 2,
+      "RowSpan": 1,
+      "ColumnSpan": 1,
+      "EntityTypes": ["COLUMN_HEADER"],
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.1, "Left": 0.5, "Top": 0.2}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-amount"]}]
+    },
+    {
+      "BlockType": "CELL",
+      "Id": "cell-21",
+      "Page": 1,
+      "Confidence": 94.0,
+      "RowIndex": 2,
+      "ColumnIndex": 1,
+      "RowSpan": 1,
+      "ColumnSpan": 1,
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.1, "Left": 0.1, "Top": 0.3}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-widget"]}]
+    },
+    {
+      "BlockType": "CELL",
+      "Id": "cell-22",
+      "Page": 1,
+      "Confidence": 94.0,
+      "RowIndex": 2,
+      "ColumnIndex": 2,
+      "RowSpan": 1,
+      "ColumnSpan": 1,
+      "EntityTypes": ["TABLE_SUMMARY"],
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.1, "Left": 0.5, "Top": 0.3}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-42"]}]
+    },
+    {
+      "BlockType": "MERGED_CELL",
+      "Id": "merged-cell-1",
+      "Page": 1,
+      "Confidence": 93.0,
+      "RowIndex": 1,
+      "ColumnIndex": 1,
+      "RowSpan": 1,
+      "ColumnSpan": 2,
+      "EntityTypes": ["TABLE_TITLE"],
+      "Geometry": {"BoundingBox": {"Width": 0.8, "Height": 0.1, "Left": 0.1, "Top": 0.2}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["cell-11", "cell-12"]}]
+    },
+    {
+      "BlockType": "TABLE_TITLE",
+      "Id": "table-title-1",
+      "Page": 1,
+      "Confidence": 97.0,
+      "Geometry": {"BoundingBox": {"Width": 0.3, "Height": 0.04, "Left": 0.1, "Top": 0.15}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-table-title"]}]
+    },
+    {
+      "BlockType": "TABLE_FOOTER",
+      "Id": "table-footer-1",
+      "Page": 1,
+      "Confidence": 92.0,
+      "Geometry": {"BoundingBox": {"Width": 0.3, "Height": 0.04, "Left": 0.1, "Top": 0.51}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-table-footer"]}]
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-item",
+      "Page": 1,
+      "Text": "Item",
+      "TextType": "PRINTED",
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.1, "Height": 0.04, "Left": 0.12, "Top": 0.23}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-amount",
+      "Page": 1,
+      "Text": "Amount",
+      "TextType": "PRINTED",
+      "Confidence": 98.0,
+      "Geometry": {"BoundingBox": {"Width": 0.13, "Height": 0.04, "Left": 0.52, "Top": 0.23}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-widget",
+      "Page": 1,
+      "Text": "Widget",
+      "TextType": "PRINTED",
+      "Confidence": 98.0,
+      "Geometry": {"BoundingBox": {"Width": 0.13, "Height": 0.04, "Left": 0.12, "Top": 0.33}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-42",
+      "Page": 1,
+      "Text": "42",
+      "TextType": "HANDWRITING",
+      "Confidence": 89.0,
+      "Geometry": {"BoundingBox": {"Width": 0.06, "Height": 0.04, "Left": 0.52, "Top": 0.33}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-table-title",
+      "Page": 1,
+      "Text": "Charges",
+      "TextType": "PRINTED",
+      "Confidence": 98.0,
+      "Geometry": {"BoundingBox": {"Width": 0.15, "Height": 0.04, "Left": 0.1, "Top": 0.15}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-table-footer",
+      "Page": 1,
+      "Text": "USD",
+      "TextType": "PRINTED",
+      "Confidence": 97.0,
+      "Geometry": {"BoundingBox": {"Width": 0.08, "Height": 0.04, "Left": 0.1, "Top": 0.51}}
+    },
+    {
+      "BlockType": "KEY_VALUE_SET",
+      "Id": "key-name",
+      "Page": 1,
+      "Confidence": 91.0,
+      "EntityTypes": ["KEY"],
+      "Geometry": {"BoundingBox": {"Width": 0.15, "Height": 0.05, "Left": 0.1, "Top": 0.6}},
+      "Relationships": [
+        {"Type": "VALUE", "Ids": ["value-name"]},
+        {"Type": "CHILD", "Ids": ["word-name"]}
+      ]
+    },
+    {
+      "BlockType": "KEY_VALUE_SET",
+      "Id": "value-name",
+      "Page": 1,
+      "Confidence": 91.0,
+      "EntityTypes": ["VALUE"],
+      "Geometry": {"BoundingBox": {"Width": 0.2, "Height": 0.05, "Left": 0.3, "Top": 0.6}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-ada"]}]
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-name",
+      "Page": 1,
+      "Text": "Name:",
+      "TextType": "PRINTED",
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.12, "Height": 0.05, "Left": 0.1, "Top": 0.6}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-ada",
+      "Page": 1,
+      "Text": "Ada",
+      "TextType": "HANDWRITING",
+      "Confidence": 95.0,
+      "Geometry": {"BoundingBox": {"Width": 0.1, "Height": 0.05, "Left": 0.3, "Top": 0.6}}
+    },
+    {
+      "BlockType": "SIGNATURE",
+      "Id": "signature-1",
+      "Page": 1,
+      "Confidence": 88.0,
+      "Geometry": {"BoundingBox": {"Width": 0.25, "Height": 0.08, "Left": 0.6, "Top": 0.6}}
+    },
+    {
+      "BlockType": "QUERY",
+      "Id": "query-1",
+      "Page": 1,
+      "Query": {"Text": "Who is the customer?", "Alias": "CUSTOMER", "Pages": ["1"]},
+      "Relationships": [{"Type": "ANSWER", "Ids": ["query-result-1"]}]
+    },
+    {
+      "BlockType": "QUERY_RESULT",
+      "Id": "query-result-1",
+      "Page": 1,
+      "Text": "Ada",
+      "Confidence": 97.0,
+      "Geometry": {"BoundingBox": {"Width": 0.1, "Height": 0.05, "Left": 0.3, "Top": 0.6}}
+    },
+    {
+      "BlockType": "SELECTION_ELEMENT",
+      "Id": "selection-1",
+      "Page": 1,
+      "SelectionStatus": "SELECTED",
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.03, "Height": 0.03, "Left": 0.1, "Top": 0.7}}
+    },
+    {
+      "BlockType": "WORD",
+      "Id": "word-page-number",
+      "Page": 1,
+      "Text": "1",
+      "TextType": "PRINTED",
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.02, "Height": 0.03, "Left": 0.49, "Top": 0.95}}
+    },
+    {
+      "BlockType": "LAYOUT_TITLE",
+      "Id": "layout-title",
+      "Page": 1,
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.05, "Left": 0.1, "Top": 0.05}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["line-title"]}]
+    },
+    {
+      "BlockType": "LAYOUT_HEADER",
+      "Id": "layout-header",
+      "Page": 1,
+      "Confidence": 96.0,
+      "Geometry": {"BoundingBox": {"Width": 0.2, "Height": 0.04, "Left": 0.7, "Top": 0.02}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-invoice"]}]
+    },
+    {
+      "BlockType": "LAYOUT_SECTION_HEADER",
+      "Id": "layout-section",
+      "Page": 1,
+      "Confidence": 95.0,
+      "Geometry": {"BoundingBox": {"Width": 0.3, "Height": 0.04, "Left": 0.1, "Top": 0.15}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["table-title-1"]}]
+    },
+    {
+      "BlockType": "LAYOUT_TEXT",
+      "Id": "layout-text",
+      "Page": 1,
+      "Confidence": 94.0,
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.05, "Left": 0.1, "Top": 0.6}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["key-name", "value-name"]}]
+    },
+    {
+      "BlockType": "LAYOUT_LIST",
+      "Id": "layout-list",
+      "Page": 1,
+      "Confidence": 93.0,
+      "Geometry": {"BoundingBox": {"Width": 0.3, "Height": 0.08, "Left": 0.1, "Top": 0.72}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["line-title"]}]
+    },
+    {
+      "BlockType": "LAYOUT_FIGURE",
+      "Id": "layout-figure",
+      "Page": 1,
+      "Confidence": 92.0,
+      "Geometry": {"BoundingBox": {"Width": 0.2, "Height": 0.15, "Left": 0.65, "Top": 0.72}}
+    },
+    {
+      "BlockType": "LAYOUT_TABLE",
+      "Id": "layout-table",
+      "Page": 1,
+      "Confidence": 96.0,
+      "Geometry": {"BoundingBox": {"Width": 0.8, "Height": 0.3, "Left": 0.1, "Top": 0.2}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["table-1"]}]
+    },
+    {
+      "BlockType": "LAYOUT_KEY_VALUE",
+      "Id": "layout-key-value",
+      "Page": 1,
+      "Confidence": 95.0,
+      "Geometry": {"BoundingBox": {"Width": 0.4, "Height": 0.05, "Left": 0.1, "Top": 0.6}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["key-name", "value-name"]}]
+    },
+    {
+      "BlockType": "LAYOUT_FOOTER",
+      "Id": "layout-footer",
+      "Page": 1,
+      "Confidence": 94.0,
+      "Geometry": {"BoundingBox": {"Width": 0.15, "Height": 0.04, "Left": 0.1, "Top": 0.92}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["table-footer-1"]}]
+    },
+    {
+      "BlockType": "LAYOUT_PAGE_NUMBER",
+      "Id": "layout-page-number",
+      "Page": 1,
+      "Confidence": 99.0,
+      "Geometry": {"BoundingBox": {"Width": 0.02, "Height": 0.03, "Left": 0.49, "Top": 0.95}},
+      "Relationships": [{"Type": "CHILD", "Ids": ["word-page-number"]}]
+    }
+  ]
+}

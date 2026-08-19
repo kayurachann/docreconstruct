@@ -1,0 +1,49 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+
+# Build output
+build/
+build-check/
+build-*/
+dist/
+*.egg-info/
+*.egg
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Generated document artifacts
+output/
+outputs/
+data/
+tmp/
+*.diff.png
+
+# Model/provider caches are intentionally local
+.cache/
+models/

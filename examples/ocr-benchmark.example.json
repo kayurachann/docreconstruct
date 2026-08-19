@@ -1,0 +1,53 @@
+{
+  "schema_version": "0.1",
+  "profile": "balanced",
+  "seed": 42,
+  "configuration": {
+    "suite": "replace-with-your-licensed-corpus"
+  },
+  "extraction": {
+    "mode": "cloud",
+    "providers": [
+      "mistral_ocr",
+      "azure_document_intelligence",
+      "mathpix"
+    ],
+    "features": {
+      "ensemble": false,
+      "maximum_providers": 3,
+      "formulas": true,
+      "tables": true
+    }
+  },
+  "cases": [
+    {
+      "id": "warped-handwritten-form",
+      "source": "fixtures/warped-handwritten-form.jpg",
+      "ground_truth": "truth/warped-handwritten-form.md",
+      "features": {
+        "languages": [
+          "vi"
+        ],
+        "handwriting": true,
+        "distorted_photo": true
+      },
+      "tags": {
+        "scripts": [
+          "Latn"
+        ],
+        "document_types": [
+          "form"
+        ],
+        "degradations": [
+          "perspective",
+          "shadow"
+        ],
+        "content_kinds": [
+          "printed",
+          "handwriting",
+          "table"
+        ]
+      }
+    }
+  ]
+}

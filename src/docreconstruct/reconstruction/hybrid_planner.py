@@ -1,0 +1,994 @@
+"""Deterministic alignment of Markdown blocks to raster scan pages."""
+
+from __future__ import annotations
+
+import math
+import re
+import statistics
+from collections.abc import Sequence
+from functools import cache
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from docreconstruct.ir import ElementStyle
+from docreconstruct.reconstruction.asset_matching import AssetMatch
+from docreconstruct.reconstruction.evidence_matching import EvidenceMatch
+from docreconstruct.reconstruction.markdown_content import (
+    MarkdownBlock,
+    MarkdownBlockKind,
+    MarkdownContent,
+)
+from docreconstruct.reconstruction.math_omml import equation_row_count, latex_visible_text
+from docreconstruct.reconstruction.scan_layout import (
+    PixelBox,
+    ScanDocumentLayout,
+    ScanPageLayout,
+)
+from docreconstruct.reconstruction.table_matching import TableMatch
+
+
+class HybridBlockPlacement(BaseModel):
+    """Assignment of one editable content block to one source page."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    block_id: str
+    block_index: int = Field(ge=0)
+    page_number: int = Field(ge=1)
+    source_bbox: PixelBox | None = None
+    source_rows: list[PixelBox] = Field(default_factory=list)
+    source_gap_before: int | None = Field(default=None, ge=0)
+    match_score: float | None = None
+    geometry_source: str = "content_estimate"
+    evidence_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence_providers: tuple[str, ...] = ()
+    evidence_element_ids: tuple[str, ...] = ()
+    evidence_style: ElementStyle | None = None
+    evidence_conflict: bool = False
+    evidence_warnings: list[str] = Field(default_factory=list)
+
+
+class HybridPagePlan(BaseModel):
+    """Page-sized render plan with source geometry retained."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    number: int = Field(ge=1)
+    pdf_width: float = Field(gt=0)
+    pdf_height: float = Field(gt=0)
+    raster_width: int = Field(gt=0)
+    raster_height: int = Field(gt=0)
+    content_bbox: PixelBox
+    line_pitch: float = Field(gt=0)
+    placements: list[HybridBlockPlacement]
+
+
+class HybridLayoutPlan(BaseModel):
+    """Renderer-neutral plan shared by DOCX/XLSX/PPTX exporters."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    content_source: str
+    layout_source: str
+    pages: list[HybridPagePlan]
+    warnings: list[str] = Field(default_factory=list)
+
+
+def equation_layout_units(latex: str) -> float:
+    """Estimate vertical source-line units for one editable display equation."""
+
+    rows = equation_row_count(latex)
+    tall = bool(re.search(r"\\(?:frac|dfrac|tfrac|int|sum|prod|sqrt)\b", latex))
+    per_row = 1.62 if tall else 1.18
+    return max(1.25, rows * per_row)
+
+
+def _visible_text(text: str) -> str:
+    return text.replace("<eq>", "").replace("</eq>", "").replace("$", "").replace("\\%", "%")
+
+
+def _project_inline_math(text: str) -> str:
+    return re.sub(r"\$([^$]+)\$", lambda match: latex_visible_text(match.group(1)), text)
+
+
+def _merge_visual_rows(rows: list[PixelBox], line_pitch: float) -> list[PixelBox]:
+    """Merge glyph fragments that describe the same visual baseline."""
+
+    center_tolerance = max(3.0, line_pitch * 0.45)
+    merged: list[PixelBox] = []
+    for box in sorted(rows, key=lambda item: (item.y0, item.x0)):
+        previous_center = (merged[-1].y0 + merged[-1].y1) / 2.0 if merged else float("-inf")
+        center = (box.y0 + box.y1) / 2.0
+        if merged and abs(center - previous_center) <= center_tolerance:
+            previous = merged[-1]
+            merged[-1] = PixelBox(
+                x0=min(previous.x0, box.x0),
+                y0=min(previous.y0, box.y0),
+                x1=max(previous.x1, box.x1),
+                y1=max(previous.y1, box.y1),
+            )
+        else:
+            merged.append(box)
+    return merged
+
+
+def _page_column_boxes(page: ScanPageLayout) -> list[PixelBox]:
+    """Return validated left-to-right column boxes from scan metadata."""
+
+    raw_count = page.metadata.get("column_count")
+    raw_boxes = page.metadata.get("column_boxes")
+    if not isinstance(raw_count, int) or raw_count < 2 or not isinstance(raw_boxes, list):
+        return []
+    boxes: list[PixelBox] = []
+    for raw_box in raw_boxes:
+        if not isinstance(raw_box, list) or len(raw_box) != 4:
+            return []
+        try:
+            box = PixelBox(x0=raw_box[0], y0=raw_box[1], x1=raw_box[2], y1=raw_box[3])
+        except (TypeError, ValueError):
+            return []
+        boxes.append(box)
+    if len(boxes) != raw_count or not 2 <= len(boxes) <= 4:
+        return []
+    boxes.sort(key=lambda item: item.x0)
+    if any(left.x1 > right.x0 for left, right in zip(boxes, boxes[1:], strict=False)):
+        return []
+    return boxes
+
+
+def _line_is_excluded(box: PixelBox, anchors: list[PixelBox]) -> bool:
+    return any(
+        (
+            max(0, min(box.y1, anchor.y1) - max(box.y0, anchor.y0)) / max(1, box.height) >= 0.55
+            and max(0, min(box.x1, anchor.x1) - max(box.x0, anchor.x0)) / max(1, box.width) >= 0.55
+        )
+        for anchor in anchors
+    )
+
+
+def source_row_reading_order(
+    page: ScanPageLayout,
+    rows: Sequence[PixelBox],
+) -> list[PixelBox]:
+    """Order source rows by page flow, including newspaper column transitions."""
+
+    columns = _page_column_boxes(page)
+    if not columns:
+        return sorted(rows, key=lambda box: (box.y0, box.x0))
+    body_top = min(column.y0 for column in columns)
+    body_bottom = max(column.y1 for column in columns)
+
+    def key(box: PixelBox) -> tuple[int, int, int]:
+        center_y = (box.y0 + box.y1) / 2.0
+        if center_y < body_top - page.line_pitch * 0.25:
+            return (-1, box.y0, box.x0)
+        overlaps = [max(0, min(box.x1, column.x1) - max(box.x0, column.x0)) for column in columns]
+        if max(overlaps, default=0) > 0:
+            column_index = max(range(len(columns)), key=overlaps.__getitem__)
+            return (column_index, box.y0, box.x0)
+        if center_y > body_bottom + page.line_pitch * 0.25:
+            return (len(columns), box.y0, box.x0)
+        center_x = (box.x0 + box.x1) / 2.0
+        column_index = min(
+            range(len(columns)),
+            key=lambda index: abs(center_x - (columns[index].x0 + columns[index].x1) / 2.0),
+        )
+        return (column_index, box.y0, box.x0)
+
+    return sorted(rows, key=key)
+
+
+def visual_text_row_groups(
+    page: ScanPageLayout,
+    anchors: list[PixelBox] | None = None,
+) -> list[list[PixelBox]]:
+    """Return OCR-free logical rows in source reading-order groups.
+
+    Fraction bars and glyph components are often emitted as separate scan-line
+    hypotheses.  Grouping nearby hypotheses by the measured page rhythm gives
+    renderers and validators a common geometric unit without recognizing or
+    changing the source text.  For detected newspaper layouts, a full-width
+    prefix is followed by one group per body column in left-to-right order.
+    Keeping those groups separate prevents a content block from borrowing rows
+    across a gutter merely because the baselines share the same y coordinate.
+    """
+
+    excluded = anchors or []
+    lines = sorted(page.text_lines, key=lambda item: (item.bbox.y0, item.bbox.x0))
+    column_boxes = _page_column_boxes(page)
+    if not column_boxes:
+        visible_segments = [
+            segment
+            for line in lines
+            for segment in (line.segments or [line.bbox])
+            if not _line_is_excluded(segment, excluded)
+        ]
+        return [_merge_visual_rows(visible_segments, page.line_pitch)] if visible_segments else [[]]
+
+    tolerance = page.line_pitch * 0.25
+    body_top = min(box.y0 for box in column_boxes)
+    raw_bottoms = page.metadata.get("column_content_bottoms")
+    bottoms = [box.y1 for box in column_boxes]
+    if isinstance(raw_bottoms, list) and len(raw_bottoms) == len(column_boxes):
+        for index, raw_bottom in enumerate(raw_bottoms):
+            if isinstance(raw_bottom, int):
+                bottoms[index] = min(column_boxes[index].y1, max(body_top, raw_bottom))
+    maximum_bottom = max(bottoms)
+    prefix: list[PixelBox] = []
+    suffix: list[PixelBox] = []
+    column_rows: list[list[PixelBox]] = [[] for _ in column_boxes]
+    median_column_width = statistics.median(box.width for box in column_boxes)
+    anchored_prefix_bottom = max(
+        (anchor.y1 for anchor in excluded if anchor.y0 <= body_top + page.line_pitch),
+        default=body_top,
+    )
+    spanning_deadline = max(body_top, anchored_prefix_bottom) + page.line_pitch * 4.0
+    for line in lines:
+        segments = [
+            segment
+            for segment in (line.segments or [line.bbox])
+            if not _line_is_excluded(segment, excluded)
+        ]
+        if not segments:
+            continue
+        visible_bbox = PixelBox(
+            x0=min(segment.x0 for segment in segments),
+            y0=min(segment.y0 for segment in segments),
+            x1=max(segment.x1 for segment in segments),
+            y1=max(segment.y1 for segment in segments),
+        )
+        center = (visible_bbox.y0 + visible_bbox.y1) / 2.0
+        if center < body_top - tolerance:
+            prefix.append(visible_bbox)
+            continue
+        if center > maximum_bottom + tolerance:
+            suffix.append(visible_bbox)
+            continue
+        # Newspaper headlines and standfirsts can span two body columns just
+        # below a full-width masthead.  They are distinguished from ordinary
+        # simultaneous column baselines by their tall ink envelope; width
+        # alone is insufficient because a normal three-column row also spans
+        # the page in the detector's union bbox.
+        if (
+            center <= spanning_deadline
+            and visible_bbox.height >= page.line_pitch * 1.28
+            and visible_bbox.width >= median_column_width * 1.45
+        ):
+            prefix.append(visible_bbox)
+            continue
+        for index, column in enumerate(column_boxes):
+            if center > bottoms[index] + tolerance:
+                continue
+            clipped: list[PixelBox] = []
+            for segment in segments:
+                x0 = max(segment.x0, column.x0)
+                x1 = min(segment.x1, column.x1)
+                if x1 - x0 < 2:
+                    continue
+                clipped.append(
+                    PixelBox(
+                        x0=x0,
+                        y0=segment.y0,
+                        x1=x1,
+                        y1=segment.y1,
+                    )
+                )
+            if clipped:
+                column_rows[index].extend(clipped)
+
+    groups: list[list[PixelBox]] = []
+    merged_prefix = _merge_visual_rows(prefix, page.line_pitch)
+    if merged_prefix:
+        groups.append(merged_prefix)
+    detached_suffix: list[PixelBox] = []
+    for rows in column_rows:
+        merged = _merge_visual_rows(rows, page.line_pitch)
+        if not merged:
+            continue
+        # A folio, handwritten identifier, or isolated bottom ornament often
+        # extends one column's measured content bottom.  Detach only a short
+        # trailing tail after a conspicuously large gap; ordinary section
+        # spacing inside the column remains part of the body flow.
+        for index in range(len(merged) - 1, 0, -1):
+            gap = merged[index].y0 - merged[index - 1].y1
+            tail_length = len(merged) - index
+            if gap > page.line_pitch * 1.8 and tail_length <= max(2, math.ceil(len(merged) * 0.15)):
+                detached_suffix.extend(merged[index:])
+                merged = merged[:index]
+                break
+        if merged:
+            groups.append(merged)
+    suffix.extend(detached_suffix)
+    merged_suffix = _merge_visual_rows(suffix, page.line_pitch)
+    if merged_suffix:
+        groups.append(merged_suffix)
+    return groups
+
+
+def visual_text_rows(
+    page: ScanPageLayout,
+    anchors: list[PixelBox] | None = None,
+) -> list[PixelBox]:
+    """Return logical source rows flattened in editable reading order."""
+
+    return [row for group in visual_text_row_groups(page, anchors) for row in group]
+
+
+def _snap_evidence_rows_to_scan(
+    blocks: list[MarkdownBlock],
+    placements: list[HybridBlockPlacement],
+    page: ScanPageLayout,
+) -> list[HybridBlockPlacement]:
+    """Replace coarse provider boxes with OCR-free source line geometry.
+
+    Provider JSON commonly stores one rectangle for a many-line paragraph.
+    Keeping that rectangle as a single ``source_row`` makes native leading and
+    QA coverage misleading.  The provider still decides which Markdown block
+    owns the region; the original raster supplies the actual row rhythm.
+    """
+
+    visual_anchors = [
+        placement.source_bbox
+        for block, placement in zip(blocks, placements, strict=True)
+        if placement.source_bbox is not None
+        and block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+    ]
+    scan_rows = source_row_reading_order(page, visual_text_rows(page, visual_anchors))
+    if not scan_rows:
+        return placements
+
+    def matches(row: PixelBox, region: PixelBox) -> bool:
+        horizontal = max(0, min(row.x1, region.x1) - max(row.x0, region.x0))
+        if horizontal / max(1, min(row.width, region.width)) < 0.30:
+            return False
+        vertical = max(0, min(row.y1, region.y1) - max(row.y0, region.y0))
+        row_center = (row.y0 + row.y1) / 2.0
+        return (
+            vertical / max(1, row.height) >= 0.20
+            or region.y0 - page.line_pitch * 0.20
+            <= row_center
+            <= region.y1 + page.line_pitch * 0.20
+        )
+
+    result: list[HybridBlockPlacement] = []
+    for block, placement in zip(blocks, placements, strict=True):
+        if (
+            placement.source_bbox is None
+            or not placement.evidence_providers
+            or block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+        ):
+            result.append(placement)
+            continue
+        regions = placement.source_rows or [placement.source_bbox]
+        snapped = [row for row in scan_rows if any(matches(row, region) for region in regions)]
+        result.append(
+            placement.model_copy(update={"source_rows": snapped}) if snapped else placement
+        )
+    return result
+
+
+def _desired_row_count(block: MarkdownBlock, characters_per_line: float) -> int:
+    if block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}:
+        return 0
+    if block.kind is MarkdownBlockKind.RULE:
+        return 1
+    if block.kind is MarkdownBlockKind.EQUATION:
+        return equation_row_count(block.text)
+    if block.kind is MarkdownBlockKind.CODE:
+        return max(1, block.text.count("\n") + 1)
+    if block.kind is MarkdownBlockKind.HEADING:
+        return 1
+    visible = _project_inline_math(block.text)
+    return max(1, math.ceil(len(visible) / max(1.0, characters_per_line)))
+
+
+def _assign_text_geometry(
+    blocks: list[MarkdownBlock],
+    placements: list[HybridBlockPlacement],
+    page: ScanPageLayout,
+) -> list[HybridBlockPlacement]:
+    """Map editable blocks to source rows without recognizing or changing text."""
+
+    anchored = [
+        row
+        for placement in placements
+        if placement.source_bbox is not None
+        for row in (placement.source_rows or [placement.source_bbox])
+    ]
+    row_groups = visual_text_row_groups(page, anchored)
+    rows = [row for group in row_groups for row in group]
+    column_boxes = _page_column_boxes(page)
+    multi_column = bool(column_boxes)
+    eligible = [
+        (block, placement)
+        for block, placement in zip(blocks, placements, strict=True)
+        if placement.source_bbox is None
+        and block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+    ]
+    units: list[list[MarkdownBlock]] = []
+    cursor = 0
+    while cursor < len(eligible):
+        block = eligible[cursor][0]
+        if block.kind is not MarkdownBlockKind.OPTION:
+            units.append([block])
+            cursor += 1
+            continue
+        end = cursor + 1
+        while end < len(eligible) and eligible[end][0].kind is MarkdownBlockKind.OPTION:
+            end += 1
+        units.append([item[0] for item in eligible[cursor:end]])
+        cursor = end
+    if not rows or not units:
+        return placements
+    characters_per_line = max(
+        24.0,
+        page.content_bbox.width / max(1.0, page.line_pitch * 0.42),
+    )
+
+    def desired_counts(
+        segment_units: list[list[MarkdownBlock]],
+        row_characters_per_line: float,
+    ) -> list[int]:
+        counts: list[int] = []
+        for unit in segment_units:
+            if unit[0].kind is not MarkdownBlockKind.OPTION:
+                counts.append(_desired_row_count(unit[0], row_characters_per_line))
+                continue
+            longest = max(len(_project_inline_math(block.text)) for block in unit)
+            columns = (
+                4
+                if len(unit) == 4 and longest <= 55
+                else 2
+                if len(unit) == 4 and longest <= 115
+                else 1
+            )
+            counts.append(max(1, math.ceil(len(unit) / columns)))
+        return counts
+
+    assigned: dict[str, tuple[list[PixelBox], int]] = {}
+
+    def assign_segment(
+        segment_units: list[list[MarkdownBlock]],
+        segment_rows: list[PixelBox],
+        *,
+        previous_bottom: int,
+        row_characters_per_line: float,
+        consume_all_rows: bool,
+    ) -> None:
+        if not segment_units or not segment_rows:
+            return
+        counts = desired_counts(segment_units, row_characters_per_line)
+        flexible = [
+            index
+            for index, unit in enumerate(segment_units)
+            if unit[0].kind
+            not in {MarkdownBlockKind.EQUATION, MarkdownBlockKind.HEADING, MarkdownBlockKind.CODE}
+        ]
+        # Extra visual rows within the same anchor-bounded interval may be real
+        # wrapping and remain useful evidence.  They must never be borrowed
+        # from the other side of an image/table anchor.
+        expected = sum(counts)
+        expansion_limit = len(segment_rows)
+        if not consume_all_rows and len(segment_rows) > expected:
+            # Column detectors can retain an isolated rule, folio, or handwritten
+            # annotation as a row.  A modest wrapping correction is useful, but
+            # consuming an arbitrarily large surplus would stretch editable text
+            # across that noise and often into the following column.
+            allowance = max(2, math.ceil(expected * 0.40))
+            expansion_limit = min(len(segment_rows), expected + allowance)
+        while sum(counts) < expansion_limit and flexible:
+            index = max(
+                flexible,
+                key=lambda item: (
+                    sum(len(_project_inline_math(block.text)) for block in segment_units[item])
+                    / counts[item]
+                ),
+            )
+            counts[index] += 1
+        while sum(counts) > len(segment_rows):
+            reducible = [index for index in flexible if counts[index] > 1]
+            if not reducible and not consume_all_rows:
+                reducible = [index for index, count in enumerate(counts) if count > 1]
+            if not reducible:
+                return
+            index = min(
+                reducible,
+                key=lambda item: (
+                    sum(len(_project_inline_math(block.text)) for block in segment_units[item])
+                    / counts[item]
+                ),
+            )
+            counts[index] -= 1
+        if consume_all_rows and sum(counts) != len(segment_rows):
+            return
+        row_cursor = 0
+        bottom = previous_bottom
+        for unit, count in zip(segment_units, counts, strict=True):
+            block_rows = segment_rows[row_cursor : row_cursor + count]
+            row_cursor += count
+            gap = max(0, block_rows[0].y0 - bottom)
+            for member_index, block in enumerate(unit):
+                assigned[block.id] = (block_rows, gap if member_index == 0 else 0)
+            bottom = block_rows[-1].y1
+
+    def group_characters_per_line(group: list[PixelBox]) -> float:
+        if not multi_column:
+            return characters_per_line
+        for column in column_boxes:
+            if all(row.x0 >= column.x0 and row.x1 <= column.x1 for row in group):
+                return max(
+                    18.0,
+                    column.width / max(1.0, page.line_pitch * 0.42),
+                )
+        return characters_per_line
+
+    def partition_units(
+        segment_units: list[list[MarkdownBlock]],
+        segment_groups: list[list[PixelBox]],
+    ) -> list[tuple[list[list[MarkdownBlock]], list[PixelBox], float]]:
+        """Split block units across source groups without crossing a gutter."""
+
+        populated = [group for group in segment_groups if group]
+        if not populated:
+            return []
+        if len(populated) == 1 or not multi_column:
+            return [(segment_units, populated[0], group_characters_per_line(populated[0]))]
+        group_characters = [group_characters_per_line(group) for group in populated]
+        unit_count = len(segment_units)
+        group_count = len(populated)
+
+        @cache
+        def solve(group_index: int, start: int) -> tuple[float, tuple[int, ...]]:
+            if group_index == group_count:
+                return (0.0, ()) if start == unit_count else (math.inf, ())
+            rows_in_group = len(populated[group_index])
+            best_cost = math.inf
+            best_boundaries: tuple[int, ...] = ()
+            for end in range(start, unit_count + 1):
+                candidate_units = segment_units[start:end]
+                if candidate_units:
+                    counts = desired_counts(
+                        candidate_units,
+                        group_characters[group_index],
+                    )
+                    desired = sum(counts)
+                    fit = ((desired - rows_in_group) / max(1, rows_in_group)) ** 2
+                    if len(candidate_units) > rows_in_group:
+                        fit += 100.0 + (len(candidate_units) - rows_in_group) * 10.0
+                    if desired > rows_in_group * 1.6:
+                        fit += (desired / max(1, rows_in_group) - 1.6) * 2.5
+                    first = candidate_units[0][0]
+                    if first.starts_group or first.kind is MarkdownBlockKind.HEADING:
+                        fit -= 0.035
+                else:
+                    # Empty groups are legal: a false-positive column or an
+                    # isolated source annotation must not disable all geometry.
+                    fit = 0.75 + min(0.75, rows_in_group / 20.0)
+                future, boundaries = solve(group_index + 1, end)
+                total = fit + future
+                if total < best_cost:
+                    best_cost = total
+                    best_boundaries = (end, *boundaries)
+            return best_cost, best_boundaries
+
+        _, boundaries = solve(0, 0)
+        if len(boundaries) != group_count:
+            return []
+        result: list[tuple[list[list[MarkdownBlock]], list[PixelBox], float]] = []
+        start = 0
+        for group, row_characters, end in zip(
+            populated,
+            group_characters,
+            boundaries,
+            strict=True,
+        ):
+            result.append((segment_units[start:end], group, row_characters))
+            start = end
+        return result
+
+    # Partition source rows by anchored objects *and* block order.  The former
+    # implementation removed figure/table rows, then globally reassigned the
+    # remaining lines.  A paragraph immediately before a figure could consume
+    # one line above and another below it, creating a giant Word line box.
+    anchors_by_index = sorted(
+        (
+            (block.index, placement.source_bbox)
+            for block, placement in zip(blocks, placements, strict=True)
+            if placement.source_bbox is not None
+            and block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+        ),
+        key=lambda item: item[0],
+    )
+    unit_cursor = 0
+    lower_y = page.content_bbox.y0
+    used_rows: set[tuple[int, int, int, int]] = set()
+    for anchor_index, optional_anchor in [*anchors_by_index, (math.inf, None)]:
+        segment_units: list[list[MarkdownBlock]] = []
+        while unit_cursor < len(units) and units[unit_cursor][0].index < anchor_index:
+            segment_units.append(units[unit_cursor])
+            unit_cursor += 1
+        upper_y = optional_anchor.y0 if optional_anchor is not None else page.content_bbox.y1
+        tolerance = page.line_pitch * 0.25
+        segment_groups: list[list[PixelBox]] = []
+        for group in row_groups:
+            segment_rows = []
+            for row in group:
+                key = (row.x0, row.y0, row.x1, row.y1)
+                center = (row.y0 + row.y1) / 2
+                if (
+                    key in used_rows
+                    or center < lower_y - tolerance
+                    or center >= upper_y + tolerance
+                ):
+                    continue
+                segment_rows.append(row)
+                used_rows.add(key)
+            if segment_rows:
+                segment_groups.append(segment_rows)
+        assignments = partition_units(segment_units, segment_groups)
+        for assignment_index, (group_units, group_rows, row_characters) in enumerate(assignments):
+            group_previous_bottom = lower_y
+            if multi_column and assignment_index > 0:
+                group_previous_bottom = group_rows[0].y0
+            assign_segment(
+                group_units,
+                group_rows,
+                previous_bottom=group_previous_bottom,
+                row_characters_per_line=row_characters,
+                consume_all_rows=not multi_column,
+            )
+        if optional_anchor is not None:
+            lower_y = optional_anchor.y1
+
+    result: list[HybridBlockPlacement] = []
+    for placement in placements:
+        geometry = assigned.get(placement.block_id)
+        if geometry is None:
+            result.append(placement)
+            continue
+        block_rows, gap = geometry
+        bbox = PixelBox(
+            x0=min(row.x0 for row in block_rows),
+            y0=min(row.y0 for row in block_rows),
+            x1=max(row.x1 for row in block_rows),
+            y1=max(row.y1 for row in block_rows),
+        )
+        result.append(
+            placement.model_copy(
+                update={
+                    "source_bbox": bbox,
+                    "source_rows": block_rows,
+                    "source_gap_before": gap,
+                    "match_score": 1.0,
+                    "geometry_source": "scan_inferred",
+                }
+            )
+        )
+    return result
+
+
+def _fill_source_gaps(
+    placements: list[HybridBlockPlacement],
+    page: ScanPageLayout,
+) -> list[HybridBlockPlacement]:
+    """Derive missing vertical gaps after all scan and JSON anchors are known."""
+
+    previous_bottom = page.content_bbox.y0
+    result: list[HybridBlockPlacement] = []
+    for placement in sorted(placements, key=lambda item: item.block_index):
+        bbox = placement.source_bbox
+        if bbox is None:
+            result.append(placement)
+            continue
+        gap = placement.source_gap_before
+        if gap is None:
+            # A y reset is normal when reading order advances to the next
+            # native newspaper column.  It is not a negative spacer.
+            gap = max(0, bbox.y0 - previous_bottom)
+        result.append(placement.model_copy(update={"source_gap_before": gap}))
+        previous_bottom = bbox.y1
+    return result
+
+
+def _block_weight(
+    block: MarkdownBlock,
+    *,
+    characters_per_line: float,
+    asset: AssetMatch | None,
+    line_pitch: float,
+) -> float:
+    if block.kind is MarkdownBlockKind.IMAGE:
+        return max(2.0, asset.bbox.height / line_pitch) if asset else 7.0
+    if block.kind is MarkdownBlockKind.TABLE:
+        rows = max(1, len(block.table_rows))
+        return 0.5 + rows * 1.28
+    if block.kind is MarkdownBlockKind.RULE:
+        return 0.35
+    if block.kind is MarkdownBlockKind.HEADING:
+        return max(1.0, math.ceil(len(_visible_text(block.text)) / characters_per_line)) + 0.2
+    if block.kind is MarkdownBlockKind.CODE:
+        return max(1.0, block.text.count("\n") + 1) + 0.2
+    if block.kind is MarkdownBlockKind.EQUATION:
+        return equation_layout_units(block.text)
+    length = len(_visible_text(block.text))
+    lines = max(1, math.ceil(length / characters_per_line))
+    if block.kind is MarkdownBlockKind.OPTION:
+        # Short sibling options are rendered in compact native columns.  A
+        # fractional line here models that without depending on a document type.
+        return max(0.28, lines * (0.72 if length > 52 else 0.28))
+    return lines + 0.10
+
+
+def _segment_cost(
+    blocks: list[MarkdownBlock],
+    weights: list[float],
+    cumulative: list[float],
+    fixed_pages: dict[int, int],
+    matches: dict[int, AssetMatch | TableMatch | EvidenceMatch],
+    layout: ScanDocumentLayout,
+    page_number: int,
+    start: int,
+    end: int,
+    target: float,
+) -> float:
+    if start >= end:
+        return math.inf
+    page_anchor_indices = [
+        index for index, fixed_page in fixed_pages.items() if fixed_page == page_number
+    ]
+    if page_anchor_indices and not (
+        start <= min(page_anchor_indices) and max(page_anchor_indices) < end
+    ):
+        return math.inf
+    if any(
+        fixed_page != page_number
+        for index, fixed_page in fixed_pages.items()
+        if start <= index < end
+    ):
+        return math.inf
+    used = cumulative[end] - cumulative[start]
+    cost = ((used - target) / max(1.0, target)) ** 2
+    page = layout.pages[page_number - 1]
+    for index, match in matches.items():
+        if match.page_number != page_number:
+            continue
+        predicted = (cumulative[index] - cumulative[start] + weights[index] / 2) / max(used, 1e-6)
+        observed = ((match.bbox.y0 + match.bbox.y1) / 2 - page.content_bbox.y0) / max(
+            1, page.content_bbox.height
+        )
+        cost += (predicted - observed) ** 2 * 0.85
+        if isinstance(match, TableMatch):
+            predicted_after = cumulative[end] - cumulative[index + 1]
+            observed_after = (page.content_bbox.y1 - match.bbox.y1) / max(1.0, page.line_pitch)
+            cost += ((predicted_after - observed_after) / max(4.0, observed_after)) ** 2 * 20.0
+    if end < len(blocks):
+        left_group = blocks[end - 1].group_id
+        right_group = blocks[end].group_id
+        if left_group and left_group == right_group:
+            cost += 0.035
+    return cost
+
+
+def build_hybrid_layout_plan(
+    content: MarkdownContent,
+    layout: ScanDocumentLayout,
+    asset_matches: list[AssetMatch],
+    table_matches: list[TableMatch] | None = None,
+    *,
+    evidence_matches: Sequence[EvidenceMatch] | None = None,
+) -> HybridLayoutPlan:
+    """Align editable blocks to source pages with monotonic dynamic programming."""
+
+    blocks = content.blocks
+    page_count = len(layout.pages)
+    if not blocks:
+        raise ValueError("content contains no blocks")
+    if page_count < 1:
+        raise ValueError("layout contains no pages")
+    match_by_id = {match.block_id: match for match in asset_matches}
+    table_match_by_id = {match.block_id: match for match in table_matches or []}
+    evidence_match_by_id = {match.block_id: match for match in evidence_matches or ()}
+    for block in blocks:
+        evidence_match = evidence_match_by_id.get(block.id)
+        if evidence_match is not None and evidence_match.block_index != block.index:
+            raise ValueError(
+                f"evidence block index mismatch for {block.id!r}: "
+                f"{evidence_match.block_index} != {block.index}"
+            )
+    match_by_index: dict[int, AssetMatch | TableMatch | EvidenceMatch] = {}
+    for block in blocks:
+        evidence_match = evidence_match_by_id.get(block.id)
+        if evidence_match is not None:
+            match_by_index[block.index] = evidence_match
+        asset_match = match_by_id.get(block.id)
+        if asset_match is not None:
+            match_by_index[block.index] = asset_match
+    fixed_pages = {index: match.page_number for index, match in match_by_index.items()}
+    for block in blocks:
+        table_match = table_match_by_id.get(block.id)
+        if table_match:
+            fixed_pages[block.index] = table_match.page_number
+            match_by_index[block.index] = table_match
+    group_pages: dict[str, int] = {}
+    for block in blocks:
+        match = match_by_id.get(block.id) or evidence_match_by_id.get(block.id)
+        if match and block.group_id:
+            previous = group_pages.get(block.group_id)
+            if previous is not None and previous != match.page_number:
+                raise ValueError(
+                    f"content group {block.group_id!r} matched more than one scan page"
+                )
+            group_pages[block.group_id] = match.page_number
+    for block in blocks:
+        if block.group_id in group_pages:
+            fixed_pages[block.index] = group_pages[block.group_id]
+    global_pitch = sorted(page.line_pitch for page in layout.pages)[page_count // 2]
+    average_width = sum(page.content_bbox.width for page in layout.pages) / page_count
+    characters_per_line = max(36.0, average_width / max(1.0, global_pitch * 0.42))
+    weights = [
+        _block_weight(
+            block,
+            characters_per_line=characters_per_line,
+            asset=match_by_id.get(block.id),
+            line_pitch=global_pitch,
+        )
+        for block in blocks
+    ]
+    cumulative = [0.0]
+    for weight in weights:
+        cumulative.append(cumulative[-1] + weight)
+    capacities = [page.content_bbox.height / global_pitch for page in layout.pages]
+    normalization = cumulative[-1] / max(sum(capacities), 1e-6)
+    targets = [capacity * normalization for capacity in capacities]
+
+    @cache
+    def solve(page_number: int, start: int) -> tuple[float, tuple[int, ...]]:
+        if page_number == page_count:
+            cost = _segment_cost(
+                blocks,
+                weights,
+                cumulative,
+                fixed_pages,
+                match_by_index,
+                layout,
+                page_number,
+                start,
+                len(blocks),
+                targets[page_number - 1],
+            )
+            return cost, (len(blocks),)
+        remaining_pages = page_count - page_number
+        best_cost = math.inf
+        best_boundaries: tuple[int, ...] = ()
+        maximum = len(blocks) - remaining_pages
+        for end in range(start + 1, maximum + 1):
+            current = _segment_cost(
+                blocks,
+                weights,
+                cumulative,
+                fixed_pages,
+                match_by_index,
+                layout,
+                page_number,
+                start,
+                end,
+                targets[page_number - 1],
+            )
+            if not math.isfinite(current):
+                continue
+            future, future_boundaries = solve(page_number + 1, end)
+            total = current + future
+            if total < best_cost:
+                best_cost = total
+                best_boundaries = (end, *future_boundaries)
+        return best_cost, best_boundaries
+
+    score, boundaries = solve(1, 0)
+    if not math.isfinite(score) or len(boundaries) != page_count:
+        raise ValueError(
+            "Markdown blocks cannot be aligned monotonically to the matched PDF assets"
+        )
+    pages: list[HybridPagePlan] = []
+    start = 0
+    for source_page, end in zip(layout.pages, boundaries, strict=True):
+        page_blocks = blocks[start:end]
+        placements = []
+        for block in page_blocks:
+            match = match_by_id.get(block.id)
+            table_match = table_match_by_id.get(block.id)
+            evidence_match = evidence_match_by_id.get(block.id)
+            geometry = match or table_match or evidence_match
+            placements.append(
+                HybridBlockPlacement(
+                    block_id=block.id,
+                    block_index=block.index,
+                    page_number=source_page.number,
+                    source_bbox=(geometry.bbox if geometry is not None else None),
+                    source_rows=(
+                        evidence_match.source_rows
+                        if evidence_match is not None and geometry is evidence_match
+                        else []
+                    ),
+                    match_score=(
+                        match.score
+                        if match
+                        else table_match.confidence
+                        if table_match
+                        else evidence_match.match_score
+                        if evidence_match
+                        else None
+                    ),
+                    geometry_source=(
+                        "source_asset"
+                        if match
+                        else "source_table"
+                        if table_match
+                        else evidence_match.geometry_source
+                        if evidence_match
+                        else "content_estimate"
+                    ),
+                    evidence_confidence=(
+                        evidence_match.confidence if evidence_match is not None else None
+                    ),
+                    evidence_providers=(
+                        evidence_match.providers if evidence_match is not None else ()
+                    ),
+                    evidence_element_ids=(
+                        evidence_match.element_ids if evidence_match is not None else ()
+                    ),
+                    evidence_style=(evidence_match.style if evidence_match is not None else None),
+                    evidence_conflict=(
+                        evidence_match.conflict if evidence_match is not None else False
+                    ),
+                    evidence_warnings=(
+                        evidence_match.warnings if evidence_match is not None else []
+                    ),
+                )
+            )
+        placements = _snap_evidence_rows_to_scan(page_blocks, placements, source_page)
+        placements = _assign_text_geometry(page_blocks, placements, source_page)
+        placements = _fill_source_gaps(placements, source_page)
+        pages.append(
+            HybridPagePlan(
+                number=source_page.number,
+                pdf_width=source_page.pdf_width,
+                pdf_height=source_page.pdf_height,
+                raster_width=source_page.width,
+                raster_height=source_page.height,
+                content_bbox=source_page.content_bbox,
+                line_pitch=source_page.line_pitch,
+                placements=placements,
+            )
+        )
+        start = end
+    warnings: list[str] = []
+    unmatched = len(content.image_blocks) - len(asset_matches)
+    if unmatched:
+        warnings.append(f"{unmatched} Markdown image(s) could not be aligned to the layout PDF.")
+    if evidence_matches:
+        conflicts = sum(match.conflict for match in evidence_matches)
+        if conflicts:
+            warnings.append(f"{conflicts} Markdown block(s) retained JSON evidence disagreements.")
+        warnings.extend(
+            f"{match.block_id}: {warning}"
+            for match in evidence_matches
+            for warning in match.warnings
+        )
+    return HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=layout.source,
+        pages=pages,
+        warnings=warnings,
+    )
+
+
+__all__ = [
+    "HybridBlockPlacement",
+    "HybridLayoutPlan",
+    "HybridPagePlan",
+    "build_hybrid_layout_plan",
+    "equation_layout_units",
+    "source_row_reading_order",
+    "visual_text_row_groups",
+    "visual_text_rows",
+]

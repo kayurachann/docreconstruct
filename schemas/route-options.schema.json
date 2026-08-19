@@ -1,0 +1,42 @@
+{
+  "additionalProperties": false,
+  "description": "Options for cost-aware page/region routing.",
+  "properties": {
+    "confidence_threshold": {
+      "default": 0.75,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence Threshold",
+      "type": "number"
+    },
+    "engines": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Engines",
+      "type": "array"
+    },
+    "force_element_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Force Element Ids",
+      "type": "array"
+    },
+    "fusion": {
+      "default": false,
+      "title": "Fusion",
+      "type": "boolean"
+    },
+    "provider_options": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Provider Options",
+      "type": "object"
+    }
+  },
+  "title": "RouteOptions",
+  "type": "object"
+}

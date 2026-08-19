@@ -1,0 +1,654 @@
+{
+  "$defs": {
+    "BBox": {
+      "additionalProperties": false,
+      "description": "Axis-aligned bounding box in source-page coordinates.",
+      "properties": {
+        "x0": {
+          "title": "X0",
+          "type": "number"
+        },
+        "x1": {
+          "title": "X1",
+          "type": "number"
+        },
+        "y0": {
+          "title": "Y0",
+          "type": "number"
+        },
+        "y1": {
+          "title": "Y1",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x0",
+        "y0",
+        "x1",
+        "y1"
+      ],
+      "title": "BBox",
+      "type": "object"
+    },
+    "Element": {
+      "additionalProperties": false,
+      "description": "Smallest independently positioned unit in the canonical representation.",
+      "properties": {
+        "bbox": {
+          "$ref": "#/$defs/BBox"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "polygon": {
+          "items": {
+            "$ref": "#/$defs/Point"
+          },
+          "title": "Polygon",
+          "type": "array"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Provenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reading_order": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reading Order"
+        },
+        "relationships": {
+          "$ref": "#/$defs/Relationship"
+        },
+        "source_crop": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "style": {
+          "$ref": "#/$defs/ElementStyle"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "text_candidates": {
+          "items": {
+            "$ref": "#/$defs/TextCandidate"
+          },
+          "title": "Text Candidates",
+          "type": "array"
+        },
+        "type": {
+          "$ref": "#/$defs/ElementType",
+          "default": "unknown"
+        },
+        "z_index": {
+          "default": 0,
+          "title": "Z Index",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "bbox"
+      ],
+      "title": "Element",
+      "type": "object"
+    },
+    "ElementStyle": {
+      "additionalProperties": false,
+      "description": "Visual evidence inferred or extracted for a document element.",
+      "properties": {
+        "alignment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextAlignment"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "background_color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Background Color"
+        },
+        "color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color"
+        },
+        "font_family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Family"
+        },
+        "font_size": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size"
+        },
+        "font_weight": {
+          "anyOf": [
+            {
+              "maximum": 1000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Weight"
+        },
+        "italic": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Italic"
+        },
+        "line_height": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line Height"
+        },
+        "opacity": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Opacity"
+        },
+        "rotation": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rotation"
+        },
+        "underline": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Underline"
+        }
+      },
+      "title": "ElementStyle",
+      "type": "object"
+    },
+    "ElementType": {
+      "enum": [
+        "text",
+        "title",
+        "heading",
+        "paragraph",
+        "list_item",
+        "table",
+        "figure",
+        "image",
+        "caption",
+        "formula",
+        "chart",
+        "header",
+        "footer",
+        "footnote",
+        "page_number",
+        "signature",
+        "stamp",
+        "checkbox",
+        "unknown"
+      ],
+      "title": "ElementType",
+      "type": "string"
+    },
+    "Page": {
+      "additionalProperties": false,
+      "description": "One source page and all canonical elements located on it.",
+      "properties": {
+        "elements": {
+          "items": {
+            "$ref": "#/$defs/Element"
+          },
+          "title": "Elements",
+          "type": "array"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "number"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "number": {
+          "minimum": 1,
+          "title": "Number",
+          "type": "integer"
+        },
+        "rotation": {
+          "default": 0.0,
+          "title": "Rotation",
+          "type": "number"
+        },
+        "source_type": {
+          "$ref": "#/$defs/SourceType",
+          "default": "unknown"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "number",
+        "width",
+        "height"
+      ],
+      "title": "Page",
+      "type": "object"
+    },
+    "Point": {
+      "additionalProperties": false,
+      "description": "Finite two-dimensional point in source-page coordinates.",
+      "properties": {
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "Point",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "description": "Origin and reliability of an observation.\n\nA fused observation uses ``engine='ensemble'`` and retains the original\nrecords recursively in ``contributors``.",
+      "properties": {
+        "contributors": {
+          "items": {
+            "$ref": "#/$defs/Provenance"
+          },
+          "title": "Contributors",
+          "type": "array"
+        },
+        "engine": {
+          "minLength": 1,
+          "title": "Engine",
+          "type": "string"
+        },
+        "layout_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Layout Confidence"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        },
+        "text_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text Confidence"
+        }
+      },
+      "required": [
+        "engine"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "Relationship": {
+      "additionalProperties": false,
+      "description": "Canonical relationships between this element and other element IDs.",
+      "properties": {
+        "caption_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption Of"
+        },
+        "children": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Children",
+          "type": "array"
+        },
+        "continued_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Continued From"
+        },
+        "continued_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Continued To"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent"
+        },
+        "references": {
+          "items": {
+            "type": "string"
+          },
+          "title": "References",
+          "type": "array"
+        }
+      },
+      "title": "Relationship",
+      "type": "object"
+    },
+    "SourceType": {
+      "enum": [
+        "native",
+        "scanned",
+        "hybrid",
+        "image",
+        "unknown"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    },
+    "TextAlignment": {
+      "enum": [
+        "left",
+        "center",
+        "right",
+        "justify"
+      ],
+      "title": "TextAlignment",
+      "type": "string"
+    },
+    "TextCandidate": {
+      "additionalProperties": false,
+      "description": "One provider's hypothesis for an element's exact text.",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "engine": {
+          "minLength": 1,
+          "title": "Engine",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "source_element_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Element Id"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "engine",
+        "value"
+      ],
+      "title": "TextCandidate",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Canonical document exchanged between providers and reconstruction stages.",
+  "properties": {
+    "id": {
+      "minLength": 1,
+      "title": "Id",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    },
+    "pages": {
+      "items": {
+        "$ref": "#/$defs/Page"
+      },
+      "title": "Pages",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "0.1",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "title": "Document",
+  "type": "object"
+}

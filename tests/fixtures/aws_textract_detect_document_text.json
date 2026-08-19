@@ -1,0 +1,89 @@
+{
+  "DocumentMetadata": {"Pages": 1},
+  "DetectDocumentTextModelVersion": "1.0-test",
+  "Blocks": [
+    {
+      "BlockType": "PAGE",
+      "Id": "detect-page-1",
+      "Page": 1,
+      "Geometry": {
+        "BoundingBox": {"Width": 1.0, "Height": 1.0, "Left": 0.0, "Top": 0.0},
+        "Polygon": [
+          {"X": 0.0, "Y": 0.0},
+          {"X": 1.0, "Y": 0.0},
+          {"X": 1.0, "Y": 1.0},
+          {"X": 0.0, "Y": 1.0}
+        ]
+      },
+      "Relationships": [{"Type": "CHILD", "Ids": ["detect-line-1", "detect-line-2"]}]
+    },
+    {
+      "BlockType": "LINE",
+      "Confidence": 98.5,
+      "Text": "Hello AWS",
+      "Geometry": {
+        "BoundingBox": {"Width": 0.4, "Height": 0.05, "Left": 0.1, "Top": 0.2},
+        "Polygon": [
+          {"X": 0.1, "Y": 0.2},
+          {"X": 0.5, "Y": 0.2},
+          {"X": 0.5, "Y": 0.25},
+          {"X": 0.1, "Y": 0.25}
+        ],
+        "RotationAngle": 0.0
+      },
+      "Id": "detect-line-1",
+      "Page": 1,
+      "Relationships": [{"Type": "CHILD", "Ids": ["detect-word-1", "detect-word-2"]}]
+    },
+    {
+      "BlockType": "WORD",
+      "Confidence": 99.5,
+      "Text": "Hello",
+      "TextType": "PRINTED",
+      "Geometry": {
+        "BoundingBox": {"Width": 0.17, "Height": 0.05, "Left": 0.1, "Top": 0.2},
+        "Polygon": [
+          {"X": 0.1, "Y": 0.2},
+          {"X": 0.27, "Y": 0.2},
+          {"X": 0.27, "Y": 0.25},
+          {"X": 0.1, "Y": 0.25}
+        ]
+      },
+      "Id": "detect-word-1",
+      "Page": 1
+    },
+    {
+      "BlockType": "WORD",
+      "Confidence": 87.0,
+      "Text": "AWS",
+      "TextType": "HANDWRITING",
+      "Geometry": {
+        "BoundingBox": {"Width": 0.15, "Height": 0.05, "Left": 0.3, "Top": 0.2},
+        "Polygon": [
+          {"X": 0.3, "Y": 0.2},
+          {"X": 0.45, "Y": 0.2},
+          {"X": 0.45, "Y": 0.25},
+          {"X": 0.3, "Y": 0.25}
+        ]
+      },
+      "Id": "detect-word-2",
+      "Page": 1
+    },
+    {
+      "BlockType": "LINE",
+      "Confidence": 96.0,
+      "Text": "Second line",
+      "Geometry": {
+        "BoundingBox": {"Width": 0.35, "Height": 0.05, "Left": 0.1, "Top": 0.3},
+        "Polygon": [
+          {"X": 0.1, "Y": 0.3},
+          {"X": 0.45, "Y": 0.3},
+          {"X": 0.45, "Y": 0.35},
+          {"X": 0.1, "Y": 0.35}
+        ]
+      },
+      "Id": "detect-line-2",
+      "Page": 1
+    }
+  ]
+}

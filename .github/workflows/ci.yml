@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project and development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[all,dev]"
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Check lint
+        run: python -m ruff check .
+
+      - name: Check formatting
+        run: python -m ruff format --check .
+
+      - name: Check types
+        run: python -m mypy src/docreconstruct
+
+      - name: Build distributions
+        run: python -m build

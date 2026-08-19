@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "OutputFormat": {
+      "description": "Formats exposed by the v0.1 renderer surface.",
+      "enum": [
+        "json",
+        "html",
+        "docx",
+        "markdown"
+      ],
+      "title": "OutputFormat",
+      "type": "string"
+    },
+    "ReconstructionMode": {
+      "description": "How the pipeline balances appearance and native editability.",
+      "enum": [
+        "visual",
+        "fidelity",
+        "replica",
+        "balanced",
+        "semantic",
+        "pixel-perfect",
+        "editable",
+        "data",
+        "archival",
+        "presentation"
+      ],
+      "title": "ReconstructionMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Options encoded in the ``options`` field of a reconstruct upload.",
+  "properties": {
+    "engines": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Engines",
+      "type": "array"
+    },
+    "fusion": {
+      "default": false,
+      "title": "Fusion",
+      "type": "boolean"
+    },
+    "maximum_refinement_passes": {
+      "default": 0,
+      "maximum": 20,
+      "minimum": 0,
+      "title": "Maximum Refinement Passes",
+      "type": "integer"
+    },
+    "output_filename": {
+      "anyOf": [
+        {
+          "maxLength": 240,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Output Filename"
+    },
+    "output_format": {
+      "$ref": "#/$defs/OutputFormat",
+      "default": "json"
+    },
+    "profile": {
+      "$ref": "#/$defs/ReconstructionMode",
+      "default": "balanced"
+    },
+    "provider_options": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Provider Options",
+      "type": "object"
+    },
+    "refine": {
+      "default": false,
+      "title": "Refine",
+      "type": "boolean"
+    }
+  },
+  "title": "ReconstructOptions",
+  "type": "object"
+}

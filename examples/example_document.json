@@ -1,0 +1,146 @@
+{
+  "id": "example-quarterly-report",
+  "pages": [
+    {
+      "id": "page-1",
+      "number": 1,
+      "width": 612.0,
+      "height": 792.0,
+      "rotation": 0.0,
+      "elements": [
+        {
+          "id": "heading-1",
+          "type": "heading",
+          "bbox": {
+            "x0": 72.0,
+            "y0": 64.0,
+            "x1": 540.0,
+            "y1": 98.0
+          },
+          "text": "Quarterly Financial Report",
+          "reading_order": 0,
+          "confidence": 0.99,
+          "style": {
+            "font_family": "Liberation Sans",
+            "font_size": 24.0,
+            "font_weight": 700,
+            "alignment": "center",
+            "color": "#1A1A1A"
+          },
+          "relationships": {
+            "children": ["paragraph-1"],
+            "references": [],
+            "metadata": {}
+          },
+          "provenance": {
+            "engine": "example",
+            "source_id": "source-heading-1",
+            "text_confidence": 0.99,
+            "layout_confidence": 0.98,
+            "metadata": {},
+            "contributors": []
+          },
+          "text_candidates": [
+            {
+              "engine": "example",
+              "value": "Quarterly Financial Report",
+              "confidence": 0.99,
+              "source_element_id": "source-heading-1",
+              "metadata": {}
+            }
+          ],
+          "metadata": {}
+        },
+        {
+          "id": "paragraph-1",
+          "type": "paragraph",
+          "bbox": {
+            "x0": 72.0,
+            "y0": 122.0,
+            "x1": 540.0,
+            "y1": 172.0
+          },
+          "text": "Revenue increased while operating costs remained stable.",
+          "reading_order": 1,
+          "confidence": 0.97,
+          "style": {
+            "font_family": "Liberation Serif",
+            "font_size": 11.0,
+            "font_weight": 400,
+            "alignment": "left",
+            "line_height": 14.0,
+            "color": "#1A1A1A"
+          },
+          "relationships": {
+            "parent": "heading-1",
+            "children": [],
+            "references": ["table-1"],
+            "metadata": {}
+          },
+          "provenance": {
+            "engine": "example",
+            "text_confidence": 0.97,
+            "layout_confidence": 0.95,
+            "metadata": {},
+            "contributors": []
+          },
+          "text_candidates": [],
+          "metadata": {}
+        },
+        {
+          "id": "table-1",
+          "type": "table",
+          "bbox": {
+            "x0": 72.0,
+            "y0": 205.0,
+            "x1": 540.0,
+            "y1": 310.0
+          },
+          "text": "Metric | Q1 | Q2\nRevenue | 12.4 | 13.1\nCosts | 7.8 | 7.9",
+          "reading_order": 2,
+          "confidence": 0.94,
+          "style": {
+            "font_family": "Liberation Sans",
+            "font_size": 10.0,
+            "font_weight": 400,
+            "alignment": "left",
+            "color": "#1A1A1A",
+            "background_color": "#F5F7FA"
+          },
+          "relationships": {
+            "children": [],
+            "references": [],
+            "metadata": {}
+          },
+          "provenance": {
+            "engine": "example",
+            "text_confidence": 0.96,
+            "layout_confidence": 0.91,
+            "metadata": {},
+            "contributors": []
+          },
+          "text_candidates": [],
+          "metadata": {
+            "table": {
+              "rows": [
+                ["Metric", "Q1", "Q2"],
+                ["Revenue", "12.4", "13.1"],
+                ["Costs", "7.8", "7.9"]
+              ]
+            }
+          }
+        }
+      ],
+      "source_type": "native",
+      "metadata": {
+        "units": "points"
+      }
+    }
+  ],
+  "source": "synthetic-example.pdf",
+  "metadata": {
+    "title": "Synthetic quarterly report",
+    "license": "CC0-1.0"
+  },
+  "schema_version": "0.1"
+}

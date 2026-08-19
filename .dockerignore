@@ -1,0 +1,7 @@
+*
+!Dockerfile
+!LICENSE
+!README.md
+!pyproject.toml
+!src
+!src/**

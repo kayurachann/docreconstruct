@@ -1,0 +1,28 @@
+{
+  "additionalProperties": false,
+  "description": "Options encoded in the ``options`` field of an analyze upload.",
+  "properties": {
+    "engines": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Engines",
+      "type": "array"
+    },
+    "fusion": {
+      "default": false,
+      "title": "Fusion",
+      "type": "boolean"
+    },
+    "provider_options": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Provider Options",
+      "type": "object"
+    }
+  },
+  "title": "AnalyzeOptions",
+  "type": "object"
+}

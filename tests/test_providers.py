@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from docreconstruct.ir import (
+    BBox,
+    Document,
+    Element,
+    ElementType,
+    Page,
+    Provenance,
+    SourceType,
+    TextCandidate,
+)
+from docreconstruct.normalization import EvidenceFusion, fuse_documents
+from docreconstruct.providers import (
+    AWSTextractProvider,
+    AzureDocumentIntelligenceProvider,
+    GoogleDocumentAIProvider,
+    JSONProvider,
+    MarkdownEvidenceProvider,
+    MathpixProvider,
+    MinerUProvider,
+    MistralOCRProvider,
+    NativePDFProvider,
+    OlmOCRProvider,
+    PaddleOCRProvider,
+    ProviderContext,
+    ProviderInferenceUnsupportedError,
+    ProviderRegistry,
+    get_registry,
+    registry,
+)
+
+
+def test_builtin_registry_and_custom_registry() -> None:
+    assert get_registry() is registry
+    assert set(registry.names()) == {
+        "aws_textract",
+        "azure_document_intelligence",
+        "google_document_ai",
+        "json",
+        "markdown",
+        "mathpix",
+        "mineru",
+        "mistral_ocr",
+        "native_pdf",
+        "olmocr",
+        "paddleocr",
+    }
+    assert isinstance(registry.get("PaddleOCR"), PaddleOCRProvider)
+    assert isinstance(registry.get("Mistral-OCR"), MistralOCRProvider)
+    assert isinstance(registry.get("Mathpix"), MathpixProvider)
+    assert isinstance(registry.get("AWS-Textract"), AWSTextractProvider)
+    assert isinstance(registry.get("Google-Document-AI"), GoogleDocumentAIProvider)
+    assert isinstance(
+        registry.get("azure-document-intelligence"),
+        AzureDocumentIntelligenceProvider,
+    )
+    assert registry.get("native-pdf").name == "native_pdf"
+
+    custom = ProviderRegistry()
+    custom.register(JSONProvider)
+    assert isinstance(custom.create("json"), JSONProvider)
+    with pytest.raises(ValueError, match="already registered"):
+        custom.register(JSONProvider)
+
+
+def test_markdown_provider_imports_text_math_table_and_image_urls(tmp_path) -> None:
+    source = tmp_path / "provider.md"
+    source.write_text(
+        "# Heading\n\nText body.\n\n$$x^2$$\n\n"
+        "<table><tr><td>A</td></tr></table>\n\n"
+        "![figure](https://example.test/figure.png)\n",
+        encoding="utf-8",
+    )
+
+    result = MarkdownEvidenceProvider().parse(source)
+    elements = result.document.pages[0].elements
+
+    assert [element.type for element in elements] == [
+        ElementType.HEADING,
+        ElementType.PARAGRAPH,
+        ElementType.FORMULA,
+        ElementType.TABLE,
+        ElementType.IMAGE,
+    ]
+    assert elements[2].metadata["latex"] == "x^2"
+    assert elements[3].metadata["table"]["rows"] == [["A"]]
+    assert elements[4].metadata["image_ref"] == "https://example.test/figure.png"
+    assert result.warnings
+
+
+def test_json_provider_validates_canonical_document() -> None:
+    original = Document(
+        id="canonical",
+        pages=[Page(id="page-1", number=1, width=100, height=200)],
+    )
+    result = JSONProvider().parse(original.model_dump_json())
+    assert result.provider == "json"
+    assert result.document == original
+
+    overridden = JSONProvider().normalize(
+        original.model_dump(),
+        context=ProviderContext(document_id="new-id", source="source.json"),
+    )
+    assert overridden.id == "new-id"
+    assert overridden.source == "source.json"
+
+
+def test_paddleocr_saved_array_shape() -> None:
+    payload = {
+        "page_index": 0,
+        "width": 100,
+        "height": 200,
+        "res": {
+            "rec_texts": ["Hello", "World"],
+            "rec_scores": [0.99, 0.8],
+            "rec_boxes": [[1, 2, 20, 12], [1, 20, 30, 35]],
+        },
+    }
+    result = PaddleOCRProvider().parse(payload)
+    page = result.document.pages[0]
+    assert (page.width, page.height) == (100, 200)
+    assert [element.text for element in page.elements] == ["Hello", "World"]
+    assert page.elements[0].bbox == BBox(x0=1, y0=2, x1=20, y1=12)
+    assert page.elements[0].provenance.engine == "paddleocr"
+
+
+def test_mineru_middle_json_and_content_list_shapes() -> None:
+    middle_json = {
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [100, 200],
+                "para_blocks": [
+                    {
+                        "type": "text",
+                        "bbox": [5, 10, 80, 30],
+                        "score": 0.93,
+                        "lines": [{"spans": [{"content": "MinerU text", "bbox": [5, 10, 80, 30]}]}],
+                    },
+                    {
+                        "type": "table",
+                        "bbox": [5, 40, 90, 100],
+                        "html": "<table><tr><td>A</td></tr></table>",
+                    },
+                ],
+            }
+        ]
+    }
+    document = MinerUProvider().normalize(middle_json)
+    assert document.pages[0].elements[0].text == "MinerU text"
+    table = document.pages[0].elements[1]
+    assert table.type is ElementType.TABLE
+    assert table.metadata["table"]["html"].startswith("<table>")
+
+    content_list = [
+        {"page_idx": 0, "type": "text", "text": "first", "bbox": [0, 0, 10, 10]},
+        {"page_idx": 1, "type": "text", "text": "second", "bbox": [0, 0, 10, 10]},
+    ]
+    grouped = MinerUProvider().normalize(content_list)
+    assert [page.elements[0].text for page in grouped.pages] == ["first", "second"]
+
+
+def test_olmocr_jsonl_and_full_page_geometry_fallback() -> None:
+    jsonl = "\n".join(
+        [
+            json.dumps(
+                {
+                    "text": "Page one",
+                    "metadata": {
+                        "page_number": 1,
+                        "width": 612,
+                        "height": 792,
+                        "Source-File": "input.pdf",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "natural_text": "Page two",
+                    "metadata": {"page_number": 2, "width": 612, "height": 792},
+                }
+            ),
+        ]
+    )
+    result = OlmOCRProvider().parse(jsonl)
+    assert result.document.source == "input.pdf"
+    assert [page.elements[0].text for page in result.document.pages] == ["Page one", "Page two"]
+    first = result.document.pages[0].elements[0]
+    assert first.bbox == BBox(x0=0, y0=0, x1=612, y1=792)
+    assert first.metadata["coordinate_system"] == "full_page_fallback"
+
+
+def test_native_pdf_preserves_embedded_image_bytes_when_pymupdf_is_available() -> None:
+    fitz = pytest.importorskip("pymupdf")
+    pdf = fitz.open()
+    pdf_page = pdf.new_page(width=100, height=100)
+    pdf_page.insert_text((10, 20), "Native text")
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 2, 2), False)
+    pixmap.clear_with(0x336699)
+    image_bytes = pixmap.tobytes("png")
+    pdf_page.insert_image(fitz.Rect(0, 50, 100, 100), stream=image_bytes)
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    document = NativePDFProvider().parse(pdf_bytes).document
+    page = document.pages[0]
+    image = next(element for element in page.elements if element.type is ElementType.IMAGE)
+
+    assert page.source_type is SourceType.HYBRID
+    assert image.metadata["image"]["bytes"].startswith(b"\x89PNG")
+    assert image.metadata["image"]["mime_type"] == "image/png"
+    assert Document.model_validate_json(document.model_dump_json()) == document
+
+
+@pytest.mark.parametrize("provider", [PaddleOCRProvider(), MinerUProvider(), OlmOCRProvider()])
+def test_saved_adapters_fail_clearly_for_live_inference(provider: object) -> None:
+    with pytest.raises(ProviderInferenceUnsupportedError, match="not bundled"):
+        provider.parse("input.pdf")
+
+
+def _evidence_document(engine: str, text: str, confidence: float) -> Document:
+    element = Element(
+        id=f"{engine}-element",
+        type=ElementType.TEXT,
+        bbox=BBox(x0=10, y0=10, x1=50, y1=20),
+        text=text,
+        confidence=confidence,
+        provenance=Provenance(
+            engine=engine,
+            text_confidence=confidence,
+            layout_confidence=confidence,
+        ),
+        text_candidates=[TextCandidate(engine=engine, value=text, confidence=confidence)],
+    )
+    return Document(
+        id=f"{engine}-doc",
+        pages=[Page(id=f"{engine}-page", number=1, width=100, height=200, elements=[element])],
+    )
+
+
+def test_element_level_fusion_preserves_candidates_and_provenance() -> None:
+    documents = [
+        _evidence_document("paddleocr", "Total Revenue", 0.95),
+        _evidence_document("mineru", "Total Revenue", 0.90),
+        _evidence_document("olmocr", "Tota1 Revenue", 0.99),
+    ]
+    fused = fuse_documents(documents, document_id="ensemble")
+    element = fused.pages[0].elements[0]
+
+    assert fused.id == "ensemble"
+    assert element.text == "Total Revenue"
+    assert {candidate.engine for candidate in element.text_candidates} == {
+        "paddleocr",
+        "mineru",
+        "olmocr",
+    }
+    assert element.provenance.engine == "ensemble"
+    assert {source.engine for source in element.provenance.contributors} == {
+        "paddleocr",
+        "mineru",
+        "olmocr",
+    }
+    assert element.metadata["fusion"]["source_element_ids"] == [
+        "paddleocr-element",
+        "mineru-element",
+        "olmocr-element",
+    ]
+
+    configured = EvidenceFusion(iou_threshold=0.7, text_similarity_threshold=0.7)
+    assert configured.fuse_documents(documents).pages[0].elements[0].text == "Total Revenue"
+    assert configured.fuse(documents).pages[0].elements[0].text == "Total Revenue"

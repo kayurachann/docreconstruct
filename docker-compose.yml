@@ -1,0 +1,16 @@
+services:
+  api:
+    build:
+      context: .
+      args:
+        DOCRECONSTRUCT_EXTRAS: api,pdf,docx
+    init: true
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DOCRECONSTRUCT_MAX_UPLOAD_MB: "50"
+    volumes:
+      - ./data:/data
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    restart: unless-stopped
