@@ -33,6 +33,8 @@ from docreconstruct.reconstruction.hybrid_planner import (
     HybridBlockPlacement,
     HybridLayoutPlan,
     HybridPagePlan,
+    apply_page_vertical_fit_budget,
+    build_page_vertical_fit_budget,
     equation_layout_units,
 )
 from docreconstruct.reconstruction.markdown_content import (
@@ -519,6 +521,22 @@ def test_source_geometry_drives_eighteen_visual_slots_without_clipping(
         ],
     )
 
+    vertical_scale = page.pdf_height / page.height
+    printable_height = page.content_bbox.height * vertical_scale
+    body_size = max(8.6, min(12.0, page.line_pitch * vertical_scale * 0.76))
+    vertical_budget = build_page_vertical_fit_budget(
+        page,
+        placements,
+        printable_height_points=printable_height,
+        font_size_points=body_size,
+    )
+    fitted_placements = apply_page_vertical_fit_budget(page, placements, vertical_budget)
+    assert vertical_budget.fits
+    assert vertical_budget.block_gap_scale < 1
+    assert vertical_budget.row_gap_scale == 1
+    assert fitted_placements[0].source_gap_before == placements[0].source_gap_before
+    assert fitted_placements[1].source_gap_before < placements[1].source_gap_before
+
     payload = render_hybrid_docx(content, scan, plan, [])
     with zipfile.ZipFile(io.BytesIO(payload)) as package:
         root = ElementTree.fromstring(package.read("word/document.xml"))
@@ -533,6 +551,18 @@ def test_source_geometry_drives_eighteen_visual_slots_without_clipping(
         paragraph for paragraph in paragraphs if paragraph.find(f".//{math}oMathPara") is not None
     ]
     assert len(display_paragraphs) == 5
+    assert all(
+        paragraph.find(f"{word}pPr/{word}keepLines") is not None for paragraph in display_paragraphs
+    )
+    # Fitting is achieved by source whitespace allocation, never by silently
+    # shrinking the document-wide math font.
+    display_math_sizes = {
+        size.get(f"{word}val")
+        for paragraph in display_paragraphs
+        for run in paragraph.iter(f"{math}r")
+        for size in run.findall(f"{word}rPr/{word}sz")
+    }
+    assert display_math_sizes == {str(round(body_size * 2))}
 
     horizontal_scale = page.pdf_width / page.width
     vertical_scale = page.pdf_height / page.height
@@ -557,6 +587,15 @@ def test_source_geometry_drives_eighteen_visual_slots_without_clipping(
     assert int(first_spacing.get(f"{word}line", "0")) >= round(68 * vertical_scale * 20) - 1
     assert int(first_spacing.get(f"{word}line", "0")) < round(
         source_boxes[0].height * vertical_scale * 20 / 2
+    )
+    second_spacing = paragraphs[1].find(f"{word}pPr/{word}spacing")
+    assert second_spacing is not None
+    assert int(second_spacing.get(f"{word}before", "0")) == pytest.approx(
+        round(int(fitted_placements[1].source_gap_before or 0) * vertical_scale * 20),
+        abs=1,
+    )
+    assert int(second_spacing.get(f"{word}before", "0")) < round(
+        int(placements[1].source_gap_before or 0) * vertical_scale * 20
     )
     first_math_properties = display_paragraphs[0].find(f".//{math}oMathParaPr/{math}jc")
     assert first_math_properties is not None
@@ -1074,6 +1113,51 @@ def test_flat_raster_scan_detects_three_columns_below_full_width_banner(
     assert len(page.metadata["column_boxes"]) == 3
     assert page.metadata["column_boxes"][0][1] >= 240
     assert len(page.metadata["column_gutters"]) == 2
+
+
+def test_fragmented_full_width_rows_do_not_create_false_columns(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")
+    from PIL import ImageDraw
+
+    layout = tmp_path / "fragmented-full-width-lines.png"
+    image = Image.new("RGB", (640, 900), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 45, 600, 58), fill="black")
+    groups = ((42, 150), (190, 300), (340, 450), (490, 598))
+    for top in range(180, 800, 54):
+        for left, right in groups:
+            draw.rectangle((left, top, right, top + 7), fill="black")
+        draw.rectangle((42, top + 18, 598, top + 25), fill="black")
+        draw.rectangle((42, top + 36, 598, top + 43), fill="black")
+    image.save(layout)
+
+    page = analyze_scan_source(layout).pages[0]
+
+    assert page.metadata["column_count"] == 1
+    assert "column_gutters" not in page.metadata
+
+
+def test_flat_raster_scan_detects_four_persistent_columns(tmp_path: Path) -> None:
+    pytest.importorskip("numpy")
+    from PIL import ImageDraw
+
+    layout = tmp_path / "four-columns.png"
+    image = Image.new("RGB", (640, 900), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((30, 20, 610, 135), fill="black")
+    draw.rectangle((55, 160, 585, 174), fill="black")
+    for top in range(260, 800, 22):
+        draw.rectangle((42, top, 170, top + 7), fill="black")
+        draw.rectangle((186, top, 314, top + 7), fill="black")
+        draw.rectangle((330, top, 458, top + 7), fill="black")
+        draw.rectangle((474, top, 602, top + 7), fill="black")
+    image.save(layout)
+
+    page = analyze_scan_source(layout).pages[0]
+
+    assert page.metadata["column_count"] == 4
+    assert len(page.metadata["column_boxes"]) == 4
+    assert len(page.metadata["column_gutters"]) == 3
 
 
 def test_photographed_skewed_grid_is_detected_as_a_ruled_table(tmp_path: Path) -> None:

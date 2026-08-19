@@ -48,6 +48,89 @@ are roadmap work. The current DOCX renderer favors native paragraphs and tables
 over hundreds of hard-to-edit positioned text boxes, so it should not be
 described as pixel-perfect.
 
+## Successful reconstruction examples
+
+These are real outputs from the same generic hybrid reconstruction path used by
+the CLI. The full-resolution source images, downloadable editable DOCX files,
+and project-rendered previews are included so results can be inspected rather
+than accepted on screenshots alone. See the [showcase artifact notes](docs/showcases/README.md)
+and [SHA-256 manifest](docs/showcases/SHA256SUMS.txt) for provenance details.
+
+> **Verification required:** OCR and provider-exported Markdown can contain
+> spelling, diacritic, symbol, formula, table, or reading-order errors. The DOCX
+> can faithfully preserve those errors because Markdown is the content
+> authority. Always compare the editable result with the original source before
+> relying on it.
+
+### Tuyen Quang gifted school Math exam - Page 1 - Exam code: 0110
+
+| Original photographed page | Editable DOCX rendered by the project |
+| :---: | :---: |
+| [<img src="docs/showcases/math-exam/source-original.png" alt="Original Tuyen Quang math exam page" width="420">](docs/showcases/math-exam/source-original.png) | [<img src="docs/showcases/math-exam/rendered-preview.png" alt="Rendered editable math exam DOCX" width="420">](docs/showcases/math-exam/rendered-preview.png) |
+
+**Artifacts:** [original image](docs/showcases/math-exam/source-original.png) ·
+[editable Word file](docs/showcases/math-exam/editable.docx) ·
+[rendered preview](docs/showcases/math-exam/rendered-preview.png)
+
+This example demonstrates a photographed page, mixed header geometry, native
+Word tables, editable Office Math, four-choice answer layouts, and reuse of the
+source variation chart. Handwriting, photo distortion, missing OCR text, and
+some source furniture are not guaranteed to be reproduced as editable content.
+
+### Calculus derivation - editable Office Math
+
+| Original source | Editable DOCX rendered by the project |
+| :---: | :---: |
+| [<img src="docs/showcases/calculus-derivation/source-original.jpg" alt="Original calculus derivation" width="420">](docs/showcases/calculus-derivation/source-original.jpg) | [<img src="docs/showcases/calculus-derivation/rendered-preview.png" alt="Rendered editable calculus DOCX" width="420">](docs/showcases/calculus-derivation/rendered-preview.png) |
+
+**Artifacts:** [original image](docs/showcases/calculus-derivation/source-original.jpg) ·
+[editable Word file](docs/showcases/calculus-derivation/editable.docx) ·
+[rendered preview](docs/showcases/calculus-derivation/rendered-preview.png)
+
+This example demonstrates native, selectable Office Math for fractions,
+integrals, limits, scripts, aligned derivations, and mixed Chinese prose. The
+generic planner maps 10 editable blocks to all 18 source rows; the final DOCX
+renders as one A4 page, keeps 8 native Office Math expressions and 13 display
+rows, and does not expose TeX alignment markers. Project QA passed 34/34 measured
+gates with a foreground-normalized visual score of 92.58%. This score is
+evidence of improvement, not proof that every glyph or mathematical statement
+is semantically correct.
+
+### Tuyen Quang gifted school - Vietnamese 2nd exam
+
+| Original source | Editable DOCX rendered by the project |
+| :---: | :---: |
+| [<img src="docs/showcases/vietnamese-exam/source-original.png" alt="Original Vietnamese second exam page" width="420">](docs/showcases/vietnamese-exam/source-original.png) | [<img src="docs/showcases/vietnamese-exam/rendered-preview.png" alt="Rendered editable Vietnamese exam DOCX" width="420">](docs/showcases/vietnamese-exam/rendered-preview.png) |
+
+**Artifacts:** [original image](docs/showcases/vietnamese-exam/source-original.png) ·
+[editable Word file](docs/showcases/vietnamese-exam/editable.docx) ·
+[rendered preview](docs/showcases/vietnamese-exam/rendered-preview.png)
+
+This example demonstrates a two-zone exam header, Vietnamese serif typography,
+indented justified passages, attribution placement, dotted candidate fields,
+and editable questions. OCR spelling and diacritic errors remain possible; the
+source watermark, obscured candidate data, and other raster-only marks are not
+silently recreated as editable text.
+
+## Accuracy limitations and required verification
+
+- OCR/provider Markdown may miss text or misread spelling, accents, numbers,
+  punctuation, scientific notation, mathematical operators, and handwriting.
+- Formula conversion may preserve editable structure while still getting an
+  operator, delimiter, alignment point, limit position, or line break wrong.
+- Tables, columns, reading order, fonts, spacing, figures, headers, footers, and
+  pagination can differ between the source, Microsoft Word, and LibreOffice.
+- Provider confidence and a passing automated QA gate are useful evidence, not
+  proof that the semantic content is correct.
+- When Markdown and the source disagree, the hybrid workflow keeps Markdown as
+  the wording authority and does not silently invent or correct content.
+- Pixel-identical output and deeply editable native Word objects are competing
+  goals; this project does not promise universal 1:1 reproduction.
+
+Users must manually compare the output against the original and obtain an
+appropriate subject-matter review before using it for exams, archival records,
+legal, medical, financial, compliance, or other high-stakes work.
+
 ## Installation
 
 Python 3.11 or newer is required.

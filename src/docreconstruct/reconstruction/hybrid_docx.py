@@ -37,6 +37,8 @@ from docreconstruct.reconstruction.asset_matching import (
 from docreconstruct.reconstruction.hybrid_planner import (
     HybridBlockPlacement,
     HybridLayoutPlan,
+    apply_page_vertical_fit_budget,
+    build_page_vertical_fit_budget,
     equation_layout_units,
     source_row_reading_order,
 )
@@ -2814,7 +2816,8 @@ def render_hybrid_docx(
         section.top_margin = Pt(page_top_margin)
         # Let a source page that demonstrably uses more of the paper retain
         # that space, while avoiding a sparse final page inflating every page.
-        section.bottom_margin = Pt(min(bottom_margin, bottom_points[page_index]))
+        page_bottom_margin = min(bottom_margin, bottom_points[page_index])
+        section.bottom_margin = Pt(page_bottom_margin)
         section.header_distance = Pt(12)
         section.footer_distance = Pt(12)
         available_width = (page_plan.pdf_width - left_margin - right_margin) / 72.0
@@ -2840,6 +2843,25 @@ def render_hybrid_docx(
             placement_by_id,
             source_page,
         )
+        body_ids = {block.id for block in blocks}
+        body_placements = [
+            placement for placement in page_plan.placements if placement.block_id in body_ids
+        ]
+        vertical_budget = build_page_vertical_fit_budget(
+            source_page,
+            body_placements,
+            printable_height_points=(page_plan.pdf_height - page_top_margin - page_bottom_margin),
+            font_size_points=body_size,
+        )
+        fitted_placements = apply_page_vertical_fit_budget(
+            source_page,
+            body_placements,
+            vertical_budget,
+        )
+        body_placement_by_id = dict(placement_by_id)
+        body_placement_by_id.update(
+            {placement.block_id: placement for placement in fitted_placements}
+        )
         _render_source_footer(
             section,
             footer_blocks,
@@ -2851,7 +2873,7 @@ def render_hybrid_docx(
         masthead_rendered, blocks = _render_split_masthead(
             document,
             blocks,
-            placement_by_id,
+            body_placement_by_id,
             source_page,
             width=available_width,
             size=body_size,
@@ -2865,7 +2887,7 @@ def render_hybrid_docx(
             rendered_columns = _render_two_column_page(
                 document,
                 blocks,
-                placement_by_id,
+                body_placement_by_id,
                 width=available_width,
                 size=body_size,
                 line_height=line_height,
@@ -2877,7 +2899,7 @@ def render_hybrid_docx(
             rendered_columns = _render_multi_column_page(
                 document,
                 blocks,
-                placement_by_id,
+                body_placement_by_id,
                 width=available_width,
                 size=body_size,
                 line_height=line_height,
@@ -2899,7 +2921,7 @@ def render_hybrid_docx(
                 _render_group(
                     document,
                     blocks[cursor:end],
-                    placement_by_id,
+                    body_placement_by_id,
                     width=available_width,
                     size=body_size,
                     line_height=line_height,

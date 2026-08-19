@@ -6,7 +6,9 @@ from PIL import Image
 
 from docreconstruct.reconstruction.asset_matching import AssetMatch
 from docreconstruct.reconstruction.hybrid_planner import (
+    apply_page_vertical_fit_budget,
     build_hybrid_layout_plan,
+    build_page_vertical_fit_budget,
     visual_text_row_groups,
     visual_text_rows,
 )
@@ -45,6 +47,53 @@ _ROW_BOXES = [
     (353, 1298, 857, 1343),
 ]
 
+_RAW_ROW_BOXES = [
+    (422, 32, 703, 59),
+    (380, 61, 551, 70),
+    (356, 72, 705, 84),
+    (380, 89, 571, 100),
+    (381, 132, 853, 164),
+    (356, 162, 853, 193),
+    (422, 228, 700, 247),
+    (380, 254, 436, 259),
+    (356, 261, 704, 273),
+    (380, 278, 569, 289),
+    (500, 313, 541, 317),
+    (356, 324, 747, 366),
+    (380, 368, 702, 381),
+    (380, 401, 708, 421),
+    (355, 419, 722, 448),
+    (90, 465, 157, 484),
+    (138, 499, 486, 519),
+    (91, 517, 685, 546),
+    (91, 544, 698, 576),
+    (155, 603, 196, 607),
+    (155, 611, 317, 629),
+    (92, 630, 370, 672),
+    (113, 691, 741, 712),
+    (113, 710, 742, 741),
+    (350, 760, 812, 780),
+    (320, 778, 829, 807),
+    (205, 828, 246, 833),
+    (148, 835, 503, 856),
+    (89, 854, 518, 884),
+    (113, 882, 505, 897),
+    (89, 921, 156, 940),
+    (91, 955, 439, 978),
+    (89, 999, 477, 1030),
+    (134, 1031, 297, 1041),
+    (124, 1066, 923, 1096),
+    (89, 1094, 958, 1124),
+    (89, 1122, 958, 1138),
+    (414, 1141, 722, 1145),
+    (378, 1163, 713, 1183),
+    (353, 1181, 713, 1210),
+    (376, 1230, 854, 1250),
+    (353, 1248, 855, 1278),
+    (353, 1298, 857, 1330),
+    (418, 1328, 857, 1343),
+]
+
 
 def _scan_layout(tmp_path: Path) -> ScanDocumentLayout:
     lines = [
@@ -53,7 +102,7 @@ def _scan_layout(tmp_path: Path) -> ScanDocumentLayout:
             segments=[PixelBox(x0=x0, y0=y0, x1=x1, y1=y1)],
             ink_density=0.12,
         )
-        for x0, y0, x1, y1 in _ROW_BOXES
+        for x0, y0, x1, y1 in _RAW_ROW_BOXES
     ]
     return ScanDocumentLayout(
         source=str(tmp_path / "layout.png"),
@@ -153,6 +202,10 @@ $$\\begin{aligned}&=h\\\\&=i\\\\&=j\\\\&=k\\end{aligned}$$
     content = parse_markdown_content(markdown)
     layout = _scan_layout(tmp_path)
 
+    assert visual_text_rows(layout.pages[0]) == [
+        PixelBox(x0=x0, y0=y0, x1=x1, y1=y1) for x0, y0, x1, y1 in _ROW_BOXES
+    ]
+
     plan = build_hybrid_layout_plan(content, layout, [], [])
 
     placements = plan.pages[0].placements
@@ -176,6 +229,56 @@ $$\\begin{aligned}&=h\\\\&=i\\\\&=j\\\\&=k\\end{aligned}$$
     assert [row for placement in placements for row in placement.source_rows] == (
         visual_text_rows(layout.pages[0])
     )
+
+    page = layout.pages[0]
+    vertical_scale = page.pdf_width / page.width
+    printable_height = page.content_bbox.height * vertical_scale
+    font_size = max(8.6, min(12.0, page.line_pitch * vertical_scale * 0.76))
+    budget = build_page_vertical_fit_budget(
+        page,
+        placements,
+        printable_height_points=printable_height,
+        font_size_points=font_size,
+    )
+
+    assert budget.calibrated
+    assert budget.fits
+    assert 0 < budget.block_gap_scale < 1
+    assert budget.row_gap_scale == 1
+    assert budget.native_line_box_allowance == font_size * 0.33 * 18
+    assert budget.estimated_footprint <= printable_height - budget.headroom
+    fitted = apply_page_vertical_fit_budget(page, placements, budget)
+    assert len(fitted) == 10
+    assert sum(len(placement.source_rows) for placement in fitted) == 18
+    assert fitted[0].source_gap_before == placements[0].source_gap_before
+    assert sum(int(placement.source_gap_before or 0) for placement in fitted[1:]) < sum(
+        int(placement.source_gap_before or 0) for placement in placements[1:]
+    )
+    assert [placement.source_rows for placement in fitted] == [
+        placement.source_rows for placement in placements
+    ]
+    assert [placement.source_bbox for placement in fitted] == [
+        placement.source_bbox for placement in placements
+    ]
+
+    tight_budget = build_page_vertical_fit_budget(
+        page,
+        placements,
+        printable_height_points=700,
+        font_size_points=font_size,
+        headroom_points=0,
+    )
+    assert tight_budget.fits
+    assert tight_budget.block_gap_scale == 0
+    assert 0 < tight_budget.row_gap_scale < 1
+    tightly_fitted = apply_page_vertical_fit_budget(page, placements, tight_budget)
+    assert sum(len(placement.source_rows) for placement in tightly_fitted) == 18
+    assert [row.height for placement in tightly_fitted for row in placement.source_rows] == [
+        row.height for placement in placements for row in placement.source_rows
+    ]
+    assert tightly_fitted[-1].source_bbox is not None
+    assert placements[-1].source_bbox is not None
+    assert tightly_fitted[-1].source_bbox.height < placements[-1].source_bbox.height
 
 
 def test_centered_formula_fragments_are_not_a_split_masthead() -> None:

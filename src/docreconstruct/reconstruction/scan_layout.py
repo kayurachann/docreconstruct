@@ -799,6 +799,41 @@ def _periodic_line_pitch(ink: Any, box: PixelBox) -> tuple[float, float] | None:
     return float(lag), score
 
 
+def _persistent_gutter_contrast(
+    ink: Any,
+    content: PixelBox,
+    *,
+    search_top: int,
+    start: int,
+    end: int,
+) -> float:
+    """Return the body-wide ink contrast of a candidate column gutter.
+
+    Repeated gaps on a subset of lines are not sufficient evidence of a
+    newspaper gutter.  Centered equations and other variable-width lines can
+    align several such gaps even though adjacent full-width rows cross them.
+    A real gutter remains materially clearer than representative strips on
+    both sides throughout the body.
+    """
+
+    np = _require_numpy()
+    if end <= start or search_top >= content.y1:
+        return 0.0
+    flank_width = max(end - start, round(content.width * 0.05))
+    left_start = max(content.x0, start - flank_width)
+    right_end = min(content.x1, end + flank_width)
+    gutter = ink[search_top : content.y1, start:end]
+    left_flank = ink[search_top : content.y1, left_start:start]
+    right_flank = ink[search_top : content.y1, end:right_end]
+    if not gutter.size or not left_flank.size or not right_flank.size:
+        return 0.0
+    gutter_density = float(np.mean(gutter))
+    flank_density = (float(np.mean(left_flank)) + float(np.mean(right_flank))) / 2.0
+    if flank_density <= 0:
+        return 0.0
+    return max(0.0, 1.0 - gutter_density / flank_density)
+
+
 def _segment_column_layout(
     ink: Any,
     content: PixelBox,
@@ -857,10 +892,20 @@ def _segment_column_layout(
             continue
         absolute_start = content.x0 + start
         absolute_end = content.x0 + end
-        strip = ink[search_top : content.y1, absolute_start:absolute_end]
-        density = float(np.mean(strip)) if strip.size else 1.0
+        contrast = _persistent_gutter_contrast(
+            ink,
+            content,
+            search_top=search_top,
+            start=absolute_start,
+            end=absolute_end,
+        )
+        # Requiring at least 35% body-wide contrast retains photographic
+        # multi-column gutters while rejecting the three aligned gaps created
+        # by a one-fragmented/two-full-width row cycle.
+        if contrast < 0.35:
+            continue
         support = float(coverage[run_start:run_end].max(initial=0))
-        candidates.append((support * (1.0 - min(0.95, density)), start, end))
+        candidates.append((support * contrast, start, end))
     selected: list[tuple[float, int, int]] = []
     for candidate in sorted(candidates, reverse=True):
         midpoint = (candidate[1] + candidate[2]) / 2

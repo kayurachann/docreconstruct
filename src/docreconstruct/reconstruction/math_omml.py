@@ -229,6 +229,39 @@ def _split_equation_rows(source: str) -> list[str]:
     return [row for row in rows if row]
 
 
+def _split_alignment_segments(source: str) -> list[tuple[bool, str]]:
+    """Split one equation-array row at top-level LaTeX alignment markers.
+
+    The boolean records whether the segment begins at an alignment point.  A
+    backslash escapes the following character, so ``\\&`` remains ordinary
+    mathematical content.  Ampersands inside a group are likewise content;
+    only the top-level markers owned by ``aligned``-style environments become
+    Office Math alignment points.
+    """
+
+    segments: list[tuple[bool, str]] = []
+    start = 0
+    depth = 0
+    position = 0
+    follows_alignment = False
+    while position < len(source):
+        character = source[position]
+        if character == "\\" and position + 1 < len(source):
+            position += 2
+            continue
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth = max(0, depth - 1)
+        elif character == "&" and depth == 0:
+            segments.append((follows_alignment, source[start:position]))
+            follows_alignment = True
+            start = position + 1
+        position += 1
+    segments.append((follows_alignment, source[start:]))
+    return segments
+
+
 def _equation_environment(latex: str) -> tuple[str | None, list[str]]:
     match = _ENVIRONMENT_PATTERN.match(latex.strip())
     if match is None:
@@ -273,6 +306,44 @@ def _container(tag: str, children: list[Any]) -> Any:
     for child in children:
         node.append(child)
     return node
+
+
+def _alignment_run() -> Any:
+    """Return a zero-width native Office Math alignment point."""
+
+    run = _run("")
+    properties = run.find(qn("m:rPr"))
+    alignment = OxmlElement("m:aln")
+    alignment.set(qn("m:val"), "1")
+    properties.append(alignment)
+    return run
+
+
+def _mark_alignment_point(elements: list[Any]) -> list[Any]:
+    """Place a native alignment point at the start of parsed row content."""
+
+    if elements and elements[0].tag == qn("m:r"):
+        properties = elements[0].find(qn("m:rPr"))
+        if properties is None:
+            properties = OxmlElement("m:rPr")
+            elements[0].insert(0, properties)
+        alignment = OxmlElement("m:aln")
+        alignment.set(qn("m:val"), "1")
+        properties.append(alignment)
+        return elements
+    return [_alignment_run(), *elements]
+
+
+def _parse_equation_array_row(source: str) -> list[Any]:
+    """Parse one row while mapping TeX ``&`` anchors to native OMML."""
+
+    result: list[Any] = []
+    for follows_alignment, segment in _split_alignment_segments(source):
+        elements = _LatexParser(segment, display_math=True).parse()
+        if follows_alignment:
+            elements = _mark_alignment_point(elements)
+        result.extend(elements)
+    return result
 
 
 def _script(base: list[Any], subscript: list[Any] | None, superscript: list[Any] | None) -> Any:
@@ -708,7 +779,7 @@ def build_omml(
             array.append(
                 _container(
                     "m:e",
-                    _LatexParser(row, display_math=True).parse(),
+                    _parse_equation_array_row(row),
                 )
             )
         equation.append(array)

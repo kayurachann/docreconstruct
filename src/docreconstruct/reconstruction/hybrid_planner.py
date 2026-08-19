@@ -74,6 +74,227 @@ class HybridLayoutPlan(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class VerticalFitBudget(BaseModel):
+    """Deterministic allocation of a single-column page's vertical whitespace.
+
+    Scan geometry measures glyph ink, while Word lays the same content inside
+    native line boxes. The allowance below models that renderer-owned leading
+    without changing source ink targets or the document font size. When a
+    dense page would otherwise overflow, inter-block whitespace is compressed
+    before spacing inside a multi-row block.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    calibrated: bool
+    printable_height: float = Field(gt=0)
+    headroom: float = Field(ge=0)
+    fixed_ink_height: float = Field(ge=0)
+    native_line_box_allowance: float = Field(ge=0)
+    leading_gap_height: float = Field(ge=0)
+    block_gap_height: float = Field(ge=0)
+    row_gap_height: float = Field(ge=0)
+    block_gap_scale: float = Field(ge=0, le=1)
+    row_gap_scale: float = Field(ge=0, le=1)
+    estimated_footprint: float = Field(ge=0)
+    fits: bool
+
+
+def _page_vertical_scale(page: ScanPageLayout) -> float:
+    if page.metadata.get("source_kind") == "image":
+        return page.pdf_height / page.height
+    return page.pdf_width / page.width
+
+
+def _unique_source_rows(page: ScanPageLayout, rows: Sequence[PixelBox]) -> list[PixelBox]:
+    ordered = source_row_reading_order(page, rows)
+    unique: list[PixelBox] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for row in ordered:
+        key = (row.x0, row.y0, row.x1, row.y1)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
+def build_page_vertical_fit_budget(
+    page: ScanPageLayout,
+    placements: Sequence[HybridBlockPlacement],
+    *,
+    printable_height_points: float,
+    font_size_points: float,
+    headroom_points: float | None = None,
+    # Raster rows already include most ascender/descender ink.  Reserving one
+    # additional third-em per native line matches Word/LibreOffice line boxes
+    # without discarding the source's inter-block whitespace.
+    native_leading_em: float = 0.33,
+) -> VerticalFitBudget:
+    """Allocate elastic scan whitespace inside one native Word page.
+
+    The first source gap is a page-positioning offset and remains fixed.
+    Later gaps are ink-to-ink measurements, so they are the first elastic
+    component used to accommodate Word's native line-box leading. Row gaps
+    are retained at full size unless block-gap compression alone cannot fit the
+    page. Multi-column flows are deliberately left untouched because their
+    vertical coordinates reset between independent columns.
+    """
+
+    if printable_height_points <= 0:
+        raise ValueError("printable_height_points must be greater than zero")
+    if font_size_points <= 0:
+        raise ValueError("font_size_points must be greater than zero")
+    if native_leading_em < 0:
+        raise ValueError("native_leading_em must not be negative")
+    if headroom_points is not None and headroom_points < 0:
+        raise ValueError("headroom_points must not be negative")
+
+    headroom = (
+        min(12.0, max(6.0, printable_height_points * 0.0125))
+        if headroom_points is None
+        else min(printable_height_points, headroom_points)
+    )
+    ordered = sorted(placements, key=lambda item: item.block_index)
+    scale = _page_vertical_scale(page)
+
+    def uncalibrated() -> VerticalFitBudget:
+        return VerticalFitBudget(
+            calibrated=False,
+            printable_height=printable_height_points,
+            headroom=headroom,
+            fixed_ink_height=0.0,
+            native_line_box_allowance=0.0,
+            leading_gap_height=0.0,
+            block_gap_height=0.0,
+            row_gap_height=0.0,
+            block_gap_scale=1.0,
+            row_gap_scale=1.0,
+            estimated_footprint=0.0,
+            fits=True,
+        )
+
+    if page.metadata.get("column_count", 1) != 1 or not ordered:
+        return uncalibrated()
+    if any(
+        placement.source_bbox is None or placement.source_gap_before is None
+        for placement in ordered
+    ):
+        return uncalibrated()
+    boxes = [placement.source_bbox for placement in ordered]
+    if any(
+        current is None or following is None or following.y0 < current.y0
+        for current, following in zip(boxes, boxes[1:], strict=False)
+    ):
+        return uncalibrated()
+
+    fixed_ink = 0.0
+    row_gaps = 0.0
+    for placement in ordered:
+        rows = _unique_source_rows(page, placement.source_rows)
+        if rows:
+            fixed_ink += sum(row.height for row in rows) * scale
+            row_gaps += (
+                sum(
+                    max(0, following.y0 - previous.y1)
+                    for previous, following in zip(rows, rows[1:], strict=False)
+                )
+                * scale
+            )
+        else:
+            assert placement.source_bbox is not None
+            fixed_ink += placement.source_bbox.height * scale
+
+    leading_gap = float(ordered[0].source_gap_before or 0) * scale
+    block_gaps = sum(float(placement.source_gap_before or 0) * scale for placement in ordered[1:])
+    # Word owns one native line box for every editable source row, not merely
+    # one for every Markdown block.  Counting blocks substantially
+    # underestimates aligned equations and wrapped paragraphs: a five-row
+    # equation is still one paragraph but consumes five native math rows.
+    # The source boxes above measure glyph ink, so this per-row allowance is
+    # the renderer leading that must be reserved before retaining scan gaps.
+    native_line_count = sum(
+        max(1, len(_unique_source_rows(page, placement.source_rows))) for placement in ordered
+    )
+    native_allowance = font_size_points * native_leading_em * native_line_count
+    fixed_total = fixed_ink + native_allowance + leading_gap
+    elastic_target = max(0.0, printable_height_points - headroom - fixed_total)
+    raw_elastic = block_gaps + row_gaps
+
+    block_scale = 1.0
+    row_scale = 1.0
+    if raw_elastic > elastic_target + 1e-6:
+        if elastic_target >= row_gaps:
+            block_scale = (
+                min(1.0, max(0.0, (elastic_target - row_gaps) / block_gaps))
+                if block_gaps > 0
+                else 1.0
+            )
+        else:
+            block_scale = 0.0
+            row_scale = min(1.0, max(0.0, elastic_target / row_gaps)) if row_gaps > 0 else 1.0
+
+    estimate = fixed_total + block_gaps * block_scale + row_gaps * row_scale
+    target = printable_height_points - headroom
+    return VerticalFitBudget(
+        calibrated=True,
+        printable_height=printable_height_points,
+        headroom=headroom,
+        fixed_ink_height=fixed_ink,
+        native_line_box_allowance=native_allowance,
+        leading_gap_height=leading_gap,
+        block_gap_height=block_gaps,
+        row_gap_height=row_gaps,
+        block_gap_scale=block_scale,
+        row_gap_scale=row_scale,
+        estimated_footprint=estimate,
+        fits=estimate <= target + 1e-6,
+    )
+
+
+def apply_page_vertical_fit_budget(
+    page: ScanPageLayout,
+    placements: Sequence[HybridBlockPlacement],
+    budget: VerticalFitBudget,
+) -> list[HybridBlockPlacement]:
+    """Return placement copies with only elastic vertical gaps adjusted."""
+
+    if not budget.calibrated or (budget.block_gap_scale >= 1.0 and budget.row_gap_scale >= 1.0):
+        return list(placements)
+
+    ordered = sorted(placements, key=lambda item: item.block_index)
+    first_id = ordered[0].block_id if ordered else None
+    adjusted: dict[str, HybridBlockPlacement] = {}
+    for placement in ordered:
+        update: dict[str, object] = {}
+        if placement.block_id != first_id and placement.source_gap_before is not None:
+            update["source_gap_before"] = round(
+                placement.source_gap_before * budget.block_gap_scale
+            )
+        rows = _unique_source_rows(page, placement.source_rows)
+        if budget.row_gap_scale < 1.0 and len(rows) > 1:
+            compressed = [rows[0]]
+            for source_index, row in enumerate(rows[1:], start=1):
+                previous_source = rows[source_index - 1]
+                previous_adjusted = compressed[-1]
+                gap = max(0, row.y0 - previous_source.y1)
+                y0 = previous_adjusted.y1 + round(gap * budget.row_gap_scale)
+                compressed.append(PixelBox(x0=row.x0, y0=y0, x1=row.x1, y1=y0 + row.height))
+            update["source_rows"] = compressed
+            if placement.source_bbox is not None:
+                delta = compressed[-1].y1 - rows[-1].y1
+                update["source_bbox"] = placement.source_bbox.model_copy(
+                    update={
+                        "y1": max(
+                            placement.source_bbox.y0 + 1,
+                            placement.source_bbox.y1 + delta,
+                        )
+                    }
+                )
+        adjusted[placement.block_id] = placement.model_copy(update=update)
+    return [adjusted.get(placement.block_id, placement) for placement in placements]
+
+
 def equation_layout_units(latex: str) -> float:
     """Estimate vertical source-line units for one editable display equation."""
 
@@ -109,6 +330,58 @@ def _merge_visual_rows(rows: list[PixelBox], line_pitch: float) -> list[PixelBox
             )
         else:
             merged.append(box)
+    return merged
+
+
+def _merge_single_column_row_fragments(
+    rows: list[PixelBox],
+    line_pitch: float,
+) -> list[PixelBox]:
+    """Merge vertically adjacent glyph fragments into logical source slots.
+
+    Tall display equations are frequently detected as separate numerator,
+    fraction-bar, and denominator rows.  Their fragments form a transitive
+    chain separated by no more than a small fraction of the measured baseline
+    pitch.  Uniform prose baselines remain distinct: a positive-gap merge also
+    requires component-sized ink and materially different horizontal extents,
+    while deeply overlapping line boxes are treated as separate baselines.
+    """
+
+    maximum_gap = max(2.0, line_pitch * 0.35)
+    maximum_overlap = max(2.0, line_pitch * 0.15)
+    component_height = line_pitch * 0.90
+    minimum_edge_shift = max(3.0, line_pitch * 0.35)
+    merged: list[PixelBox] = []
+    previous_fragment: PixelBox | None = None
+    for box in sorted(rows, key=lambda item: (item.y0, item.x0)):
+        if not merged:
+            merged.append(box)
+            previous_fragment = box
+            continue
+        current = merged[-1]
+        assert previous_fragment is not None
+        gap = box.y0 - current.y1
+        horizontal_change = max(
+            abs(box.x0 - previous_fragment.x0),
+            abs(box.x1 - previous_fragment.x1),
+        )
+        width_ratio = min(box.width, previous_fragment.width) / max(
+            box.width,
+            previous_fragment.width,
+        )
+        component_pair = min(box.height, previous_fragment.height) <= component_height and (
+            horizontal_change >= minimum_edge_shift or width_ratio <= 0.92
+        )
+        if -maximum_overlap <= gap <= maximum_gap and (gap <= 0 or component_pair):
+            merged[-1] = PixelBox(
+                x0=min(current.x0, box.x0),
+                y0=min(current.y0, box.y0),
+                x1=max(current.x1, box.x1),
+                y1=max(current.y1, box.y1),
+            )
+        else:
+            merged.append(box)
+        previous_fragment = box
     return merged
 
 
@@ -203,7 +476,10 @@ def visual_text_row_groups(
             for segment in (line.segments or [line.bbox])
             if not _line_is_excluded(segment, excluded)
         ]
-        return [_merge_visual_rows(visible_segments, page.line_pitch)] if visible_segments else [[]]
+        if not visible_segments:
+            return [[]]
+        baseline_rows = _merge_visual_rows(visible_segments, page.line_pitch)
+        return [_merge_single_column_row_fragments(baseline_rows, page.line_pitch)]
 
     tolerance = page.line_pitch * 0.25
     body_top = min(box.y0 for box in column_boxes)
@@ -986,7 +1262,10 @@ __all__ = [
     "HybridBlockPlacement",
     "HybridLayoutPlan",
     "HybridPagePlan",
+    "VerticalFitBudget",
+    "apply_page_vertical_fit_budget",
     "build_hybrid_layout_plan",
+    "build_page_vertical_fit_budget",
     "equation_layout_units",
     "source_row_reading_order",
     "visual_text_row_groups",

@@ -34,7 +34,9 @@ def test_aligned_latex_becomes_native_equation_array_without_control_leaks() -> 
     assert "\\begin" not in visible
     assert "\\end" not in visible
     assert "\\\\" not in visible
-    assert visible.count("&") == 2
+    assert "&" not in visible
+    assert visible == "=limx→0sinxx=12"
+    assert len([node for node in equation.iter() if _local_name(node.tag) == "aln"]) == 2
     assert unsupported_latex_commands(latex) == []
 
 
@@ -88,10 +90,55 @@ def test_equation_array_retains_native_alignment_and_row_spacing_controls() -> N
         if _local_name(node.tag) in {"rSpRule", "rSp"}
     }
 
-    assert {"eqArr", "rSpRule", "rSp"} <= tags
+    assert {"eqArr", "rSpRule", "rSp", "aln"} <= tags
     assert values == {"rSpRule": "4", "rSp": "3"}
-    assert latex_visible_text(r"\begin{aligned}&=x\\&=y\end{aligned}") == "&=x&=y"
+    assert latex_visible_text(r"\begin{aligned}&=x\\&=y\end{aligned}") == "=x=y"
+    alignment_runs = [
+        node.getparent() for node in equation.iter() if _local_name(node.tag) == "aln"
+    ]
+    assert len(alignment_runs) == 2
+    assert all(_local_name(node.tag) == "rPr" for node in alignment_runs)
+    assert all(_local_name(node.getparent().tag) == "r" for node in alignment_runs)
     assert any(_local_name(node.tag) == "sz" for node in equation.iter())
+
+
+def test_equation_array_supports_multiple_native_alignment_points_per_row() -> None:
+    latex = r"\begin{aligned}a&=b&+c\\d&=e&+f\end{aligned}"
+
+    equation = build_omml(latex)
+    rows = [node for node in equation.iter() if _local_name(node.tag) == "e"]
+    alignment_points = [node for node in equation.iter() if _local_name(node.tag) == "aln"]
+
+    assert len(rows) == 2
+    assert len(alignment_points) == 4
+    assert all(next(iter(node.attrib.values())) == "1" for node in alignment_points)
+    assert latex_visible_text(latex) == "a=b+cd=e+f"
+
+
+def test_escaped_and_grouped_ampersands_remain_literal_content() -> None:
+    latex = r"\begin{split}x\&y&=z\\\mathrm{R&D}&=q\end{split}"
+
+    equation = build_omml(latex)
+
+    assert len([node for node in equation.iter() if _local_name(node.tag) == "aln"]) == 2
+    assert latex_visible_text(latex) == "x&y=zR&D=q"
+
+
+def test_alignment_before_composite_math_uses_a_zero_width_native_point() -> None:
+    latex = r"\begin{gathered}&\frac{a}{b}\\&\sqrt{x}\end{gathered}"
+
+    equation = build_omml(latex)
+    alignment_runs = [
+        node.getparent().getparent() for node in equation.iter() if _local_name(node.tag) == "aln"
+    ]
+
+    assert len(alignment_runs) == 2
+    assert all(_local_name(node.tag) == "r" for node in alignment_runs)
+    assert all(
+        "".join(child.text or "" for child in node.iter() if _local_name(child.tag) == "t") == ""
+        for node in alignment_runs
+    )
+    assert latex_visible_text(latex) == "abx"
 
 
 def test_display_wrapper_uses_native_justification_and_exact_point_spacing() -> None:
