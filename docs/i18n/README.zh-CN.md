@@ -1,11 +1,11 @@
 # docreconstruct — 简体中文指南
 
-[English](../../README.md) · [Tiếng Việt](README.vi.md) · **简体中文** ·
-[Русский](README.ru.md)
+[英语](../../README.md) · [越南语](README.vi.md) · **简体中文** ·
+[俄语](README.ru.md)
 
 `docreconstruct` 可将 PDF、扫描件和文档照片重建为结构清晰、可继续编辑的
 文档。在整个流程中，OCR 结果只是用于核对的输入之一，并非最终成品。项目
-会通过统一的文档模型、版面规划和输出模块生成 DOCX、HTML 或 JSON。
+会通过统一的文档模型、版面规划和输出模块生成 DOCX 文档、网页或 JSON 数据。
 
 ## 推荐的三类输入
 
@@ -51,11 +51,11 @@ docreconstruct hybrid content.md original.pdf `
 ### 多页原始文档
 
 处理多页 PDF 时，项目会逐页分析并分别规划版面。原件中的每一页都会生成
-一个独立的 Word 节，保留相应的物理页面尺寸，并强制从新页开始。如果不同
-页面上的独立证据能够确认内容确实延续，同一语义组可以跨页；空白页或被 OCR
-遗漏的页面仍会保留为空节，不会把后一页的内容错误移到前面。默认 QA 会检查
-规划出的节数；显式启用 LibreOffice 检查后，还会要求渲染页数与原件页数完全
-一致。
+一个独立的 Microsoft Word 分节，保留相应的物理页面尺寸，并强制从新页
+开始。如果不同页面上的独立证据能够确认内容确实延续，同一语义组可以跨页；
+空白页或被 OCR 遗漏的页面仍会保留为空节，不会把后一页的内容错误移到前面。
+默认 QA 会检查规划出的节数；显式启用 LibreOffice 检查后，还会要求渲染页数
+与原件页数完全一致。
 
 ```powershell
 docreconstruct hybrid complete-document.md multi-page-original.pdf `
@@ -84,20 +84,76 @@ docreconstruct hybrid content.md original.png -o output/result.docx `
 
 ## 成功重建示例
 
-以下文件均由 CLI 所使用的同一套通用流程生成。您可以直接查看原图、项目
-根据 DOCX 生成的渲染图以及可编辑的 Word 文件，自行比较效果：
+这些文件均由 CLI 所使用的同一套通用重建流程生成。这里同时提供高分辨率
+原图、可下载的可编辑 DOCX 文件和项目生成的渲染预览，便于您直接核对实际
+效果，而不必仅凭截图判断。文件来源详情见[示例文件说明](../showcases/README.md)，
+精确校验值见 [SHA-256 清单](../showcases/SHA256SUMS.txt)。
 
-- **Tuyen Quang gifted school Math exam - Page 1 - Exam code: 0110** — 来源：
-  [VietnamNet](https://vietnamnet.vn/)。
-- **Calculus derivation - editable Office Math** — 来源：
-  [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)。
-- **Tuyen Quang gifted school - Vietnamese 2nd exam** — 来源：
-  [VNExpress](https://vnexpress.net/)。
+> **务必核验：** OCR 结果以及识别服务导出的 Markdown 可能含有拼写、变音
+> 符号、公式、表格或阅读顺序错误。由于 Markdown 是文字内容的最终依据，
+> DOCX 文件也可能原样保留这些错误。在依赖可编辑结果之前，请务必逐项对照
+> 原图。
 
-原图、DOCX 渲染图、可编辑的 DOCX 文件和 SHA-256 校验值均保存在
-[示例目录](../showcases/README.md)中。上述来源信息由贡献者提供，用于说明
-文件出处和便于追溯；它不等同于再使用许可，也不代表出版机构或 OCR 项目
-对 `docreconstruct` 的认可或背书。
+### 宣光省重点中学数学考试——第 1 页，试卷代码：0110（来源：VietnamNet）
+
+**来源：** [VietnamNet](https://vietnamnet.vn/)；此署名由贡献者提供，相关
+权利说明见[示例文件说明](../showcases/README.md)。
+
+| 拍摄的原始试卷页 | 项目从可编辑 DOCX 文件生成的预览 |
+| :---: | :---: |
+| [<img src="../showcases/math-exam/source-original.png" alt="宣光省重点中学数学考试原始试卷页" width="420">](../showcases/math-exam/source-original.png) | [<img src="../showcases/math-exam/rendered-preview.png" alt="可编辑数学试卷 DOCX 文件的渲染预览" width="420">](../showcases/math-exam/rendered-preview.png) |
+
+**相关文件：** [原图](../showcases/math-exam/source-original.png) ·
+[可编辑 DOCX 文件](../showcases/math-exam/editable.docx) ·
+[渲染预览](../showcases/math-exam/rendered-preview.png)
+
+此示例展示了实拍页面、结构复杂的页眉、Microsoft Word 原生表格、可编辑的
+原生公式、四选一选项布局，以及对原图中函数变化表的复用。手写内容、照片
+透视畸变、OCR 漏识别的文字和某些页面装饰不保证能够重建为可编辑内容。
+
+### 微积分推导——可编辑的 Microsoft Word 原生公式（来源：PaddleOCR）
+
+**来源：** [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)；OCR 结果及
+导出内容的出处说明由贡献者提供。
+
+| 原图 | 项目从可编辑 DOCX 文件生成的预览 |
+| :---: | :---: |
+| [<img src="../showcases/calculus-derivation/source-original.jpg" alt="微积分推导原图" width="420">](../showcases/calculus-derivation/source-original.jpg) | [<img src="../showcases/calculus-derivation/rendered-preview.png" alt="可编辑微积分推导 DOCX 文件的渲染预览" width="420">](../showcases/calculus-derivation/rendered-preview.png) |
+
+**相关文件：** [原图](../showcases/calculus-derivation/source-original.jpg) ·
+[可编辑 DOCX 文件](../showcases/calculus-derivation/editable.docx) ·
+[渲染预览](../showcases/calculus-derivation/rendered-preview.png)
+
+此示例展示了分数、积分、极限、上下标、对齐推导和中英文混排中的可选择、
+可编辑原生公式。通用版面规划器将 10 个可编辑内容块映射到原图中的全部
+18 行内容；最终 DOCX 文件渲染为一页，保留 8 个原生公式和 13 行独立展示
+内容，且不会露出公式排版用的对齐标记。项目 QA 的 34 项实测检查全部通过，
+前景归一化视觉相似度为 92.58%。该分数只能说明效果有所改善，不能证明每个
+字形或数学陈述在语义上都正确。
+
+### 宣光省重点中学——越南语第二次考试（来源：VNExpress）
+
+**来源：** [VNExpress](https://vnexpress.net/)；此署名由贡献者提供，相关
+权利说明见[示例文件说明](../showcases/README.md)。
+
+| 原图 | 项目从可编辑 DOCX 文件生成的预览 |
+| :---: | :---: |
+| [<img src="../showcases/vietnamese-exam/source-original.png" alt="越南语第二次考试原始试卷页" width="420">](../showcases/vietnamese-exam/source-original.png) | [<img src="../showcases/vietnamese-exam/rendered-preview.png" alt="可编辑越南语试卷 DOCX 文件的渲染预览" width="420">](../showcases/vietnamese-exam/rendered-preview.png) |
+
+**相关文件：** [原图](../showcases/vietnamese-exam/source-original.png) ·
+[可编辑 DOCX 文件](../showcases/vietnamese-exam/editable.docx) ·
+[渲染预览](../showcases/vietnamese-exam/rendered-preview.png)
+
+此示例展示了双区域试卷页眉、越南语衬线字体、缩进并两端对齐的文章段落、
+出处标注位置、供考生填写信息的点线和可编辑题目。OCR 仍可能产生拼写及
+变音符号错误；原图水印、已遮盖的考生信息和其他仅以像素图像存在的标记，
+不会被悄然重建为可编辑文字。
+
+上述来源署名由贡献者提供，仅用于记录贡献者所提供的出处信息，既不授予
+再使用许可，也不代表原出版机构或 OCR 项目认可或推荐 `docreconstruct`。
+项目代码的许可证不会自动授予对这些第三方试题内容、标志、水印、手写内容
+或其他素材的使用权；原有权利仍归各权利人所有。重新分发或使用任何示例文件
+前，请自行核查相关权利和隐私要求。
 
 ## 必须人工复核的限制
 
@@ -111,11 +167,11 @@ docreconstruct hybrid content.md original.png -o output/result.docx `
   法律或其他专业内容正确无误。
 - 如果 Markdown 与原件不一致，组合流程仍以 Markdown 的文字为准，不会
   擅自猜测或修改内容。
-- 逐像素复刻原件与使用 Word 原生对象实现深度编辑有时是相互冲突的目标。
-  本项目无法保证对所有文档都做到 1:1 重建。
+- 逐像素复刻原件与使用 Microsoft Word 原生对象实现深度编辑有时是相互
+  冲突的目标。本项目无法保证对所有文档都做到 1:1 重建。
 
 在考试、档案、法律、医疗、金融、合规或其他重要场景中使用之前，请务必
 逐项对照原件，并请相关领域的专业人员复核。
 
-如需了解完整的 API、支持的 OCR 来源、系统架构、参考项目、隐私说明和
-许可证，请阅读[英文 README](../../README.md)。
+如需了解完整的编程接口、支持的 OCR 来源、系统架构、参考项目、隐私说明和
+许可证，请阅读[英语版说明文档](../../README.md)。

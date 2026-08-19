@@ -1,7 +1,7 @@
 # docreconstruct — руководство на русском языке
 
-[English](../../README.md) · [Tiếng Việt](README.vi.md) ·
-[简体中文](README.zh-CN.md) · **Русский**
+[Английский](../../README.md) · [Вьетнамский](README.vi.md) ·
+[Китайский (упрощённый)](README.zh-CN.md) · **Русский**
 
 `docreconstruct` преобразует PDF, сканы и фотографии документов в
 структурированные файлы, которые можно редактировать. Результат OCR служит
@@ -95,25 +95,53 @@ docreconstruct hybrid content.md original.png -o output/result.docx `
   --qa-report output/result.qa.json
 ```
 
-## Примеры успешного восстановления
+## Примеры успешной реконструкции
 
 Все примеры получены тем же универсальным процессом, который используется в
-CLI. Можно самостоятельно сопоставить исходник, изображение, полученное после
-рендеринга DOCX, и редактируемый файл Word:
+CLI. Ниже можно непосредственно сравнить оригинал с изображением, полученным
+из редактируемого документа Word, а также скачать все файлы.
 
-- **Tuyen Quang gifted school Math exam - Page 1 - Exam code: 0110** — источник:
-  [VietnamNet](https://vietnamnet.vn/).
-- **Calculus derivation - editable Office Math** — источник:
-  [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR).
-- **Tuyen Quang gifted school - Vietnamese 2nd exam** — источник:
-  [VNExpress](https://vnexpress.net/).
+### Экзамен по математике в специализированной школе Туенкуанг — страница 1, код варианта 0110
 
-Исходные изображения, результаты рендеринга DOCX, редактируемые файлы DOCX и
-контрольные суммы SHA-256 находятся в [каталоге с примерами](../showcases/README.md).
-Сведения об источниках предоставлены участниками проекта, чтобы происхождение
-файлов можно было проверить. Эти сведения не являются разрешением на повторное
-использование и не означают, что издатель или разработчики OCR-проекта
-поддерживают либо рекомендуют `docreconstruct`.
+**Источник:** [VietnamNet](https://vietnamnet.vn/).
+
+| Исходная фотография | Результат рендеринга редактируемого DOCX |
+| :---: | :---: |
+| [<img src="../showcases/math-exam/source-original.png" alt="Исходная страница экзамена по математике" width="420">](../showcases/math-exam/source-original.png) | [<img src="../showcases/math-exam/rendered-preview.png" alt="Результат рендеринга редактируемого экзамена по математике" width="420">](../showcases/math-exam/rendered-preview.png) |
+
+**Файлы:** [исходное изображение](../showcases/math-exam/source-original.png) ·
+[редактируемый документ Word](../showcases/math-exam/editable.docx) ·
+[изображение результата](../showcases/math-exam/rendered-preview.png)
+
+### Выкладки по математическому анализу — редактируемые формулы Office Math
+
+**Источник:** [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR).
+
+| Исходное изображение | Результат рендеринга редактируемого DOCX |
+| :---: | :---: |
+| [<img src="../showcases/calculus-derivation/source-original.jpg" alt="Исходные выкладки по математическому анализу" width="420">](../showcases/calculus-derivation/source-original.jpg) | [<img src="../showcases/calculus-derivation/rendered-preview.png" alt="Результат с редактируемыми математическими формулами" width="420">](../showcases/calculus-derivation/rendered-preview.png) |
+
+**Файлы:** [исходное изображение](../showcases/calculus-derivation/source-original.jpg) ·
+[редактируемый документ Word](../showcases/calculus-derivation/editable.docx) ·
+[изображение результата](../showcases/calculus-derivation/rendered-preview.png)
+
+### Второй экзамен по вьетнамской литературе в специализированной школе Туенкуанг
+
+**Источник:** [VNExpress](https://vnexpress.net/).
+
+| Исходное изображение | Результат рендеринга редактируемого DOCX |
+| :---: | :---: |
+| [<img src="../showcases/vietnamese-exam/source-original.png" alt="Исходная страница экзамена по вьетнамской литературе" width="420">](../showcases/vietnamese-exam/source-original.png) | [<img src="../showcases/vietnamese-exam/rendered-preview.png" alt="Результат рендеринга редактируемого экзамена по вьетнамской литературе" width="420">](../showcases/vietnamese-exam/rendered-preview.png) |
+
+**Файлы:** [исходное изображение](../showcases/vietnamese-exam/source-original.png) ·
+[редактируемый документ Word](../showcases/vietnamese-exam/editable.docx) ·
+[изображение результата](../showcases/vietnamese-exam/rendered-preview.png)
+
+Контрольные суммы SHA-256 и общие сведения находятся в
+[каталоге примеров](../showcases/README.md). Указания источников предоставлены
+участниками проекта для проверки происхождения файлов. Они не являются
+разрешением на повторное использование и не означают, что издатель или
+разработчики OCR-проекта поддерживают либо рекомендуют `docreconstruct`.
 
 ## Ограничения, требующие ручной проверки
 
