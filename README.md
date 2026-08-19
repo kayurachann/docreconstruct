@@ -12,12 +12,33 @@ canonical document IR instead of reducing every source to Markdown.
 
 > OCR recovers the words. Reconstruction recovers the document.
 
+## Web client
+
+After the Pages workflow is deployed, the static client is intended to be
+available at
+[kayurachann.github.io/docreconstruct](https://kayurachann.github.io/docreconstruct/).
+It is a browser interface, not a hosted reconstruction service: GitHub Pages
+cannot run Python, LibreOffice, Triton, vLLM, or GPU OCR. This repository does
+**not** include a public backend or an unlimited free GPU endpoint.
+
+Before submitting a document, the user must choose a backend operated by an
+organization they trust and explicitly consent to uploading the Markdown,
+original PDF/image, and optional JSON evidence to that operator. If
+PaddleOCR-VL is enabled, the backend may forward the original to its configured
+OCR service. Retention, privacy, region, quota, and charges are governed by
+those operators, not by GitHub Pages or this repository. The client blocks
+submission until that disclosure is accepted and asks for consent again when
+the backend or OCR choice changes. See
+[Performance and public deployment](docs/PERFORMANCE.md) before publishing or
+using a backend.
+
 This repository is an early v0.1 foundation. It provides the portable IR,
 adapter contracts, deterministic planning and rendering, and evaluation
 building blocks. It does **not** bundle or silently download heavyweight OCR
-models. PaddleOCR, MinerU, olmOCR, and future engines remain optional adapters;
-users are responsible for installing and operating any inference system they
-choose.
+models. PaddleOCR, MinerU, olmOCR, and future engines remain separate projects;
+users or backend operators are responsible for installing, operating, or
+contracting with any inference system they choose. An open-source OCR engine
+does not imply free hosted compute.
 
 ## What v0.1 can do
 
@@ -26,7 +47,8 @@ choose.
 - Inspect raster images and optionally born-digital PDFs without discarding
   source geometry.
 - Normalize saved PaddleOCR, MinerU, and olmOCR evidence through provider
-  adapters, with a registry for custom providers.
+  adapters, call explicitly authorized hosted specialists, or connect to an
+  operator-managed full PaddleOCR-VL server through `paddleocr_vl_server`.
 - Build cost-aware page and region routing plans: native extraction first,
   specialist engines for tables/formulas/handwriting, and multi-engine
   adjudication only for uncertain or disagreeing evidence.
@@ -48,10 +70,12 @@ choose.
   and OCR candidates so an adjudicator cannot silently invent source text.
 
 The built-in renderers are deliberately modest. XLSX, PPTX, reconstructed PDF,
-live heavyweight OCR inference, and an automatic render/compare/correct critic
-are roadmap work. The current DOCX renderer favors native paragraphs and tables
-over hundreds of hard-to-edit positioned text boxes, so it should not be
-described as pixel-perfect.
+bundled heavyweight model execution, and an automatic render/compare/correct
+critic are roadmap work. Live OCR adapters call separately operated services;
+they do not turn the API or GitHub Pages into a bundled inference platform. The
+current DOCX renderer favors native paragraphs and tables over hundreds of
+hard-to-edit positioned text boxes, so it should not be described as
+pixel-perfect.
 
 ## Best-evidence input: Markdown + JSON + original
 
@@ -497,6 +521,7 @@ endpoints are:
 | `POST` | `/v1/analyze` | Upload a source and return canonical IR |
 | `POST` | `/v1/route` | Produce a cost-aware page/region provider plan |
 | `POST` | `/v1/reconstruct` | Upload a source and download the rendered artifact |
+| `POST` | `/v1/hybrid` | Rebuild editable DOCX from Markdown + original + optional JSON |
 | `POST` | `/v1/compare` | Compare supported IR or rendered artifacts and return a fidelity report |
 
 Uploads are multipart. The optional `options` part is a JSON object validated by
@@ -508,6 +533,41 @@ curl -f http://127.0.0.1:8000/v1/reconstruct \
   -F 'options={"output_format":"html","profile":"balanced"}' \
   --output scan.html
 ```
+
+The web client uses `/v1/hybrid`. `fast` runs project-native OOXML QA and is
+the low-latency default. `verified` additionally renders through the
+operator-configured LibreOffice binary and performs visual comparison, so it
+takes longer. Saved JSON avoids another OCR upload; when it is absent, an
+operator may expose its configured PaddleOCR-VL service as an explicit opt-in:
+
+```bash
+curl -f https://your-backend.example/v1/hybrid \
+  -F "content=@content.md" \
+  -F "layout=@original.pdf" \
+  -F "evidence=@paddleocr.json" \
+  -F 'options={"quality":"fast","evidence_provider":"paddleocr"}' \
+  --output reconstructed.docx
+
+# Omit evidence only when this backend advertises PaddleOCR-VL support.
+curl -f https://your-backend.example/v1/hybrid \
+  -F "content=@content.md" \
+  -F "layout=@original.pdf" \
+  -F 'options={"quality":"fast","use_paddleocr_vl":true}' \
+  --output reconstructed.docx
+```
+
+The backend operator, not the browser, controls OCR URLs, tokens, local
+renderer paths, CORS, and retention. Clients cannot supply those server-side
+values. Configure `PADDLEOCR_VL_SERVER_URL` for the built-in
+`paddleocr_vl_server`; optionally configure `PADDLEOCR_VL_SERVER_TOKEN`. For
+`verified`, configure `DOCRECONSTRUCT_LIBREOFFICE_PATH`. See the
+[deployment guide](docs/PERFORMANCE.md) for the trust and consent boundary.
+
+Remote images referenced by Markdown are also operator-controlled. The upload
+API rejects `"remote_assets":true` unless
+`DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS=1` is configured. Local asset paths are
+confined to the uploaded Markdown directory, and public HTTPS destinations are
+validated before download.
 
 The comparison endpoint accepts canonical JSON, raster images, text/Markdown,
 HTML, DOCX, and—with the `pdf` extra—PDF. It evaluates only dimensions supported
@@ -580,10 +640,15 @@ docreconstruct hybrid scan.md scan.pdf --output scan.editable.docx
 
 Built-in hosted adapters currently cover Mistral OCR, Azure Document
 Intelligence, Google Document AI, and Mathpix; saved AWS Textract JSON is also
-normalized. Website-exported Markdown is accepted directly, so users can run
-OCR manually in a provider's web UI and keep reconstruction inside this
-project. End-to-end provider comparisons use the same extraction path as
-production:
+normalized. `paddleocr_vl_server` connects, with explicit upload consent, to a
+server managed by the operator that implements the official PaddleOCR-VL
+pipeline contract.
+Website-exported Markdown is accepted directly, so users can run OCR manually
+in a provider's web UI and keep reconstruction inside this project. PaddleOCR
+and olmOCR publish open-source code, but their repositories do not provide this
+project with an unlimited public GPU: any external inference host has its own
+availability, quota, pricing, retention, and terms. End-to-end provider
+comparisons use the same extraction path as production:
 
 ```bash
 docreconstruct benchmark-ocr benchmark/ocr-benchmark.json \

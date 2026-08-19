@@ -7,9 +7,11 @@ import importlib.metadata
 import importlib.util
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Annotated, Any, TypeVar, cast
@@ -17,6 +19,7 @@ from typing import Annotated, Any, TypeVar, cast
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.background import BackgroundTasks
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ValidationError
 
@@ -36,6 +39,8 @@ from .models import (
     FormatInfo,
     FormatsResponse,
     HealthResponse,
+    HybridOptions,
+    HybridQuality,
     ProviderInfo,
     ProvidersResponse,
     ReconstructionResponse,
@@ -297,6 +302,66 @@ def _artifact_name(source: Path, options: ReconstructOptions) -> str:
     return f"{source.stem}{suffix}"
 
 
+def _cors_origins() -> list[str]:
+    """Return explicit browser origins; wildcard CORS is never enabled implicitly."""
+
+    configured = os.getenv("DOCRECONSTRUCT_CORS_ORIGINS", "")
+    return list(
+        dict.fromkeys(
+            origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()
+        )
+    )
+
+
+def _operator_feature_enabled(name: str) -> bool:
+    """Require a deliberate operator opt-in for high-risk server capabilities."""
+
+    return os.getenv(name, "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _hybrid_artifact_name(content: Path, options: HybridOptions) -> str:
+    if options.output_filename:
+        return options.output_filename
+    return f"{content.stem}_editable.docx"
+
+
+def _hybrid_timing_headers(value: Any) -> dict[str, str]:
+    """Expose only fixed, non-sensitive phase names through standard HTTP timing."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    phases = (
+        ("authority", "authority.hash"),
+        ("ocr", "ocr.online"),
+        ("scan", "prepare.scan"),
+        ("evidence", "prepare.evidence_match"),
+        ("docx", "reconstruct.docx_render"),
+        ("qa-native", "qa.native"),
+        ("qa-render", "qa.render"),
+        ("qa-visual", "qa.visual"),
+        ("total", "job.total"),
+    )
+    measurements: list[tuple[str, float]] = []
+    for label, key in phases:
+        raw = value.get(key)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        seconds = float(raw)
+        if seconds >= 0 and math.isfinite(seconds):
+            measurements.append((label, seconds))
+    if not measurements:
+        return {}
+    headers = {
+        "Server-Timing": ", ".join(
+            f"{label};dur={seconds * 1000.0:.3f}" for label, seconds in measurements
+        )
+    }
+    total = next((seconds for label, seconds in measurements if label == "total"), None)
+    if total is not None:
+        headers["X-DocReconstruct-Duration"] = f"{total:.6f}"
+    return headers
+
+
 def create_app() -> FastAPI:
     application = FastAPI(
         title="docreconstruct API",
@@ -309,6 +374,24 @@ def create_app() -> FastAPI:
         version=_package_version(),
         license_info={"name": "Apache-2.0"},
     )
+    cors_origins = _cors_origins()
+    if cors_origins:
+        application.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["Accept", "Content-Type"],
+            expose_headers=[
+                "Content-Disposition",
+                "Server-Timing",
+                "X-DocReconstruct-Duration",
+                "X-DocReconstruct-OCR",
+                "X-DocReconstruct-QA-Score",
+                "X-DocReconstruct-Quality",
+                "X-DocReconstruct-Visual-Score",
+            ],
+        )
 
     @application.get("/", include_in_schema=False)
     async def index() -> dict[str, str]:
@@ -472,6 +555,166 @@ def create_app() -> FastAPI:
             )
             shutil.rmtree(temp_dir, ignore_errors=True)
             return response
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            _raise_pipeline_error(exc)
+            raise  # pragma: no cover - _raise_pipeline_error always raises
+
+    @application.post(
+        "/v1/hybrid",
+        responses={
+            200: {
+                "description": "Editable DOCX reconstructed from Markdown and source layout",
+                "content": {
+                    ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"): {}
+                },
+            },
+            400: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+            503: {"model": ErrorResponse},
+        },
+        tags=["documents"],
+    )
+    async def hybrid_document(
+        background_tasks: BackgroundTasks,
+        content: Annotated[UploadFile, File(description="Markdown content authority")],
+        layout: Annotated[UploadFile, File(description="Original PDF or raster layout authority")],
+        evidence: Annotated[
+            UploadFile | None,
+            File(description="Optional OCR JSON geometry and structure evidence"),
+        ] = None,
+        options: Annotated[
+            str | None,
+            Form(description="JSON-encoded HybridOptions; omit to use fast native QA"),
+        ] = None,
+    ) -> FileResponse:
+        parsed = _parse_options(options, HybridOptions)
+        if parsed.evidence_provider is not None and evidence is None:
+            raise HTTPException(
+                status_code=422,
+                detail="evidence_provider requires an evidence upload",
+            )
+        if parsed.remote_assets and not _operator_feature_enabled(
+            "DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS"
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "remote Markdown assets are disabled by the server operator; "
+                    "DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS must be enabled explicitly"
+                ),
+            )
+
+        renderer_path: str | None = None
+        render_backend = "native"
+        if parsed.quality is HybridQuality.VERIFIED:
+            renderer_path = os.getenv("DOCRECONSTRUCT_LIBREOFFICE_PATH")
+            if not renderer_path:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "verified quality is unavailable because the server operator has not "
+                        "configured DOCRECONSTRUCT_LIBREOFFICE_PATH"
+                    ),
+                )
+            render_backend = "libreoffice"
+
+        if parsed.use_paddleocr_vl and not os.getenv("PADDLEOCR_VL_SERVER_URL"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "PaddleOCR-VL is unavailable because the server operator has not configured "
+                    "PADDLEOCR_VL_SERVER_URL"
+                ),
+            )
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="docreconstruct-hybrid-api-"))
+        try:
+            content_path = await _stage_upload(content, temp_dir, "content.md")
+            layout_path = await _stage_upload(layout, temp_dir, "layout.bin")
+            evidence_path = (
+                await _stage_upload(evidence, temp_dir, "evidence.json")
+                if evidence is not None
+                else None
+            )
+            output_path = temp_dir / _hybrid_artifact_name(content_path, parsed)
+            qa_report = temp_dir / f"{output_path.stem}.qa.json"
+
+            hybrid_job = importlib.import_module("docreconstruct.reconstruction.hybrid_job")
+            online_ocr = None
+            if parsed.use_paddleocr_vl:
+                extraction = importlib.import_module("docreconstruct.extraction")
+                online_ocr = hybrid_job.OnlineOCRRequest(
+                    mode=extraction.ExtractionMode.CLOUD,
+                    providers=("paddleocr_vl_server",),
+                    allow_cloud=True,
+                    maximum_providers=1,
+                    artifacts_directory=temp_dir / "ocr",
+                    cache=False,
+                    # The endpoint comes from operator-controlled environment
+                    # configuration, never from the upload client. Mark that
+                    # reviewed non-loopback endpoint as trusted explicitly.
+                    provider_options={"paddleocr_vl_server": {"allow_custom_endpoint": True}},
+                )
+            result = await run_in_threadpool(
+                hybrid_job.run_hybrid_job,
+                content_path,
+                layout_path,
+                evidence=evidence_path,
+                evidence_provider_hints=parsed.evidence_provider,
+                strict_evidence=parsed.strict_evidence,
+                output=output_path,
+                allow_remote_assets=parsed.remote_assets,
+                online_ocr=online_ocr,
+                render_backend=render_backend,
+                renderer_path=renderer_path,
+                minimum_visual_score=parsed.minimum_visual_score,
+                qa_report=qa_report,
+            )
+            if not result.validation.passed:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "hybrid reconstruction failed project QA "
+                        f"({result.validation.score:.2%}); no artifact was returned"
+                    ),
+                )
+            if not output_path.is_file():
+                raise RuntimeError("hybrid reconstruction did not produce a DOCX artifact")
+
+            background_tasks.add_task(shutil.rmtree, temp_dir, ignore_errors=True)
+            ocr_provenance = (
+                "paddleocr-vl-server"
+                if parsed.use_paddleocr_vl
+                else "provided-evidence"
+                if evidence is not None
+                else "scan-layout-only"
+            )
+            headers = {
+                "X-DocReconstruct-OCR": ocr_provenance,
+                "X-DocReconstruct-QA-Score": f"{result.validation.score:.6f}",
+                "X-DocReconstruct-Quality": parsed.quality.value,
+            }
+            rendered_visual = getattr(result.validation, "metrics", {}).get("rendered_visual")
+            if isinstance(rendered_visual, Mapping):
+                raw_visual_score = rendered_visual.get("score")
+                if (
+                    isinstance(raw_visual_score, (int, float))
+                    and not isinstance(raw_visual_score, bool)
+                    and math.isfinite(float(raw_visual_score))
+                    and 0.0 <= float(raw_visual_score) <= 1.0
+                ):
+                    headers["X-DocReconstruct-Visual-Score"] = f"{float(raw_visual_score):.6f}"
+            headers.update(_hybrid_timing_headers(getattr(result, "phase_seconds", None)))
+            return FileResponse(
+                output_path,
+                filename=output_path.name,
+                media_type=(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                ),
+                headers=headers,
+                background=background_tasks,
+            )
         except Exception as exc:
             shutil.rmtree(temp_dir, ignore_errors=True)
             _raise_pipeline_error(exc)

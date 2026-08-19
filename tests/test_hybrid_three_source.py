@@ -22,7 +22,8 @@ from docreconstruct.ir import (
     TextAlignment,
 )
 from docreconstruct.reconstruction import reconstruct_hybrid
-from docreconstruct.reconstruction.evidence_matching import match_sidecar_evidence
+from docreconstruct.reconstruction.asset_matching import AssetMatch
+from docreconstruct.reconstruction.evidence_matching import EvidenceMatch, match_sidecar_evidence
 from docreconstruct.reconstruction.hybrid_docx import render_hybrid_docx
 from docreconstruct.reconstruction.hybrid_planner import (
     build_hybrid_layout_plan,
@@ -139,6 +140,99 @@ def test_json_evidence_seeds_planner_geometry_and_native_style(tmp_path: Path) -
     assert justification is not None
     assert justification.get(_WORD + "val") == "center"
     assert first.find(f".//{_WORD}b") is not None
+
+
+def test_json_image_geometry_overrides_unscaled_offline_hints_in_render_order(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "content.md"
+    markdown.write_text(
+        "\n\n".join(
+            [
+                (
+                    '<img src="https://assets.invalid/export/markdown_0/imgs/'
+                    'img_in_image_box_10_20_50_70.jpg" alt="First figure" />'
+                ),
+                (
+                    '<img src="https://assets.invalid/export/markdown_1/imgs/'
+                    'img_in_image_box_20_30_80_90.jpg" alt="Second figure" />'
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    content = parse_markdown_content(markdown)
+    pages = [
+        ScanPageLayout(
+            number=number,
+            width=200,
+            height=300,
+            pdf_width=100,
+            pdf_height=150,
+            content_bbox=PixelBox(x0=0, y0=0, x1=200, y1=300),
+            line_pitch=20,
+            image=Image.new("RGB", (200, 300), "white"),
+            metadata={"source_kind": "pdf", "rectified": False},
+        )
+        for number in (1, 2)
+    ]
+    layout = ScanDocumentLayout(source=str(tmp_path / "layout.pdf"), pages=pages)
+    raw_hints = [
+        PixelBox(x0=10, y0=20, x1=50, y1=70),
+        PixelBox(x0=20, y0=30, x1=80, y1=90),
+    ]
+    scaled_evidence = [
+        PixelBox(x0=20, y0=40, x1=100, y1=140),
+        PixelBox(x0=40, y0=60, x1=160, y1=180),
+    ]
+    assets = [
+        AssetMatch(
+            block_id=block.id,
+            source=block.source or "",
+            page_number=page_number,
+            bbox=raw_hints[page_number - 1],
+            score=0.82,
+            resolved=False,
+        )
+        for page_number, block in enumerate(content.image_blocks, start=1)
+    ]
+    evidence = [
+        EvidenceMatch(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=page_number,
+            source_bbox=scaled_evidence[page_number - 1],
+            source_rows=[scaled_evidence[page_number - 1]],
+            match_score=0.98,
+            confidence=0.95,
+            providers=("paddleocr",),
+            element_ids=(f"page-{page_number}-figure",),
+        )
+        for page_number, block in enumerate(content.image_blocks, start=1)
+    ]
+
+    plan = build_hybrid_layout_plan(
+        content,
+        layout,
+        assets,
+        [],
+        evidence_matches=evidence,
+    )
+
+    placements = [placement for page in plan.pages for placement in page.placements]
+    assert [placement.page_number for placement in placements] == [1, 2]
+    assert [placement.source_bbox for placement in placements] == scaled_evidence
+    assert [placement.geometry_source for placement in placements] == [
+        "json_consensus",
+        "json_consensus",
+    ]
+
+    payload = render_hybrid_docx(content, layout, plan, assets)
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        media = sorted(name for name in package.namelist() if name.startswith("word/media/"))
+        rendered_sizes = [Image.open(io.BytesIO(package.read(name))).size for name in media]
+    assert rendered_sizes == [(80, 100), (120, 120)]
 
 
 def test_column_local_evidence_anchor_preserves_other_column_rows(tmp_path: Path) -> None:

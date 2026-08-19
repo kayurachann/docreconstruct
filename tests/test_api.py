@@ -216,6 +216,259 @@ def test_real_raster_reconstruction_returns_self_contained_html(client: TestClie
     assert "dr-page" in response.text
 
 
+def test_hybrid_upload_runs_project_job_and_returns_docx(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    call: dict[str, Any] = {}
+
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        call["content"] = content.read_text(encoding="utf-8")
+        call["layout"] = layout.read_bytes()
+        evidence = kwargs["evidence"]
+        call["evidence"] = evidence.read_bytes()
+        call["kwargs"] = kwargs
+        Path(kwargs["output"]).write_bytes(b"editable-docx")
+        return SimpleNamespace(
+            validation=SimpleNamespace(
+                passed=True,
+                score=0.987654,
+                metrics={"rendered_visual": None},
+            ),
+            phase_seconds={
+                "prepare.scan": 0.125,
+                "prepare.evidence_match": 0.25,
+                "job.total": 0.5,
+                "secret.provider": 999,
+            },
+        )
+
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"# Exact wording", "text/markdown"),
+            "layout": ("layout.png", b"layout-pixels", "image/png"),
+            "evidence": ("paddle.json", b'{"pages": []}', "application/json"),
+        },
+        data={
+            "options": json.dumps(
+                {
+                    "evidence_provider": "paddleocr",
+                    "output_filename": "finished.docx",
+                }
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"editable-docx"
+    assert "finished.docx" in response.headers["content-disposition"]
+    assert response.headers["x-docreconstruct-quality"] == "fast"
+    assert response.headers["x-docreconstruct-qa-score"] == "0.987654"
+    assert "x-docreconstruct-visual-score" not in response.headers
+    assert response.headers["x-docreconstruct-duration"] == "0.500000"
+    assert response.headers["server-timing"] == (
+        "scan;dur=125.000, evidence;dur=250.000, total;dur=500.000"
+    )
+    assert "secret" not in response.headers["server-timing"]
+    assert call["content"] == "# Exact wording"
+    assert call["layout"] == b"layout-pixels"
+    assert call["evidence"] == b'{"pages": []}'
+    assert call["kwargs"]["evidence_provider_hints"] == "paddleocr"
+    assert call["kwargs"]["render_backend"] == "native"
+    assert call["kwargs"]["online_ocr"] is None
+
+
+def test_hybrid_verified_requires_operator_libreoffice_configuration(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DOCRECONSTRUCT_LIBREOFFICE_PATH", raising=False)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"quality": "verified"})},
+    )
+
+    assert response.status_code == 503
+    assert "DOCRECONSTRUCT_LIBREOFFICE_PATH" in response.text
+
+
+def test_hybrid_paddleocr_requires_operator_endpoint(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PADDLEOCR_VL_SERVER_URL", raising=False)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"use_paddleocr_vl": True})},
+    )
+
+    assert response.status_code == 503
+    assert "PADDLEOCR_VL_SERVER_URL" in response.text
+
+
+def test_hybrid_paddleocr_uses_operator_managed_server(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    call: dict[str, Any] = {}
+
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        call.update(kwargs)
+        Path(kwargs["output"]).write_bytes(b"paddle-docx")
+        return SimpleNamespace(validation=SimpleNamespace(passed=True, score=1.0, metrics={}))
+
+    monkeypatch.setenv("PADDLEOCR_VL_SERVER_URL", "http://127.0.0.1:8080")
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"use_paddleocr_vl": True})},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"paddle-docx"
+    assert response.headers["x-docreconstruct-ocr"] == "paddleocr-vl-server"
+    online = call["online_ocr"]
+    assert online.allow_cloud is True
+    assert online.providers == ("paddleocr_vl_server",)
+    assert online.maximum_providers == 1
+    assert online.provider_options == {"paddleocr_vl_server": {"allow_custom_endpoint": True}}
+
+
+def test_hybrid_remote_assets_require_operator_opt_in(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS", raising=False)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"![figure](https://example.test/a.png)", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"remote_assets": True})},
+    )
+
+    assert response.status_code == 503
+    assert "DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS" in response.text
+
+
+def test_hybrid_operator_can_enable_remote_assets_and_scan_only_provenance(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    call: dict[str, Any] = {}
+
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        call.update(kwargs)
+        Path(kwargs["output"]).write_bytes(b"remote-assets-docx")
+        return SimpleNamespace(validation=SimpleNamespace(passed=True, score=1.0, metrics={}))
+
+    monkeypatch.setenv("DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS", "1")
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"![figure](https://example.test/a.png)", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"remote_assets": True})},
+    )
+
+    assert response.status_code == 200, response.text
+    assert call["allow_remote_assets"] is True
+    assert response.headers["x-docreconstruct-ocr"] == "scan-layout-only"
+
+
+def test_hybrid_verified_exposes_actual_visual_score_only(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        Path(kwargs["output"]).write_bytes(b"verified-docx")
+        return SimpleNamespace(
+            validation=SimpleNamespace(
+                passed=True,
+                score=1.0,
+                metrics={"rendered_visual": {"score": 0.731245}},
+            )
+        )
+
+    monkeypatch.setenv("DOCRECONSTRUCT_LIBREOFFICE_PATH", "operator-libreoffice")
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"quality": "verified"})},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-docreconstruct-qa-score"] == "1.000000"
+    assert response.headers["x-docreconstruct-visual-score"] == "0.731245"
+
+
+@pytest.mark.parametrize(
+    "hybrid_options",
+    [
+        {"minimum_visual_score": 0.8},
+        {"evidence_provider": "../../private"},
+        {"output_filename": "../escape.docx"},
+    ],
+)
+def test_hybrid_rejects_unsafe_or_incompatible_options(
+    client: TestClient, hybrid_options: dict[str, Any]
+) -> None:
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps(hybrid_options)},
+    )
+
+    assert response.status_code == 422
+
+
+def test_configured_cors_exposes_download_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "DOCRECONSTRUCT_CORS_ORIGINS",
+        "https://kayurachann.github.io, https://example.test/",
+    )
+    with TestClient(create_app()) as cors_client:
+        response = cors_client.get(
+            "/health",
+            headers={"Origin": "https://kayurachann.github.io"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == ("https://kayurachann.github.io")
+    exposed = response.headers["access-control-expose-headers"]
+    assert "Content-Disposition" in exposed
+    assert "X-DocReconstruct-QA-Score" in exposed
+    assert "X-DocReconstruct-Visual-Score" in exposed
+
+
 @pytest.mark.parametrize(
     ("options", "expected_detail"),
     [

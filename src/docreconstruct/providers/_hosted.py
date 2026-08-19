@@ -38,6 +38,13 @@ class ProviderHTTPError(HostedProviderError):
     """Raised for a failed or malformed hosted API response."""
 
 
+# Keep hosted responses bounded even when a server omits or lies about
+# Content-Length. This is intentionally a process-wide safety policy rather
+# than a provider option: an untrusted response must not be able to opt out.
+MAX_HOSTED_RESPONSE_BYTES = 64 * 1024 * 1024
+_HOSTED_RESPONSE_READ_CHUNK_BYTES = 64 * 1024
+
+
 @dataclass(frozen=True, slots=True)
 class HTTPResponse:
     """Small transport-neutral HTTP response used by provider tests and adapters."""
@@ -61,6 +68,75 @@ class HTTPTransport(Protocol):
     ) -> HTTPResponse: ...
 
 
+class _NoRedirectHandler(urllib_request.HTTPRedirectHandler):
+    """Refuse redirects so credentials are never replayed to another origin."""
+
+    def redirect_request(
+        self,
+        req: urllib_request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+def _response_headers(raw_headers: Any) -> dict[str, str]:
+    if raw_headers is None:
+        return {}
+    try:
+        return {str(key): str(value) for key, value in raw_headers.items()}
+    except (AttributeError, TypeError, ValueError):
+        return {}
+
+
+def _bounded_response_body(
+    stream: Any,
+    headers: Mapping[str, str],
+) -> bytes:
+    declared_length: int | None = None
+    for key, value in headers.items():
+        if key.casefold() != "content-length":
+            continue
+        try:
+            candidate = int(value.strip())
+        except (TypeError, ValueError):
+            break
+        if candidate >= 0:
+            declared_length = candidate
+        break
+    if declared_length is not None and declared_length > MAX_HOSTED_RESPONSE_BYTES:
+        raise ProviderHTTPError(
+            f"hosted OCR response exceeds the {MAX_HOSTED_RESPONSE_BYTES}-byte safety limit"
+        )
+
+    chunks: list[bytes] = []
+    received = 0
+    while True:
+        remaining = MAX_HOSTED_RESPONSE_BYTES - received
+        chunk = stream.read(min(_HOSTED_RESPONSE_READ_CHUNK_BYTES, remaining + 1))
+        if not chunk:
+            break
+        received += len(chunk)
+        if received > MAX_HOSTED_RESPONSE_BYTES:
+            raise ProviderHTTPError(
+                f"hosted OCR response exceeds the {MAX_HOSTED_RESPONSE_BYTES}-byte safety limit"
+            )
+        chunks.append(bytes(chunk))
+    return b"".join(chunks)
+
+
+def _http_response_from_stream(stream: Any, *, status: int) -> HTTPResponse:
+    headers = _response_headers(getattr(stream, "headers", None))
+    return HTTPResponse(
+        status=status,
+        headers=headers,
+        body=_bounded_response_body(stream, headers),
+    )
+
+
 def stdlib_http_transport(
     *,
     method: str,
@@ -69,7 +145,13 @@ def stdlib_http_transport(
     body: bytes | None,
     timeout: float,
 ) -> HTTPResponse:
-    """Perform one HTTP request with the Python standard library."""
+    """Perform exactly one bounded HTTP request with the standard library.
+
+    Automatic redirects are deliberately disabled. Provider credentials can
+    therefore only be sent to the URL which already passed that provider's
+    endpoint validation; callers may inspect/retry a redirect explicitly after
+    applying the same validation to its destination.
+    """
 
     request = urllib_request.Request(
         url,
@@ -77,19 +159,15 @@ def stdlib_http_transport(
         headers=dict(headers),
         method=method.upper(),
     )
+    opener = urllib_request.build_opener(_NoRedirectHandler())
     try:
-        with urllib_request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            return HTTPResponse(
-                status=int(response.status),
-                headers={str(key): str(value) for key, value in response.headers.items()},
-                body=response.read(),
-            )
+        with opener.open(request, timeout=timeout) as response:
+            return _http_response_from_stream(response, status=int(response.status))
     except urllib_error.HTTPError as exc:
-        return HTTPResponse(
-            status=int(exc.code),
-            headers={str(key): str(value) for key, value in exc.headers.items()},
-            body=exc.read(),
-        )
+        try:
+            return _http_response_from_stream(exc, status=int(exc.code))
+        finally:
+            exc.close()
     except (OSError, urllib_error.URLError) as exc:
         raise ProviderHTTPError(f"hosted OCR request failed: {exc}") from exc
 
@@ -393,6 +471,7 @@ __all__ = [
     "HTTPTransport",
     "HostedProviderError",
     "HostedSource",
+    "MAX_HOSTED_RESPONSE_BYTES",
     "ProviderAuthenticationError",
     "ProviderHTTPError",
     "RemoteInferenceDisabledError",

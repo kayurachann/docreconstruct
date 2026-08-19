@@ -48,6 +48,11 @@ from .mistral_ocr import MistralOCRProvider, MistralOcrProvider
 from .native_pdf import NativePDFProvider, NativePdfProvider
 from .olmocr import OLMOCRProvider, OlmOCRProvider, OlmOcrProvider
 from .paddleocr import PaddleOCRProvider, PaddleOcrProvider
+from .paddleocr_vl_server import (
+    PaddleOCRVLAPIProvider,
+    PaddleOCRVLServerProvider,
+    PaddleOcrVlServerProvider,
+)
 from .registry import ProviderRegistry, get_registry
 from .selection import (
     CapabilityRequest,
@@ -63,6 +68,7 @@ for _provider in (
     MathpixProvider,
     NativePDFProvider,
     PaddleOCRProvider,
+    PaddleOCRVLServerProvider,
     MinerUProvider,
     OlmOCRProvider,
     MistralOCRProvider,
@@ -127,6 +133,9 @@ __all__ = [
     "OlmOcrProvider",
     "PaddleOCRProvider",
     "PaddleOcrProvider",
+    "PaddleOCRVLAPIProvider",
+    "PaddleOCRVLServerProvider",
+    "PaddleOcrVlServerProvider",
     "TextractProvider",
     "CapabilityRequest",
     "Provider",

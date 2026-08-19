@@ -341,3 +341,45 @@ def test_detects_wrapped_page_records_used_by_saved_adapters() -> None:
 
     assert detect_sidecar_provider(olmocr).provider == "olmocr"
     assert detect_sidecar_provider(paddle).provider == "paddleocr"
+
+
+def test_paddleocr_vl_four_page_sidecar_is_detected_and_loaded_offline(tmp_path: Path) -> None:
+    payload = [
+        {
+            "prunedResult": {
+                "parsing_res_list": [
+                    {
+                        "block_bbox": [10, 20, 100, 45],
+                        "block_label": "text",
+                        "block_content": f"Evidence page {page_number}",
+                        "block_id": page_number,
+                        "block_order": 0,
+                    }
+                ],
+                "layout_det_res": {"boxes": []},
+            },
+            "markdown": {"text": f"Evidence page {page_number}", "images": {}},
+            "outputImages": {"layout_det_res": f"page-{page_number}-layout"},
+            "inputImage": f"page-{page_number}.png",
+        }
+        for page_number in range(1, 5)
+    ]
+    detection = detect_sidecar_provider(payload)
+
+    assert detection.provider == "paddleocr"
+    assert detection.confidence >= 0.95
+    assert not detection.ambiguous
+
+    sidecar = _write_json(tmp_path / "paddleocr-vl.json", payload)
+    bundle = load_sidecar_evidence([sidecar], strict=True)
+    document = bundle.documents[0]
+
+    assert bundle.errors == ()
+    assert bundle.items[0].provider == "paddleocr"
+    assert [page.number for page in document.pages] == [1, 2, 3, 4]
+    assert [page.elements[0].text for page in document.pages] == [
+        "Evidence page 1",
+        "Evidence page 2",
+        "Evidence page 3",
+        "Evidence page 4",
+    ]

@@ -5,10 +5,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import ipaddress
 import mimetypes
 import os
 import re
+import socket
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -27,6 +30,169 @@ _PROVIDER_CROP_HINT = re.compile(
     r"(?P<x0>\d+)[_-](?P<y0>\d+)[_-](?P<x1>\d+)[_-](?P<y1>\d+)",
     flags=re.IGNORECASE,
 )
+_PROVIDER_PAGE_HINT = re.compile(
+    r"(?:^|[/\\])markdown_(?P<page_index>\d+)(?=[/\\])",
+    flags=re.IGNORECASE,
+)
+_ASSET_CACHE_LOCK = threading.Lock()
+_DEFAULT_ASSET_CACHE_BYTES = 256 * 1024 * 1024
+
+
+def _validated_remote_asset_url(source: str) -> str:
+    """Return a public HTTPS asset URL or reject an SSRF-capable target.
+
+    Remote Markdown assets are user-controlled.  HTTPS alone is insufficient:
+    public URLs can redirect to loopback/link-local services, and DNS can expose
+    private addresses.  Reject every non-global resolution before a connection
+    is attempted.  Redirects pass through the same validator below.
+    """
+
+    parsed = urllib.parse.urlparse(source)
+    if parsed.scheme.casefold() != "https" or not parsed.hostname:
+        raise ValueError("remote Markdown images must use an absolute HTTPS URL")
+    if parsed.username or parsed.password:
+        raise ValueError("remote Markdown image URLs must not contain credentials")
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise ValueError("remote Markdown image URL contains an invalid port") from exc
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(
+                parsed.hostname,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except OSError as exc:
+        raise ValueError(
+            f"remote Markdown image host could not be resolved: {parsed.hostname}"
+        ) from exc
+    if not addresses:
+        raise ValueError(f"remote Markdown image host could not be resolved: {parsed.hostname}")
+    for address in addresses:
+        try:
+            resolved = ipaddress.ip_address(str(address).split("%", 1)[0])
+        except ValueError as exc:
+            raise ValueError("remote Markdown image host returned an invalid address") from exc
+        if not resolved.is_global:
+            raise ValueError(
+                "remote Markdown image host resolves to a private, loopback, "
+                f"link-local, or reserved address: {address}"
+            )
+    return urllib.parse.urlunparse(parsed._replace(fragment=""))
+
+
+class _SafeAssetRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Revalidate every redirect before urllib follows it."""
+
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        validated = _validated_remote_asset_url(new_url)
+        return super().redirect_request(
+            request,
+            file_pointer,
+            code,
+            message,
+            headers,
+            validated,
+        )
+
+
+def _open_remote_asset(request: urllib.request.Request, *, timeout: float) -> Any:
+    opener = urllib.request.build_opener(_SafeAssetRedirectHandler())
+    return opener.open(request, timeout=timeout)  # noqa: S310
+
+
+def _asset_cache_limit() -> int:
+    raw = os.environ.get("DOCRECONSTRUCT_ASSET_CACHE_MAX_MB")
+    if raw is None:
+        return _DEFAULT_ASSET_CACHE_BYTES
+    try:
+        megabytes = int(raw)
+    except ValueError:
+        return _DEFAULT_ASSET_CACHE_BYTES
+    return max(0, min(megabytes, 4096)) * 1024 * 1024
+
+
+def _remove_cache_entry(payload_path: Path) -> None:
+    payload_path.unlink(missing_ok=True)
+    payload_path.with_suffix(".type").unlink(missing_ok=True)
+
+
+def _prune_asset_cache(cache_root: Path, *, incoming_bytes: int) -> bool:
+    """Make room for one entry within a bounded best-effort disk cache."""
+
+    limit = _asset_cache_limit()
+    if limit <= 0 or incoming_bytes > limit:
+        return False
+    entries: list[tuple[float, int, Path]] = []
+    total = 0
+    for payload_path in cache_root.glob("*.bin"):
+        try:
+            stat = payload_path.stat()
+        except OSError:
+            continue
+        total += stat.st_size
+        entries.append((stat.st_mtime, stat.st_size, payload_path))
+    target = max(0, limit - incoming_bytes)
+    for _modified, size, payload_path in sorted(entries):
+        if total <= target:
+            break
+        _remove_cache_entry(payload_path)
+        total -= size
+    return True
+
+
+def _write_asset_cache(
+    cache_root: Path,
+    payload_path: Path,
+    media_type_path: Path,
+    data: bytes,
+    media_type: str,
+) -> None:
+    with _ASSET_CACHE_LOCK:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        if not _prune_asset_cache(cache_root, incoming_bytes=len(data)):
+            return
+        temporary_payload: Path | None = None
+        temporary_media_type: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=cache_root,
+                prefix=".asset-payload-",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                stream.write(data)
+                temporary_payload = Path(stream.name)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="ascii",
+                dir=cache_root,
+                prefix=".asset-type-",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                stream.write(media_type)
+                temporary_media_type = Path(stream.name)
+            temporary_payload.replace(payload_path)
+            temporary_payload = None
+            temporary_media_type.replace(media_type_path)
+            temporary_media_type = None
+        finally:
+            if temporary_payload is not None:
+                temporary_payload.unlink(missing_ok=True)
+            if temporary_media_type is not None:
+                temporary_media_type.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -66,8 +232,9 @@ def _read_limited(stream: Any, maximum_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=4)
 def _download_remote(source: str, timeout: float, maximum_bytes: int) -> tuple[bytes, str]:
+    source = _validated_remote_asset_url(source)
     cache_root = Path(
         os.environ.get(
             "DOCRECONSTRUCT_ASSET_CACHE",
@@ -77,29 +244,48 @@ def _download_remote(source: str, timeout: float, maximum_bytes: int) -> tuple[b
     cache_key = hashlib.sha256(source.encode("utf-8")).hexdigest()
     payload_path = cache_root / f"{cache_key}.bin"
     media_type_path = cache_root / f"{cache_key}.type"
-    if payload_path.is_file():
-        data = payload_path.read_bytes()
-        if len(data) <= maximum_bytes:
-            media_type = (
-                media_type_path.read_text(encoding="ascii").strip()
-                if media_type_path.is_file()
-                else "application/octet-stream"
-            )
-            return data, media_type
+    with _ASSET_CACHE_LOCK:
+        try:
+            cached_size = payload_path.stat().st_size if payload_path.is_file() else None
+        except OSError:
+            cached_size = None
+        if cached_size is not None and cached_size <= maximum_bytes:
+            try:
+                data = payload_path.read_bytes()
+                with Image.open(io.BytesIO(data)) as cached_image:
+                    cached_image.verify()
+            except (OSError, SyntaxError, ValueError):
+                _remove_cache_entry(payload_path)
+            else:
+                media_type = (
+                    media_type_path.read_text(encoding="ascii").strip()
+                    if media_type_path.is_file()
+                    else "application/octet-stream"
+                )
+                return data, media_type
+        elif cached_size is not None:
+            _remove_cache_entry(payload_path)
     request = urllib.request.Request(
         source,
         headers={"User-Agent": "docreconstruct/0.1 hybrid-layout-matcher"},
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with _open_remote_asset(request, timeout=timeout) as response:
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except (TypeError, ValueError):
+                declared_size = 0
+            if declared_size > maximum_bytes:
+                raise ValueError(f"image asset exceeds the {maximum_bytes}-byte safety limit")
         data = _read_limited(response, maximum_bytes)
         media_type = response.headers.get_content_type() or "application/octet-stream"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    temporary_payload = payload_path.with_suffix(".bin.tmp")
-    temporary_media_type = media_type_path.with_suffix(".type.tmp")
-    temporary_payload.write_bytes(data)
-    temporary_media_type.write_text(media_type, encoding="ascii")
-    temporary_payload.replace(payload_path)
-    temporary_media_type.replace(media_type_path)
+    try:
+        with Image.open(io.BytesIO(data)) as downloaded_image:
+            downloaded_image.verify()
+    except (OSError, SyntaxError, ValueError) as exc:
+        raise ValueError(f"remote Markdown asset is not a readable raster image: {source}") from exc
+    _write_asset_cache(cache_root, payload_path, media_type_path, data, media_type)
     return data, media_type
 
 
@@ -128,6 +314,8 @@ def resolve_markdown_asset(
             if ";base64" in header
             else urllib.parse.unquote_to_bytes(payload)
         )
+        if len(data) > maximum_bytes:
+            raise ValueError(f"image asset exceeds the {maximum_bytes}-byte safety limit")
     elif source.startswith(("https://", "http://")):
         if not allow_remote:
             return None
@@ -136,16 +324,25 @@ def resolve_markdown_asset(
         data, media_type = _download_remote(source, timeout, maximum_bytes)
     else:
         parsed = urllib.parse.urlparse(source)
+        if parsed.scheme or parsed.netloc:
+            raise ValueError(f"local Markdown asset must use a relative path: {source}")
         relative = urllib.parse.unquote(parsed.path)
         candidate = Path(relative)
-        if not candidate.is_absolute():
-            candidate = markdown_directory / candidate
-        candidate = candidate.expanduser().resolve()
+        if candidate.is_absolute():
+            raise ValueError(f"local Markdown asset must use a relative path: {source}")
+        asset_root = markdown_directory.expanduser().resolve()
+        candidate = (asset_root / candidate).resolve()
+        try:
+            candidate.relative_to(asset_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"local Markdown asset escapes the Markdown directory: {source}"
+            ) from exc
         if not candidate.is_file():
             return None
-        data = candidate.read_bytes()
-        if len(data) > maximum_bytes:
+        if candidate.stat().st_size > maximum_bytes:
             raise ValueError(f"image asset exceeds the {maximum_bytes}-byte safety limit")
+        data = candidate.read_bytes()
         media_type = mimetypes.guess_type(candidate.name)[0] or media_type
     try:
         opened = Image.open(io.BytesIO(data))
@@ -292,7 +489,22 @@ def _source_bbox_hint(
     x0, y0, x1, y1 = (int(match.group(name)) for name in ("x0", "y0", "x1", "y1"))
     if x1 <= x0 or y1 <= y0:
         return None
-    for page in layout.pages:
+
+    explicit_pages = {
+        int(page_match.group("page_index")) + 1 for page_match in _PROVIDER_PAGE_HINT.finditer(path)
+    }
+    if len(explicit_pages) > 1:
+        return None
+    explicit_page = next(iter(explicit_pages), None)
+    if explicit_page is not None and explicit_page < first_page:
+        return None
+
+    candidate_pages = (
+        (page for page in layout.pages if page.number == explicit_page)
+        if explicit_page is not None
+        else iter(layout.pages)
+    )
+    for page in candidate_pages:
         if page.number < first_page or bool(page.metadata.get("rectified")):
             continue
         if 0 <= x0 < x1 <= page.width and 0 <= y0 < y1 <= page.height:

@@ -26,7 +26,7 @@ from docreconstruct.providers.mathpix import MathpixProvider
 from docreconstruct.providers.mineru import MinerUProvider
 from docreconstruct.providers.mistral_ocr import MistralOCRProvider
 from docreconstruct.providers.olmocr import OlmOCRProvider
-from docreconstruct.providers.paddleocr import PaddleOCRProvider
+from docreconstruct.providers.paddleocr import PaddleOCRProvider, is_paddle_vl_page_wrapper
 
 SidecarPath: TypeAlias = str | Path
 ProviderHintKey: TypeAlias = str | Path
@@ -602,6 +602,8 @@ def _mineru_content_list_v2(payload: Any) -> bool:
 def _score_paddle(payload: Any, provider: str) -> DetectionCandidate | None:
     root = _mapping(payload)
     if root is not None:
+        if is_paddle_vl_page_wrapper(root):
+            return _candidate(provider, 0.99, "PaddleOCR-VL per-page result envelope")
         data = _mapping(root.get("res")) or root
         if isinstance(data.get("rec_texts"), Sequence) and any(
             isinstance(data.get(key), Sequence)
@@ -624,6 +626,8 @@ def _score_paddle(payload: Any, provider: str) -> DetectionCandidate | None:
             return _candidate(provider, 0.95, "PaddleOCR results recognition arrays")
     if isinstance(payload, Sequence) and not isinstance(payload, _SEQUENCE_EXCLUSIONS):
         values = list(payload)
+        if values and all(is_paddle_vl_page_wrapper(value) for value in values):
+            return _candidate(provider, 0.99, "PaddleOCR-VL ordered page-result envelopes")
         if values and _paddle_legacy_entry(values[0]):
             return _candidate(provider, 0.99, "PaddleOCR legacy polygon/text-score tuples")
         mapped = _records(values)

@@ -461,6 +461,21 @@ def hybrid_command(
                 else ""
             )
         )
+    timings = job.phase_seconds
+    if timings:
+        evidence_seconds = float(timings.get("prepare.evidence_load", 0.0)) + float(
+            timings.get("prepare.evidence_match", 0.0)
+        )
+        console.print(
+            "pipeline timing: "
+            f"total {float(timings.get('job.total', 0.0)):.3f}s; "
+            f"scan {float(timings.get('prepare.scan', 0.0)):.3f}s; "
+            f"evidence {evidence_seconds:.3f}s; "
+            f"DOCX {float(timings.get('reconstruct.docx_render', 0.0)):.3f}s; "
+            f"native QA {float(timings.get('qa.native', 0.0)):.3f}s; "
+            f"render QA {float(timings.get('qa.render', 0.0)):.3f}s; "
+            f"visual QA {float(timings.get('qa.visual', 0.0)):.3f}s"
+        )
     if not validation.passed:
         console.print("[red]Hybrid QA failed; inspect --qa-report for gate details.[/red]")
         raise typer.Exit(code=3)

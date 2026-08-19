@@ -8,6 +8,24 @@ trúc, có thể chỉnh sửa. Trong quy trình này, kết quả OCR chỉ là
 để đối chiếu chứ không phải sản phẩm cuối cùng. Mô hình tài liệu hợp nhất, trình
 lập bố cục và trình xuất tệp sẽ quyết định cách tạo DOCX, HTML hoặc JSON.
 
+## Giao diện web và việc tải tài liệu lên
+
+Sau khi quy trình triển khai GitHub Pages hoàn tất, giao diện web tĩnh sẽ có tại
+[kayurachann.github.io/docreconstruct](https://kayurachann.github.io/docreconstruct/).
+Đây chỉ là giao diện chạy trong trình duyệt, không phải dịch vụ xử lý tài liệu.
+GitHub Pages không thể chạy Python, LibreOffice, Triton, vLLM hoặc mô hình OCR
+trên GPU; kho mã nguồn này cũng không cung cấp máy chủ xử lý công cộng hay GPU
+miễn phí không giới hạn.
+
+Để sử dụng giao diện, người dùng phải chọn máy chủ do một đơn vị mà mình tin cậy
+vận hành. Trước khi gửi, giao diện sẽ yêu cầu xác nhận việc tải tệp Markdown đã
+rà soát, PDF hoặc ảnh gốc và tệp JSON tùy chọn lên máy chủ đó. Nếu bật
+PaddleOCR-VL, máy chủ có thể chuyển tiếp bản gốc đến dịch vụ OCR mà đơn vị vận
+hành đã cấu hình.
+Khi thay đổi địa chỉ máy chủ hoặc lựa chọn OCR, người dùng phải xác nhận lại.
+Chính sách lưu giữ, quyền riêng tư, nơi xử lý dữ liệu, hạn mức và chi phí đều do
+đơn vị vận hành quyết định. Xem thêm [hướng dẫn về hiệu năng và triển khai](../PERFORMANCE.md).
+
 ## Bộ đầu vào cho kết quả tốt nhất
 
 Kết quả thường chính xác nhất khi có đủ ba loại đầu vào bổ trợ lẫn nhau. Mỗi

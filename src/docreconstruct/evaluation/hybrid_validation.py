@@ -17,6 +17,7 @@ import zipfile
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from xml.etree import ElementTree
 
@@ -32,6 +33,10 @@ from docreconstruct.reconstruction.asset_matching import match_markdown_assets
 from docreconstruct.reconstruction.evidence_matching import (
     EvidenceMatch,
     match_sidecar_evidence,
+)
+from docreconstruct.reconstruction.hybrid import (
+    HybridPreparedSources,
+    assert_prepared_hybrid_sources,
 )
 from docreconstruct.reconstruction.hybrid_planner import (
     HybridLayoutPlan,
@@ -194,9 +199,16 @@ def _markdown_projection(content: MarkdownContent) -> str:
 def _docx_projection(root: ElementTree.Element) -> str:
     paragraphs: list[str] = []
     for paragraph in root.iter(_WORD + "p"):
-        value = "".join(
-            node.text or "" for node in paragraph.iter() if node.tag in {_WORD + "t", _MATH + "t"}
-        )
+        parts: list[str] = []
+        for node in paragraph.iter():
+            if node.tag in {_WORD + "t", _MATH + "t"}:
+                parts.append(node.text or "")
+            elif node.tag in {_WORD + "br", _WORD + "cr", _WORD + "tab"}:
+                # Word stores explicit line breaks and tabs as empty elements.
+                # Keep a token boundary in the native projection so adjacent
+                # footer/body blocks cannot be concatenated into a new word.
+                parts.append("\n" if node.tag != _WORD + "tab" else "\t")
+        value = "".join(parts)
         if value:
             paragraphs.append(value)
     return _normalized("\n".join(paragraphs))
@@ -873,6 +885,33 @@ def _plan_geometry_metrics(
                 anchor_box = anchor.source_bbox
                 if anchor_box is None:
                     continue
+                same_group = (
+                    blocks[placement.block_id].group_id is not None
+                    and blocks[placement.block_id].group_id == blocks[anchor.block_id].group_id
+                )
+                anchor_is_side_visual = (
+                    anchor_box.x0
+                    >= source_page.content_bbox.x0 + source_page.content_bbox.width * 0.65
+                    and anchor_box.width <= source_page.content_bbox.width * 0.40
+                )
+                if same_group and anchor_is_side_visual:
+                    # A right-side figure belongs to the same native row as
+                    # its question prompt/options. Coarse scan rows can span
+                    # through the figure, so semantic group plus authoritative
+                    # side occupancy is safer than row-union overlap here.
+                    continue
+                horizontal_overlap = max(
+                    0,
+                    min(placement.source_bbox.x1, anchor_box.x1)
+                    - max(placement.source_bbox.x0, anchor_box.x0),
+                ) / max(1, min(placement.source_bbox.width, anchor_box.width))
+                if horizontal_overlap < 0.15:
+                    # A provider may serialize prose before a diagram that is
+                    # physically beside it. Y intervals cross legitimately;
+                    # only a meaningful horizontal intersection represents a
+                    # true reading-order violation. Full-width/intervening
+                    # anchors continue to overlap and therefore remain gated.
+                    continue
                 before_crossing = (
                     placement.block_index < anchor.block_index
                     and placement.source_bbox.y1 > anchor_box.y0 + tolerance
@@ -990,7 +1029,17 @@ def _expected_layout_furniture(
     layout: ScanDocumentLayout,
     plan: HybridLayoutPlan,
 ) -> tuple[int, list[str]]:
+    # Keep structural QA on the exact same generic footer classifier as the
+    # renderer.  The local import avoids coupling module initialization while
+    # remaining cycle-safe (hybrid_docx does not import the evaluator).
+    from docreconstruct.reconstruction.hybrid_docx import _partition_source_footer
+
     blocks = {block.id: block for block in content.blocks}
+    placements = {
+        placement.block_id: placement
+        for page_plan in plan.pages
+        for placement in page_plan.placements
+    }
     expected_mastheads = 0
     expected_footers: list[str] = []
     for page, page_plan in zip(layout.pages, plan.pages, strict=False):
@@ -1010,20 +1059,8 @@ def _expected_layout_furniture(
             and section_index >= 4
         ):
             expected_mastheads += 1
-        threshold = page.content_bbox.y0 + page.content_bbox.height * 0.95
-        footer: list[str] = []
-        for placement in reversed(page_plan.placements):
-            block = blocks[placement.block_id]
-            box = placement.source_bbox
-            if (
-                box is None
-                or box.y0 < threshold
-                or block.kind not in {MarkdownBlockKind.PARAGRAPH, MarkdownBlockKind.HEADING}
-                or len(block.text) > 120
-            ):
-                break
-            footer.append(block.text)
-        expected_footers.extend(reversed(footer))
+        _body, footer = _partition_source_footer(page_blocks, placements, page)
+        expected_footers.extend(block.text for block in footer)
     return expected_mastheads, expected_footers
 
 
@@ -1430,8 +1467,12 @@ def validate_hybrid(
     renderer_path: str | Path | None = None,
     minimum_visual_score: float | None = None,
     render_output_dir: str | Path | None = None,
+    _prepared_sources: HybridPreparedSources | None = None,
+    _phase_seconds: dict[str, float] | None = None,
 ) -> HybridValidationReport:
     """Validate hybrid OOXML and optionally render it through a project backend."""
+
+    qa_started = perf_counter()
 
     if minimum_visual_score is not None and not 0.0 <= minimum_visual_score <= 1.0:
         raise ValueError("minimum_visual_score must be between 0 and 1")
@@ -1441,23 +1482,39 @@ def validate_hybrid(
     content_path = Path(content).expanduser().resolve()
     layout_path = Path(layout).expanduser().resolve()
     candidate_path = Path(candidate).expanduser().resolve()
-    markdown = parse_markdown_content(content_path)
-    scan = analyze_scan_source(layout_path)
     evidence_paths: tuple[Path, ...]
     if isinstance(evidence, (str, Path)):
         evidence_paths = (Path(evidence).expanduser().resolve(),)
     else:
         evidence_paths = tuple(Path(path).expanduser().resolve() for path in evidence)
-    evidence_bundle: SidecarEvidenceBundle | None = None
-    evidence_matches: list[EvidenceMatch] = []
-    if evidence_paths:
-        evidence_bundle = load_sidecar_evidence(
+    evidence_bundle: SidecarEvidenceBundle | None
+    evidence_matches: list[EvidenceMatch]
+    if _prepared_sources is not None:
+        assert_prepared_hybrid_sources(
+            _prepared_sources,
+            content_path,
+            layout_path,
             evidence_paths,
-            provider_hints=evidence_provider_hints,
-            context=_validation_evidence_context(layout_path, scan),
-            strict=strict_evidence,
+            strict_evidence=strict_evidence,
         )
-        evidence_matches = match_sidecar_evidence(markdown, scan, evidence_bundle)
+        markdown = _prepared_sources.markdown
+        scan = _prepared_sources.scan
+        evidence_bundle = _prepared_sources.evidence_bundle
+        evidence_matches = list(_prepared_sources.evidence_matches)
+    else:
+        markdown = parse_markdown_content(content_path)
+        scan = analyze_scan_source(layout_path)
+        evidence_bundle = None
+        evidence_matches = []
+        if evidence_paths:
+            evidence_bundle = load_sidecar_evidence(
+                evidence_paths,
+                provider_hints=evidence_provider_hints,
+                context=_validation_evidence_context(layout_path, scan),
+                strict=strict_evidence,
+            )
+            evidence_matches = match_sidecar_evidence(markdown, scan, evidence_bundle)
+    if evidence_paths:
         plan = _validation_plan(markdown, scan, evidence_matches)
     else:
         plan = _validation_plan(markdown, scan)
@@ -1546,16 +1603,20 @@ def validate_hybrid(
     body_columns = _native_body_column_metrics(root, scan)
     from docreconstruct.evaluation.document_rendering import render_docx_pages
 
+    render_started = perf_counter()
     render_result = render_docx_pages(
         candidate_path,
         backend=render_backend,
         executable=renderer_path,
         target_sizes=[(page.width, page.height) for page in scan.pages],
     )
+    render_seconds = perf_counter() - render_started
     visual_metrics = None
     body_foreground = None
     render_artifacts: list[dict[str, str]] = []
+    visual_seconds = 0.0
     if render_result.rendered:
+        visual_started = perf_counter()
         from docreconstruct.evaluation.visual import evaluate_visual, visual_diff
 
         visual_metrics = evaluate_visual(
@@ -1587,6 +1648,7 @@ def validate_hybrid(
                     visual_diff(source_page.image, candidate_page, difference_path)
                     artifact["difference"] = str(difference_path)
                 render_artifacts.append(artifact)
+        visual_seconds = perf_counter() - visual_started
 
     gates = [
         HybridValidationGate(name="valid_ooxml_package", passed=True, expected=True, actual=True),
@@ -2028,7 +2090,7 @@ def validate_hybrid(
         **flow,
         **plan_geometry,
     }
-    return HybridValidationReport(
+    report = HybridValidationReport(
         content=str(content_path),
         layout=str(layout_path),
         candidate=str(candidate_path),
@@ -2059,6 +2121,13 @@ def validate_hybrid(
             ]
         ),
     )
+    if _phase_seconds is not None:
+        qa_total = perf_counter() - qa_started
+        _phase_seconds["qa.native"] = max(0.0, qa_total - render_seconds - visual_seconds)
+        _phase_seconds["qa.render"] = render_seconds
+        _phase_seconds["qa.visual"] = visual_seconds
+        _phase_seconds["qa.total"] = qa_total
+    return report
 
 
 __all__ = ["HybridValidationGate", "HybridValidationReport", "validate_hybrid"]

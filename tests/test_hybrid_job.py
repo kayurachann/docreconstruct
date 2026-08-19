@@ -189,6 +189,7 @@ def test_hybrid_cli_runs_online_ocr_evidence_render_and_qa_in_one_command(
     assert captured["require_geometry"] is True
     assert "online OCR evidence: fixture_cloud; provider run" in result.output
     assert "QA gates: 100.00%" in result.output
+    assert "pipeline timing:" in result.output
 
 
 def test_online_ocr_cloud_policy_requires_explicit_upload_consent(tmp_path: Path) -> None:
@@ -240,3 +241,58 @@ def test_offline_hybrid_job_never_runs_extraction(
     assert result.extraction is None
     assert result.validation.passed
     assert result.evidence == ()
+
+
+def test_hybrid_job_reuses_prepared_scan_and_evidence_for_native_qa(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import docreconstruct.evaluation.hybrid_validation as validation_module
+
+    content, layout = _sources(tmp_path)
+    sidecar = tmp_path / "evidence.json"
+    sidecar.write_text(_evidence_document().model_dump_json(), encoding="utf-8")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("native QA must reuse prepared hybrid sources")
+
+    # The reconstruction preparation imports the source functions lazily from
+    # their owning modules. These aliases belong only to the validator, so a
+    # call here proves that QA attempted a duplicate parse/scan/alignment pass.
+    monkeypatch.setattr(validation_module, "parse_markdown_content", forbidden)
+    monkeypatch.setattr(validation_module, "analyze_scan_source", forbidden)
+    monkeypatch.setattr(validation_module, "match_sidecar_evidence", forbidden)
+
+    result = run_hybrid_job(
+        content,
+        layout,
+        evidence=[sidecar],
+        evidence_provider_hints=["json"],
+        output=tmp_path / "single-pass.docx",
+    )
+
+    assert result.validation.passed
+    assert result.phase_seconds["prepare.scan"] > 0
+    assert result.phase_seconds["prepare.evidence_match"] >= 0
+    assert result.phase_seconds["qa.native"] >= 0
+    assert result.phase_seconds["job.total"] >= result.phase_seconds["qa.total"]
+
+
+def test_prepared_fast_path_rejects_source_mutation(tmp_path: Path) -> None:
+    from docreconstruct.reconstruction.hybrid import (
+        prepare_hybrid_sources,
+        reconstruct_hybrid,
+    )
+
+    content, layout = _sources(tmp_path)
+    prepared = prepare_hybrid_sources(content, layout)
+    content.write_text("Changed after preparation.\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="changed after in-process preparation"):
+        reconstruct_hybrid(
+            content,
+            layout,
+            output=tmp_path / "must-not-exist.docx",
+            _prepared_sources=prepared,
+        )

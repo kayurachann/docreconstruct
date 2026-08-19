@@ -110,6 +110,12 @@ class VerticalFitBudget(BaseModel):
     row_gap_height: float = Field(ge=0)
     block_gap_scale: float = Field(ge=0, le=1)
     row_gap_scale: float = Field(ge=0, le=1)
+    native_leading_scale: float = Field(ge=0, le=1)
+    font_size_scale: float = Field(gt=0, le=1)
+    line_height_scale: float = Field(gt=0, le=1)
+    geometry_coverage: float = Field(ge=0, le=1)
+    estimated_line_count: float = Field(ge=0)
+    source_glyph_height: float = Field(ge=0)
     estimated_footprint: float = Field(ge=0)
     fits: bool
 
@@ -118,6 +124,18 @@ def _page_vertical_scale(page: ScanPageLayout) -> float:
     if page.metadata.get("source_kind") == "image":
         return page.pdf_height / page.height
     return page.pdf_width / page.width
+
+
+def _forms_horizontal_visual_row(boxes: Sequence[PixelBox]) -> bool:
+    """Return whether source visuals occupy one side-by-side physical row."""
+
+    if len(boxes) < 2:
+        return False
+    ordered = sorted(boxes, key=lambda box: box.x0)
+    if any(left.x1 > right.x0 for left, right in zip(ordered, ordered[1:], strict=False)):
+        return False
+    common_overlap = max(0, min(box.y1 for box in ordered) - max(box.y0 for box in ordered))
+    return common_overlap / max(1, min(box.height for box in ordered)) >= 0.55
 
 
 def _unique_source_rows(page: ScanPageLayout, rows: Sequence[PixelBox]) -> list[PixelBox]:
@@ -139,6 +157,8 @@ def build_page_vertical_fit_budget(
     *,
     printable_height_points: float,
     font_size_points: float,
+    blocks: Sequence[MarkdownBlock] | None = None,
+    line_height_points: float | None = None,
     headroom_points: float | None = None,
     # Raster rows already include most ascender/descender ink.  Reserving one
     # additional third-em per native line matches Word/LibreOffice line boxes
@@ -159,6 +179,8 @@ def build_page_vertical_fit_budget(
         raise ValueError("printable_height_points must be greater than zero")
     if font_size_points <= 0:
         raise ValueError("font_size_points must be greater than zero")
+    if line_height_points is not None and line_height_points <= 0:
+        raise ValueError("line_height_points must be greater than zero")
     if native_leading_em < 0:
         raise ValueError("native_leading_em must not be negative")
     if headroom_points is not None and headroom_points < 0:
@@ -184,40 +206,239 @@ def build_page_vertical_fit_budget(
             row_gap_height=0.0,
             block_gap_scale=1.0,
             row_gap_scale=1.0,
+            native_leading_scale=1.0,
+            font_size_scale=1.0,
+            line_height_scale=1.0,
+            geometry_coverage=0.0,
+            estimated_line_count=0.0,
+            source_glyph_height=0.0,
             estimated_footprint=0.0,
             fits=True,
         )
 
     if page.metadata.get("column_count", 1) != 1 or not ordered:
         return uncalibrated()
-    if any(
+    block_by_id = {block.id: block for block in blocks or ()}
+    partial_geometry = any(
         placement.source_bbox is None or placement.source_gap_before is None
         for placement in ordered
+    )
+    if partial_geometry and (
+        not block_by_id or any(placement.block_id not in block_by_id for placement in ordered)
     ):
         return uncalibrated()
-    boxes = [placement.source_bbox for placement in ordered]
+    # Markdown providers commonly serialize a side figure after the prose it
+    # accompanies even though the figure starts higher on the physical page.
+    # That is a valid two-dimensional reading order, not a backwards text
+    # flow.  Preserve the monotonic safety check for native text while letting
+    # images/tables contribute their fixed height independently below.
+    flow_boxes = [
+        placement.source_bbox
+        for placement in ordered
+        if placement.source_bbox is not None
+        and (
+            (block := block_by_id.get(placement.block_id)) is None
+            or block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+        )
+    ]
+
+    def is_meaningful_backward_flow(current: PixelBox, following: PixelBox) -> bool:
+        if following.y0 >= current.y0:
+            return False
+        backward = current.y0 - following.y0
+        overlap = max(0, min(current.y1, following.y1) - max(current.y0, following.y0))
+        overlap_ratio = overlap / max(1, min(current.height, following.height))
+        return backward > max(2.0, page.line_pitch * 0.12) and overlap_ratio < 0.55
+
     if any(
-        current is None or following is None or following.y0 < current.y0
-        for current, following in zip(boxes, boxes[1:], strict=False)
+        is_meaningful_backward_flow(current, following)
+        for current, following in zip(flow_boxes, flow_boxes[1:], strict=False)
     ):
         return uncalibrated()
 
+    geometry_count = sum(placement.source_bbox is not None for placement in ordered)
+    geometry_coverage = geometry_count / len(ordered)
+    ordinary_ink_heights = [
+        line.bbox.height * scale
+        for line in page.text_lines
+        if page.line_pitch * 0.45 <= line.bbox.height <= page.line_pitch * 1.25
+        and line.bbox.width >= page.content_bbox.width * 0.05
+    ]
+    source_glyph_height = (
+        statistics.median(ordinary_ink_heights) if ordinary_ink_heights else font_size_points
+    )
+
+    characters_per_line = max(
+        24.0,
+        page.content_bbox.width / max(1.0, page.line_pitch * 0.42),
+    )
+
+    def rendered_units(placement: HybridBlockPlacement) -> float:
+        block = block_by_id.get(placement.block_id)
+        if block is None:
+            return float(max(1, len(_unique_source_rows(page, placement.source_rows))))
+        if block.kind is MarkdownBlockKind.IMAGE and placement.source_bbox is not None:
+            return max(2.0, placement.source_bbox.height / page.line_pitch)
+        return _block_weight(
+            block,
+            characters_per_line=characters_per_line,
+            image_match=None,
+            line_pitch=page.line_pitch,
+        )
+
+    placement_units = {placement.block_id: rendered_units(placement) for placement in ordered}
+    estimated_line_count = sum(
+        units
+        for block_id, units in placement_units.items()
+        if (block := block_by_id.get(block_id)) is None
+        or block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+    )
+
+    # A side figure and its editable question text occupy one native table
+    # row in the renderer.  Their vertical footprints overlap rather than add.
+    # Mirror that two-dimensional geometry here so the budget does not charge
+    # a full image height on top of the prose it accompanies.
+    side_visual_ink: dict[str, float] = {}
+    group_ids = {block.group_id for block in block_by_id.values() if block.group_id is not None}
+    for group_id in group_ids:
+        grouped = [
+            placement
+            for placement in ordered
+            if (block := block_by_id.get(placement.block_id)) is not None
+            and block.group_id == group_id
+            and placement.source_bbox is not None
+        ]
+        visuals = [
+            placement
+            for placement in grouped
+            if block_by_id[placement.block_id].kind
+            in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+        ]
+        flow = [placement for placement in grouped if placement not in visuals]
+        if not visuals:
+            continue
+        visual_boxes = [box for placement in visuals if (box := placement.source_bbox) is not None]
+        visual_union = PixelBox(
+            x0=min(box.x0 for box in visual_boxes),
+            y0=min(box.y0 for box in visual_boxes),
+            x1=max(box.x1 for box in visual_boxes),
+            y1=max(box.y1 for box in visual_boxes),
+        )
+        if _forms_horizontal_visual_row(visual_boxes):
+            # Separate source crops in one native table row share a vertical
+            # footprint. Charge the tallest crop, never their sum. If that
+            # row is itself beside editable prose, only its excess remains.
+            row_height = max(box.height for box in visual_boxes)
+            excess = float(row_height)
+            flow_boxes = [box for placement in flow if (box := placement.source_bbox) is not None]
+            left_fraction = (visual_union.x0 - page.content_bbox.x0) / max(
+                1, page.content_bbox.width
+            )
+            is_side_row = (
+                bool(flow_boxes)
+                and left_fraction >= 0.34
+                and visual_union.width <= page.content_bbox.width * 0.58
+            )
+            if is_side_row:
+                flow_union = PixelBox(
+                    x0=min(box.x0 for box in flow_boxes),
+                    y0=min(box.y0 for box in flow_boxes),
+                    x1=max(box.x1 for box in flow_boxes),
+                    y1=max(box.y1 for box in flow_boxes),
+                )
+                overlap = max(
+                    max(
+                        0,
+                        min(box.y1, flow_union.y1) - max(box.y0, flow_union.y0),
+                    )
+                    for box in visual_boxes
+                )
+                excess = max(0, row_height - min(row_height, overlap))
+            side_visual_ink[visuals[0].block_id] = excess * scale
+            side_visual_ink.update({placement.block_id: 0.0 for placement in visuals[1:]})
+            continue
+        if not flow:
+            continue
+        flow_boxes = [box for placement in flow if (box := placement.source_bbox) is not None]
+        left_fraction = (visual_union.x0 - page.content_bbox.x0) / max(1, page.content_bbox.width)
+        if left_fraction < 0.34 or visual_union.width > page.content_bbox.width * 0.58:
+            continue
+        flow_union = PixelBox(
+            x0=min(box.x0 for box in flow_boxes),
+            y0=min(box.y0 for box in flow_boxes),
+            x1=max(box.x1 for box in flow_boxes),
+            y1=max(box.y1 for box in flow_boxes),
+        )
+        overlap = max(
+            0,
+            min(visual_union.y1, flow_union.y1) - max(visual_union.y0, flow_union.y0),
+        )
+        if overlap <= 0:
+            continue
+        excess = max(0, visual_union.height - overlap) * scale
+        side_visual_ink[visuals[0].block_id] = excess
+        side_visual_ink.update({placement.block_id: 0.0 for placement in visuals[1:]})
+
     fixed_ink = 0.0
     row_gaps = 0.0
+    seen_rows: set[tuple[int, int, int, int]] = set()
     for placement in ordered:
+        block = block_by_id.get(placement.block_id)
+        if block is not None and block.kind in {
+            MarkdownBlockKind.IMAGE,
+            MarkdownBlockKind.TABLE,
+        }:
+            if placement.block_id in side_visual_ink:
+                fixed_ink += side_visual_ink[placement.block_id]
+            elif placement.source_bbox is not None:
+                fixed_ink += placement.source_bbox.height * scale
+            else:
+                fixed_ink += placement_units[placement.block_id] * source_glyph_height
+            continue
         rows = _unique_source_rows(page, placement.source_rows)
         if rows:
-            fixed_ink += sum(row.height for row in rows) * scale
-            row_gaps += (
-                sum(
-                    max(0, following.y0 - previous.y1)
-                    for previous, following in zip(rows, rows[1:], strict=False)
+            unique_rows = []
+            for row in rows:
+                key = (row.x0, row.y0, row.x1, row.y1)
+                if key in seen_rows:
+                    continue
+                seen_rows.add(key)
+                unique_rows.append(row)
+            coarse_row = any(row.height > page.line_pitch * 1.50 for row in unique_rows)
+            if (
+                coarse_row
+                and block is not None
+                and block.kind
+                in {
+                    MarkdownBlockKind.PARAGRAPH,
+                    MarkdownBlockKind.OPTION,
+                    MarkdownBlockKind.LIST_ITEM,
+                    MarkdownBlockKind.CODE,
+                }
+            ):
+                # Scan segmentation can merge several baselines around a
+                # nearby diagram into one 3–5 pitch pseudo-row.  The renderer
+                # caps such evidence to ordinary native leading, so estimate
+                # its real editable rows from Markdown at the scan-derived
+                # glyph height rather than treating the union as immutable ink.
+                ordinary_rows = [row for row in unique_rows if row.height <= page.line_pitch * 1.50]
+                fixed_ink += sum(row.height for row in ordinary_rows) * scale
+                missing_units = max(
+                    0.0,
+                    placement_units[placement.block_id] - len(ordinary_rows),
                 )
-                * scale
-            )
+                fixed_ink += missing_units * source_glyph_height
+            else:
+                fixed_ink += sum(row.height for row in unique_rows) * scale
+                row_gaps += (
+                    sum(
+                        max(0, following.y0 - previous.y1)
+                        for previous, following in zip(unique_rows, unique_rows[1:], strict=False)
+                    )
+                    * scale
+                )
         else:
-            assert placement.source_bbox is not None
-            fixed_ink += placement.source_bbox.height * scale
+            fixed_ink += placement_units[placement.block_id] * source_glyph_height
 
     leading_gap = float(ordered[0].source_gap_before or 0) * scale
     block_gaps = sum(float(placement.source_gap_before or 0) * scale for placement in ordered[1:])
@@ -227,10 +448,27 @@ def build_page_vertical_fit_budget(
     # equation is still one paragraph but consumes five native math rows.
     # The source boxes above measure glyph ink, so this per-row allowance is
     # the renderer leading that must be reserved before retaining scan gaps.
-    native_line_count = sum(
-        max(1, len(_unique_source_rows(page, placement.source_rows))) for placement in ordered
+    native_line_count = (
+        estimated_line_count
+        if block_by_id
+        else float(
+            sum(
+                max(1, len(_unique_source_rows(page, placement.source_rows)))
+                for placement in ordered
+            )
+        )
     )
-    native_allowance = font_size_points * native_leading_em * native_line_count
+    nominal_line_height = (
+        line_height_points
+        if line_height_points is not None
+        else font_size_points * (1.0 + native_leading_em)
+    )
+    native_leading_per_line = (
+        max(0.0, nominal_line_height - source_glyph_height)
+        if line_height_points is not None
+        else font_size_points * native_leading_em
+    )
+    native_allowance = native_leading_per_line * native_line_count
     fixed_total = fixed_ink + native_allowance + leading_gap
     elastic_target = max(0.0, printable_height_points - headroom - fixed_total)
     raw_elastic = block_gaps + row_gaps
@@ -250,6 +488,29 @@ def build_page_vertical_fit_budget(
 
     estimate = fixed_total + block_gaps * block_scale + row_gaps * row_scale
     target = printable_height_points - headroom
+    native_leading_scale = 1.0
+    if estimate > target + 1e-6 and native_allowance > 0:
+        overflow = estimate - target
+        native_leading_scale = max(0.0, 1.0 - overflow / native_allowance)
+        estimate -= native_allowance * (1.0 - native_leading_scale)
+
+    font_size_scale = 1.0
+    if estimate > target + 1e-6 and source_glyph_height < font_size_points:
+        # The scan's ordinary glyph ink is the only permitted font-size floor.
+        # No document-specific point size is introduced here.
+        font_size_scale = max(1e-6, source_glyph_height / font_size_points)
+        scalable_ink = fixed_ink
+        estimate -= scalable_ink * (1.0 - font_size_scale)
+
+    calibrated_line_height = (
+        source_glyph_height
+        + max(
+            0.0,
+            nominal_line_height - source_glyph_height,
+        )
+        * native_leading_scale
+    )
+    line_height_scale = min(1.0, calibrated_line_height / nominal_line_height)
     return VerticalFitBudget(
         calibrated=True,
         printable_height=printable_height_points,
@@ -261,6 +522,12 @@ def build_page_vertical_fit_budget(
         row_gap_height=row_gaps,
         block_gap_scale=block_scale,
         row_gap_scale=row_scale,
+        native_leading_scale=native_leading_scale,
+        font_size_scale=font_size_scale,
+        line_height_scale=line_height_scale,
+        geometry_coverage=geometry_coverage,
+        estimated_line_count=native_line_count,
+        source_glyph_height=source_glyph_height,
         estimated_footprint=estimate,
         fits=estimate <= target + 1e-6,
     )
@@ -657,6 +924,183 @@ def _snap_evidence_rows_to_scan(
     return result
 
 
+def _option_column_count(options: Sequence[MarkdownBlock]) -> int:
+    longest = max((len(_project_inline_math(block.text)) for block in options), default=0)
+    if len(options) == 4 and longest <= 55:
+        return 4
+    if len(options) == 4 and longest <= 115:
+        return 2
+    return 1
+
+
+def _merge_segments_to_columns(
+    segments: Sequence[PixelBox],
+    columns: int,
+) -> list[PixelBox]:
+    merged = sorted(segments, key=lambda box: box.x0)
+    while len(merged) > columns:
+        index = min(
+            range(len(merged) - 1),
+            key=lambda item: max(0, merged[item + 1].x0 - merged[item].x1),
+        )
+        left = merged[index]
+        right = merged[index + 1]
+        merged[index : index + 2] = [
+            PixelBox(
+                x0=min(left.x0, right.x0),
+                y0=min(left.y0, right.y0),
+                x1=max(left.x1, right.x1),
+                y1=max(left.y1, right.y1),
+            )
+        ]
+    return merged
+
+
+def _assign_group_option_geometry(
+    blocks: list[MarkdownBlock],
+    placements: list[HybridBlockPlacement],
+    page: ScanPageLayout,
+) -> list[HybridBlockPlacement]:
+    """Split option columns out of a coarse same-group evidence region.
+
+    OCR layout JSON often gives one rectangle to a question prompt and its
+    A--D answer row, while Markdown intentionally exposes each answer as an
+    editable block.  Raw scan segments can safely restore those answer slots
+    when the prompt and every option share a structural group.  Candidate
+    rows stay inside the provider rectangle and never overlap image/table
+    anchors, so geometry cannot be borrowed from another question or across a
+    visual object.
+    """
+
+    block_by_id = {block.id: block for block in blocks}
+    placement_by_id = {placement.block_id: placement for placement in placements}
+    visual_anchors = [
+        placement.source_bbox
+        for placement in placements
+        if placement.source_bbox is not None
+        and block_by_id[placement.block_id].kind
+        in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+    ]
+    groups: dict[str, list[MarkdownBlock]] = {}
+    for block in blocks:
+        if block.group_id:
+            groups.setdefault(block.group_id, []).append(block)
+
+    assigned: dict[str, HybridBlockPlacement] = {}
+    for group_blocks in groups.values():
+        options = [block for block in group_blocks if block.kind is MarkdownBlockKind.OPTION]
+        if not options or any(
+            placement_by_id[block.id].source_bbox is not None for block in options
+        ):
+            continue
+        owners = [
+            block
+            for block in group_blocks
+            if block.starts_group
+            and block.index < options[0].index
+            and block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+            and placement_by_id[block.id].source_bbox is not None
+            and placement_by_id[block.id].evidence_providers
+        ]
+        if len(owners) != 1:
+            continue
+        owner = owners[0]
+        owner_placement = placement_by_id[owner.id]
+        assert owner_placement.source_bbox is not None
+        if any(
+            block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+            and owner.index < block.index < options[-1].index
+            for block in group_blocks
+        ):
+            continue
+
+        # The provider owner rectangle can contain the prompt and its complete
+        # answer grid even when row snapping retained only the prompt rows.
+        # Inspect every scan line centered inside that authoritative envelope;
+        # restricting candidates to ``source_rows`` makes the child options
+        # impossible to recover. Visual anchors remain hard exclusions below.
+        source_lines = [
+            line
+            for line in page.text_lines
+            if owner_placement.source_bbox.y0
+            <= (line.bbox.y0 + line.bbox.y1) / 2
+            <= owner_placement.source_bbox.y1
+            and not _line_is_excluded(line.bbox, visual_anchors)
+        ]
+        preferred_columns = _option_column_count(options)
+        column_choices = list(
+            dict.fromkeys(
+                [
+                    preferred_columns,
+                    *(columns for columns in (4, 2, 1) if len(options) % columns == 0),
+                ]
+            )
+        )
+        selected: list[tuple[PixelBox, list[PixelBox]]] = []
+        for columns in column_choices:
+            rows_needed = math.ceil(len(options) / columns)
+            candidates: list[tuple[PixelBox, list[PixelBox]]] = []
+            for line in source_lines:
+                raw_segments = [
+                    segment
+                    for segment in (line.segments or [line.bbox])
+                    if segment.width >= page.line_pitch * 0.20
+                ]
+                segments = _merge_segments_to_columns(raw_segments, columns)
+                if len(segments) != columns:
+                    continue
+                if min(segment.width for segment in segments) < page.line_pitch * 0.45:
+                    continue
+                if (
+                    columns > 1
+                    and min(
+                        max(0, right.x0 - left.x1)
+                        for left, right in zip(segments, segments[1:], strict=False)
+                    )
+                    < page.line_pitch * 0.45
+                ):
+                    continue
+                candidates.append((line.bbox, segments))
+            if len(candidates) >= rows_needed:
+                selected = candidates[-rows_needed:]
+                break
+        if not selected:
+            continue
+        first_option_top = selected[0][0].y0
+        prompt_rows = [
+            line.bbox
+            for line in source_lines
+            if line.bbox.y0 < first_option_top
+            and all(line.bbox != selected_line for selected_line, _segments in selected)
+        ]
+        if not prompt_rows:
+            continue
+
+        assigned[owner.id] = owner_placement.model_copy(update={"source_rows": prompt_rows})
+        option_index = 0
+        for _line, segments in selected:
+            for segment in segments:
+                if option_index >= len(options):
+                    break
+                option = options[option_index]
+                placement = placement_by_id[option.id]
+                assigned[option.id] = placement.model_copy(
+                    update={
+                        "source_bbox": segment,
+                        "source_rows": [segment],
+                        "match_score": 1.0,
+                        "geometry_source": "scan_inferred_group_option",
+                    }
+                )
+                option_index += 1
+        if option_index != len(options):
+            for option in options:
+                assigned.pop(option.id, None)
+            assigned.pop(owner.id, None)
+
+    return [assigned.get(placement.block_id, placement) for placement in placements]
+
+
 def _desired_row_count(block: MarkdownBlock, characters_per_line: float) -> int:
     if block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}:
         return 0
@@ -724,14 +1168,7 @@ def _assign_text_geometry(
             if unit[0].kind is not MarkdownBlockKind.OPTION:
                 counts.append(_desired_row_count(unit[0], row_characters_per_line))
                 continue
-            longest = max(len(_project_inline_math(block.text)) for block in unit)
-            columns = (
-                4
-                if len(unit) == 4 and longest <= 55
-                else 2
-                if len(unit) == 4 and longest <= 115
-                else 1
-            )
+            columns = _option_column_count(unit)
             counts.append(max(1, math.ceil(len(unit) / columns)))
         return counts
 
@@ -876,16 +1313,20 @@ def _assign_text_geometry(
             start = end
         return result
 
-    # Partition source rows by anchored objects *and* block order.  The former
-    # implementation removed figure/table rows, then globally reassigned the
-    # remaining lines.  A paragraph immediately before a figure could consume
-    # one line above and another below it, creating a giant Word line box.
+    # Partition source rows by authoritative anchors *and* block order.  The
+    # former implementation removed provider-owned text rows, then globally
+    # reassigned the leftovers.  A later unanchored question could consequently
+    # consume rows above an earlier JSON paragraph.  Text evidence is therefore
+    # a boundary too; image/table anchors retain the same hard separation.
     anchors_by_index = sorted(
         (
             (block.index, placement.source_bbox)
             for block, placement in zip(blocks, placements, strict=True)
             if placement.source_bbox is not None
-            and block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+            and (
+                block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+                or placement.evidence_providers
+            )
         ),
         key=lambda item: item[0],
     )
@@ -928,7 +1369,7 @@ def _assign_text_geometry(
                 consume_all_rows=not multi_column,
             )
         if optional_anchor is not None:
-            lower_y = optional_anchor.y1
+            lower_y = max(lower_y, optional_anchor.y1)
 
     result: list[HybridBlockPlacement] = []
     for placement in placements:
@@ -980,15 +1421,145 @@ def _fill_source_gaps(
     return result
 
 
+_PAGE_FRACTION_RE = re.compile(r"(?<!\d)(\d{1,4})\s*/\s*(\d{1,4})(?!\d)")
+_URL_RE = re.compile(r"(?:https?://|www\.)", flags=re.IGNORECASE)
+
+
+def _project_box_to_page(
+    box: PixelBox,
+    source_page: ScanPageLayout,
+    target_page: ScanPageLayout,
+) -> PixelBox:
+    """Project a normalized provider box between two raster page grids."""
+
+    x0 = max(0, min(target_page.width - 1, round(box.x0 * target_page.width / source_page.width)))
+    y0 = max(
+        0,
+        min(target_page.height - 1, round(box.y0 * target_page.height / source_page.height)),
+    )
+    x1 = max(x0 + 1, min(target_page.width, round(box.x1 * target_page.width / source_page.width)))
+    y1 = max(
+        y0 + 1,
+        min(target_page.height, round(box.y1 * target_page.height / source_page.height)),
+    )
+    return PixelBox(x0=x0, y0=y0, x1=x1, y1=y1)
+
+
+def _relocate_repeated_top_furniture(
+    pages: list[HybridPagePlan],
+    blocks: Sequence[MarkdownBlock],
+    layout: ScanDocumentLayout,
+) -> list[HybridPagePlan]:
+    """Move a serialized next-page URL banner out of the preceding page.
+
+    OCR Markdown commonly emits ``footer, next-page repeated header`` in that
+    order while weak provider page metadata attaches both to the old page.
+    Repetition, an immediately preceding current-page folio, and a source box
+    in the top 12% jointly make the correction safe and language-neutral.
+    """
+
+    if len(pages) < 2:
+        return pages
+    block_by_id = {block.id: block for block in blocks}
+    block_by_index = {block.index: block for block in blocks}
+    normalized_counts: dict[str, int] = {}
+    for block in blocks:
+        normalized = re.sub(r"\s+", " ", block.text).strip().casefold()
+        normalized_counts[normalized] = normalized_counts.get(normalized, 0) + 1
+
+    relocated: dict[int, list[HybridBlockPlacement]] = {}
+    removals: dict[int, set[str]] = {}
+    for page_index, page_plan in enumerate(pages[:-1]):
+        source_page = layout.pages[page_index]
+        target_page = layout.pages[page_index + 1]
+        ordered = sorted(page_plan.placements, key=lambda placement: placement.block_index)
+        for tail_offset, placement in enumerate(reversed(ordered[-2:])):
+            block = block_by_id[placement.block_id]
+            box = placement.source_bbox
+            normalized = re.sub(r"\s+", " ", block.text).strip().casefold()
+            if (
+                tail_offset > 0
+                or box is None
+                or block.kind not in {MarkdownBlockKind.PARAGRAPH, MarkdownBlockKind.HEADING}
+                or len(block.text) > 180
+                or _URL_RE.search(block.text) is None
+                or normalized_counts.get(normalized, 0) < 2
+                or box.y0
+                > source_page.content_bbox.y0 + round(source_page.content_bbox.height * 0.12)
+            ):
+                continue
+            previous = block_by_index.get(block.index - 1)
+            if previous is None:
+                continue
+            fraction = _PAGE_FRACTION_RE.search(previous.text)
+            if fraction is None:
+                continue
+            current, total = (int(value) for value in fraction.groups())
+            if current != page_plan.number or total != len(pages):
+                continue
+
+            projected_box = _project_box_to_page(box, source_page, target_page)
+            projected_rows = [
+                _project_box_to_page(row, source_page, target_page) for row in placement.source_rows
+            ]
+            moved = placement.model_copy(
+                update={
+                    "page_number": page_plan.number + 1,
+                    "source_bbox": projected_box,
+                    "source_rows": projected_rows,
+                    "source_gap_before": max(
+                        0,
+                        projected_box.y0 - target_page.content_bbox.y0,
+                    ),
+                }
+            )
+            removals.setdefault(page_plan.number, set()).add(placement.block_id)
+            relocated.setdefault(page_plan.number + 1, []).append(moved)
+
+    if not relocated:
+        return pages
+
+    result: list[HybridPagePlan] = []
+    for page_plan in pages:
+        placements = [
+            placement
+            for placement in page_plan.placements
+            if placement.block_id not in removals.get(page_plan.number, set())
+        ]
+        placements.extend(relocated.get(page_plan.number, []))
+        placements.sort(key=lambda placement: placement.block_index)
+        moved_ids = {placement.block_id for placement in relocated.get(page_plan.number, [])}
+        if moved_ids:
+            moved_position = next(
+                index
+                for index, placement in enumerate(placements)
+                if placement.block_id in moved_ids
+            )
+            if moved_position + 1 < len(placements):
+                following = placements[moved_position + 1]
+                moved = placements[moved_position]
+                if moved.source_bbox is not None and following.source_bbox is not None:
+                    placements[moved_position + 1] = following.model_copy(
+                        update={
+                            "source_gap_before": max(
+                                0,
+                                following.source_bbox.y0 - moved.source_bbox.y1,
+                            )
+                        }
+                    )
+        result.append(page_plan.model_copy(update={"placements": placements}))
+    return result
+
+
 def _block_weight(
     block: MarkdownBlock,
     *,
     characters_per_line: float,
-    asset: AssetMatch | None,
+    image_match: AssetMatch | EvidenceMatch | None,
     line_pitch: float,
 ) -> float:
     if block.kind is MarkdownBlockKind.IMAGE:
-        return max(2.0, asset.bbox.height / line_pitch) if asset else 7.0
+        return max(2.0, image_match.bbox.height / line_pitch) if image_match else 7.0
     if block.kind is MarkdownBlockKind.TABLE:
         rows = max(1, len(block.table_rows))
         return 0.5 + rows * 1.28
@@ -1007,6 +1578,23 @@ def _block_weight(
         # fractional line here models that without depending on a document type.
         return max(0.28, lines * (0.72 if length > 52 else 0.28))
     return lines + 0.10
+
+
+def _preferred_image_geometry(
+    asset: AssetMatch | None,
+    evidence: EvidenceMatch | None,
+) -> AssetMatch | EvidenceMatch | None:
+    """Prefer provider-normalized geometry over filename-coordinate hints.
+
+    Evidence matching has already projected provider coordinates into the
+    selected scan page's pixel grid.  A Markdown asset match may instead be an
+    offline filename hint expressed in the OCR export's smaller raster.  When
+    both identify the same image block, the canonical evidence therefore owns
+    page and crop geometry; the asset remains available to the renderer for
+    its original bytes when it was successfully resolved.
+    """
+
+    return evidence or asset
 
 
 def _segment_cost(
@@ -1089,6 +1677,17 @@ def build_hybrid_layout_plan(
     match_by_id = {match.block_id: match for match in asset_matches}
     table_match_by_id = {match.block_id: match for match in table_matches or []}
     evidence_match_by_id = {match.block_id: match for match in evidence_matches or ()}
+    image_geometry_by_id = {
+        block.id: preferred
+        for block in blocks
+        if block.kind is MarkdownBlockKind.IMAGE
+        and (
+            preferred := _preferred_image_geometry(
+                match_by_id.get(block.id), evidence_match_by_id.get(block.id)
+            )
+        )
+        is not None
+    }
     for block in blocks:
         evidence_match = evidence_match_by_id.get(block.id)
         if evidence_match is not None and evidence_match.block_index != block.index:
@@ -1101,9 +1700,9 @@ def build_hybrid_layout_plan(
         evidence_match = evidence_match_by_id.get(block.id)
         if evidence_match is not None:
             match_by_index[block.index] = evidence_match
-        asset_match = match_by_id.get(block.id)
-        if asset_match is not None:
-            match_by_index[block.index] = asset_match
+        image_geometry = image_geometry_by_id.get(block.id)
+        if image_geometry is not None:
+            match_by_index[block.index] = image_geometry
     fixed_pages = {index: match.page_number for index, match in match_by_index.items()}
     for block in blocks:
         table_match = table_match_by_id.get(block.id)
@@ -1112,7 +1711,7 @@ def build_hybrid_layout_plan(
             match_by_index[block.index] = table_match
     asset_group_pages: dict[str, set[int]] = {}
     for block in blocks:
-        match = match_by_id.get(block.id)
+        match = image_geometry_by_id.get(block.id)
         if match and block.group_id:
             asset_group_pages.setdefault(block.group_id, set()).add(match.page_number)
     for block in blocks:
@@ -1122,7 +1721,11 @@ def build_hybrid_layout_plan(
         # every sibling: one recognized line does not prove that a long
         # article or question cannot continue onto the following source page.
         # Every JSON-evidenced block still keeps its own fixed page above.
-        if len(anchored_pages) == 1:
+        if (
+            len(anchored_pages) == 1
+            and block.id not in evidence_match_by_id
+            and block.id not in table_match_by_id
+        ):
             fixed_pages[block.index] = next(iter(anchored_pages))
     global_pitch = sorted(page.line_pitch for page in layout.pages)[page_count // 2]
     average_width = sum(page.content_bbox.width for page in layout.pages) / page_count
@@ -1131,7 +1734,7 @@ def build_hybrid_layout_plan(
         _block_weight(
             block,
             characters_per_line=characters_per_line,
-            asset=match_by_id.get(block.id),
+            image_match=image_geometry_by_id.get(block.id),
             line_pitch=global_pitch,
         )
         for block in blocks
@@ -1194,10 +1797,10 @@ def build_hybrid_layout_plan(
         page_blocks = blocks[start:end]
         placements = []
         for block in page_blocks:
-            match = match_by_id.get(block.id)
             table_match = table_match_by_id.get(block.id)
             evidence_match = evidence_match_by_id.get(block.id)
-            geometry = match or table_match or evidence_match
+            image_geometry = image_geometry_by_id.get(block.id)
+            geometry = table_match or image_geometry or evidence_match
             placements.append(
                 HybridBlockPlacement(
                     block_id=block.id,
@@ -1210,19 +1813,23 @@ def build_hybrid_layout_plan(
                         else []
                     ),
                     match_score=(
-                        match.score
-                        if match
-                        else table_match.confidence
+                        table_match.confidence
                         if table_match
+                        else image_geometry.score
+                        if isinstance(image_geometry, AssetMatch)
+                        else image_geometry.match_score
+                        if isinstance(image_geometry, EvidenceMatch)
                         else evidence_match.match_score
                         if evidence_match
                         else None
                     ),
                     geometry_source=(
-                        "source_asset"
-                        if match
-                        else "source_table"
+                        "source_table"
                         if table_match
+                        else "source_asset"
+                        if isinstance(image_geometry, AssetMatch)
+                        else image_geometry.geometry_source
+                        if isinstance(image_geometry, EvidenceMatch)
                         else evidence_match.geometry_source
                         if evidence_match
                         else "content_estimate"
@@ -1246,6 +1853,7 @@ def build_hybrid_layout_plan(
                 )
             )
         placements = _snap_evidence_rows_to_scan(page_blocks, placements, source_page)
+        placements = _assign_group_option_geometry(page_blocks, placements, source_page)
         placements = _assign_text_geometry(page_blocks, placements, source_page)
         placements = _fill_source_gaps(placements, source_page)
         pages.append(
@@ -1261,6 +1869,7 @@ def build_hybrid_layout_plan(
             )
         )
         start = end
+    pages = _relocate_repeated_top_furniture(pages, blocks, layout)
     warnings: list[str] = []
     unmatched = len(content.image_blocks) - len(asset_matches)
     if unmatched:

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from docreconstruct.reconstruction.asset_matching import AssetMatch
+from docreconstruct.reconstruction.evidence_matching import EvidenceMatch
 from docreconstruct.reconstruction.hybrid_planner import (
+    HybridBlockPlacement,
     apply_page_vertical_fit_budget,
     build_hybrid_layout_plan,
     build_page_vertical_fit_budget,
@@ -281,6 +284,277 @@ $$\\begin{aligned}&=h\\\\&=i\\\\&=j\\\\&=k\\end{aligned}$$
     assert tightly_fitted[-1].source_bbox.height < placements[-1].source_bbox.height
 
 
+def test_dense_four_page_flow_calibrates_incomplete_geometry_before_font_size() -> None:
+    budgets = []
+    for page_number in range(1, 5):
+        blocks: list[MarkdownBlock] = []
+        placements: list[HybridBlockPlacement] = []
+        text_lines: list[ScanTextLine] = []
+        block_index = (page_number - 1) * 50
+        for group_index in range(10):
+            prompt_row = PixelBox(
+                x0=155,
+                y0=90 + group_index * 190,
+                x1=1490,
+                y1=122 + group_index * 190,
+            )
+            option_row = PixelBox(
+                x0=190,
+                y0=145 + group_index * 190,
+                x1=1450,
+                y1=177 + group_index * 190,
+            )
+            text_lines.extend(
+                [
+                    ScanTextLine(bbox=prompt_row, segments=[prompt_row], ink_density=0.1),
+                    ScanTextLine(bbox=option_row, segments=[option_row], ink_density=0.1),
+                ]
+            )
+            prompt = MarkdownBlock(
+                id=f"page-{page_number}-question-{group_index}",
+                index=block_index,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text=(
+                    f"Question {group_index + 1}. "
+                    + "Dense editable examination wording with inline variables " * 5
+                ),
+                group_id=f"page-{page_number}-group-{group_index}",
+                starts_group=True,
+            )
+            blocks.append(prompt)
+            prompt_known = block_index % 3 != 2
+            placements.append(
+                HybridBlockPlacement(
+                    block_id=prompt.id,
+                    block_index=block_index,
+                    page_number=page_number,
+                    source_bbox=prompt_row if prompt_known else None,
+                    source_rows=[prompt_row] if prompt_known else [],
+                    source_gap_before=12 if prompt_known else None,
+                )
+            )
+            block_index += 1
+            for label in "ABCD":
+                option = MarkdownBlock(
+                    id=f"page-{page_number}-question-{group_index}-{label}",
+                    index=block_index,
+                    kind=MarkdownBlockKind.OPTION,
+                    text=f"{label}. Short editable answer.",
+                    group_id=prompt.group_id,
+                )
+                blocks.append(option)
+                option_known = block_index % 3 != 2
+                placements.append(
+                    HybridBlockPlacement(
+                        block_id=option.id,
+                        block_index=block_index,
+                        page_number=page_number,
+                        source_bbox=option_row if option_known else None,
+                        source_rows=[option_row] if option_known else [],
+                        source_gap_before=0 if option_known else None,
+                    )
+                )
+                block_index += 1
+        page = ScanPageLayout(
+            number=page_number,
+            width=1600,
+            height=2263,
+            pdf_width=595.28,
+            pdf_height=841.89,
+            content_bbox=PixelBox(x0=149, y0=70, x1=1500, y1=2160),
+            line_pitch=48,
+            text_lines=text_lines,
+            image=Image.new("RGB", (1600, 2263), "white"),
+            metadata={"source_kind": "pdf", "column_count": 1},
+        )
+
+        budget = build_page_vertical_fit_budget(
+            page,
+            placements,
+            blocks=blocks,
+            printable_height_points=720,
+            font_size_points=12,
+            line_height_points=18.5,
+            headroom_points=8,
+        )
+        budgets.append(budget)
+
+    assert all(budget.calibrated and budget.fits for budget in budgets)
+    assert all(0.64 <= budget.geometry_coverage <= 0.68 for budget in budgets)
+    assert all(budget.block_gap_scale < 1 for budget in budgets)
+    assert all(budget.native_leading_scale < 1 for budget in budgets)
+    assert all(budget.line_height_scale < 1 for budget in budgets)
+    assert all(budget.font_size_scale == 1 for budget in budgets)
+    assert all(
+        budget.source_glyph_height == pytest.approx(32 * 595.28 / 1600) for budget in budgets
+    )
+
+
+def test_vertical_fit_allows_serialized_side_visual_y_reset_but_not_text_reset() -> None:
+    page = ScanPageLayout(
+        number=1,
+        width=1200,
+        height=1697,
+        pdf_width=595.28,
+        pdf_height=841.89,
+        content_bbox=PixelBox(x0=80, y0=60, x1=1120, y1=1620),
+        line_pitch=38,
+        text_lines=[
+            ScanTextLine(
+                bbox=PixelBox(x0=100, y0=100, x1=860, y1=130),
+                segments=[],
+                ink_density=0.1,
+            ),
+            ScanTextLine(
+                bbox=PixelBox(x0=100, y0=300, x1=860, y1=330),
+                segments=[],
+                ink_density=0.1,
+            ),
+        ],
+        image=Image.new("RGB", (1200, 1697), "white"),
+        metadata={"source_kind": "pdf", "column_count": 1},
+    )
+    text_blocks = [
+        MarkdownBlock(
+            id="prompt",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable prompt before a side figure.",
+            group_id="question",
+        ),
+        MarkdownBlock(
+            id="answer",
+            index=1,
+            kind=MarkdownBlockKind.OPTION,
+            text="A. Editable answer after the prompt.",
+            group_id="question",
+        ),
+    ]
+    visual = MarkdownBlock(
+        id="visual",
+        index=2,
+        kind=MarkdownBlockKind.IMAGE,
+        text="Side figure",
+        group_id="question",
+    )
+    placements = [
+        HybridBlockPlacement(
+            block_id="prompt",
+            block_index=0,
+            page_number=1,
+            source_bbox=PixelBox(x0=100, y0=100, x1=860, y1=130),
+            source_rows=[PixelBox(x0=100, y0=100, x1=860, y1=130)],
+            source_gap_before=40,
+        ),
+        HybridBlockPlacement(
+            block_id="answer",
+            block_index=1,
+            page_number=1,
+            source_bbox=PixelBox(x0=100, y0=300, x1=860, y1=330),
+            source_rows=[PixelBox(x0=100, y0=300, x1=860, y1=330)],
+            source_gap_before=170,
+        ),
+        HybridBlockPlacement(
+            block_id="visual",
+            block_index=2,
+            page_number=1,
+            source_bbox=PixelBox(x0=900, y0=150, x1=1100, y1=280),
+            source_rows=[],
+            source_gap_before=0,
+        ),
+    ]
+
+    side_visual_budget = build_page_vertical_fit_budget(
+        page,
+        placements,
+        blocks=[*text_blocks, visual],
+        printable_height_points=760,
+        font_size_points=12,
+        line_height_points=18,
+    )
+
+    assert side_visual_budget.calibrated
+    assert side_visual_budget.fixed_ink_height < 130 * page.pdf_width / page.width
+    same_row_answer = placements[1].model_copy(
+        update={
+            "source_bbox": PixelBox(x0=100, y0=99, x1=860, y1=129),
+            "source_rows": [PixelBox(x0=100, y0=99, x1=860, y1=129)],
+            "source_gap_before": 0,
+        }
+    )
+    same_row_budget = build_page_vertical_fit_budget(
+        page,
+        [placements[0], same_row_answer, placements[2]],
+        blocks=[*text_blocks, visual],
+        printable_height_points=760,
+        font_size_points=12,
+        line_height_points=18,
+    )
+    assert same_row_budget.calibrated
+    backward_text = visual.model_copy(update={"kind": MarkdownBlockKind.PARAGRAPH})
+    backward_text_budget = build_page_vertical_fit_budget(
+        page,
+        placements,
+        blocks=[*text_blocks, backward_text],
+        printable_height_points=760,
+        font_size_points=12,
+        line_height_points=18,
+    )
+    assert not backward_text_budget.calibrated
+
+
+def test_vertical_fit_replaces_coarse_merged_prose_row_with_source_glyph_units() -> None:
+    page = ScanPageLayout(
+        number=1,
+        width=1200,
+        height=1697,
+        pdf_width=595.28,
+        pdf_height=841.89,
+        content_bbox=PixelBox(x0=80, y0=60, x1=1120, y1=1620),
+        line_pitch=40,
+        text_lines=[
+            ScanTextLine(
+                bbox=PixelBox(x0=100, y0=80, x1=1050, y1=110),
+                segments=[],
+                ink_density=0.1,
+            )
+        ],
+        image=Image.new("RGB", (1200, 1697), "white"),
+        metadata={"source_kind": "pdf", "column_count": 1},
+    )
+    block = MarkdownBlock(
+        id="paragraph",
+        index=0,
+        kind=MarkdownBlockKind.PARAGRAPH,
+        text="Dense editable prose around a diagram. " * 5,
+    )
+    coarse = PixelBox(x0=100, y0=180, x1=860, y1=360)
+    placement = HybridBlockPlacement(
+        block_id=block.id,
+        block_index=0,
+        page_number=1,
+        source_bbox=coarse,
+        source_rows=[coarse],
+        source_gap_before=20,
+    )
+
+    budget = build_page_vertical_fit_budget(
+        page,
+        [placement],
+        blocks=[block],
+        printable_height_points=760,
+        font_size_points=12,
+        line_height_points=18,
+    )
+
+    raw_union_height = coarse.height * page.pdf_width / page.width
+    assert budget.calibrated
+    assert budget.fixed_ink_height < raw_union_height
+    assert budget.fixed_ink_height == pytest.approx(
+        budget.estimated_line_count * budget.source_glyph_height
+    )
+
+
 def test_centered_formula_fragments_are_not_a_split_masthead() -> None:
     content = PixelBox(x0=86, y0=27, x1=958, y1=1347)
     lines = [
@@ -371,6 +645,273 @@ def test_compact_option_group_shares_visual_rows_without_losing_geometry(
         for placement in placements
         for row in placement.source_rows
     } == {(line.bbox.x0, line.bbox.y0, line.bbox.x1, line.bbox.y1) for line in lines}
+
+
+def test_coarse_group_evidence_splits_option_segments_without_crossing_figure() -> None:
+    group = "section-1:câu 1:"
+    blocks = [
+        MarkdownBlock(
+            id="question",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Câu 1: Chọn phương án đúng.",
+            group_id=group,
+            starts_group=True,
+        ),
+        *[
+            MarkdownBlock(
+                id=f"option-{label}",
+                index=index,
+                kind=MarkdownBlockKind.OPTION,
+                text=f"{label}. {index}.",
+                group_id=group,
+            )
+            for index, label in enumerate("ABCD", start=1)
+        ],
+        MarkdownBlock(
+            id="continuation",
+            index=5,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable text before the figure.",
+        ),
+        MarkdownBlock(
+            id="figure",
+            index=6,
+            kind=MarkdownBlockKind.IMAGE,
+            source="https://assets.invalid/figure.png",
+        ),
+    ]
+    prompt = PixelBox(x0=50, y0=100, x1=700, y1=125)
+    option_segments = [PixelBox(x0=x0, y0=150, x1=x0 + 100, y1=175) for x0 in (50, 260, 470, 680)]
+    option_row = PixelBox(x0=50, y0=150, x1=780, y1=175)
+    continuation = PixelBox(x0=50, y0=220, x1=600, y1=245)
+    figure = PixelBox(x0=180, y0=300, x1=650, y1=500)
+    page = ScanPageLayout(
+        number=1,
+        width=840,
+        height=620,
+        pdf_width=595,
+        pdf_height=439,
+        content_bbox=PixelBox(x0=40, y0=40, x1=800, y1=580),
+        line_pitch=50,
+        text_lines=[
+            ScanTextLine(bbox=prompt, segments=[prompt], ink_density=0.1),
+            ScanTextLine(bbox=option_row, segments=option_segments, ink_density=0.1),
+            ScanTextLine(bbox=continuation, segments=[continuation], ink_density=0.1),
+        ],
+        image=Image.new("RGB", (840, 620), "white"),
+    )
+    content = MarkdownContent(source="authority.md", blocks=blocks)
+    layout = ScanDocumentLayout(source="layout.png", pages=[page])
+    coarse = PixelBox(x0=45, y0=90, x1=790, y1=185)
+
+    plan = build_hybrid_layout_plan(
+        content,
+        layout,
+        [
+            AssetMatch(
+                block_id="figure",
+                source=blocks[-1].source or "",
+                page_number=1,
+                bbox=figure,
+                score=1.0,
+                resolved=False,
+            )
+        ],
+        [],
+        evidence_matches=[
+            EvidenceMatch(
+                block_id="question",
+                block_index=0,
+                page_number=1,
+                source_bbox=coarse,
+                # Provider bbox owns the whole prompt+answer unit, while row
+                # snapping has retained only the prompt line.
+                source_rows=[prompt],
+                match_score=0.98,
+                confidence=0.95,
+                providers=("paddleocr",),
+                element_ids=("question-and-options",),
+            )
+        ],
+    )
+    by_id = {placement.block_id: placement for placement in plan.pages[0].placements}
+
+    assert by_id["question"].source_rows == [prompt]
+    assert [by_id[f"option-{label}"].source_bbox for label in "ABCD"] == option_segments
+    assert all(
+        by_id[f"option-{label}"].geometry_source == "scan_inferred_group_option" for label in "ABCD"
+    )
+    assert by_id["continuation"].source_bbox == continuation
+    assert by_id["continuation"].source_bbox.y1 < figure.y0
+    assert by_id["figure"].source_bbox == figure
+
+
+def test_vertical_fit_counts_overlapping_disjoint_images_as_one_row() -> None:
+    page = ScanPageLayout(
+        number=1,
+        width=1000,
+        height=1400,
+        pdf_width=595,
+        pdf_height=833,
+        content_bbox=PixelBox(x0=50, y0=40, x1=950, y1=1360),
+        line_pitch=40,
+        text_lines=[
+            ScanTextLine(
+                bbox=PixelBox(x0=80, y0=100, x1=900, y1=130),
+                segments=[],
+                ink_density=0.1,
+            )
+        ],
+        image=Image.new("RGB", (1000, 1400), "white"),
+        metadata={"source_kind": "pdf", "column_count": 1},
+    )
+    blocks = [
+        MarkdownBlock(
+            id="prompt",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable prompt above two source figures.",
+            group_id="question",
+        ),
+        MarkdownBlock(
+            id="left-image",
+            index=1,
+            kind=MarkdownBlockKind.IMAGE,
+            text="Left figure",
+            group_id="question",
+        ),
+        MarkdownBlock(
+            id="right-image",
+            index=2,
+            kind=MarkdownBlockKind.IMAGE,
+            text="Right figure",
+            group_id="question",
+        ),
+    ]
+    prompt = PixelBox(x0=80, y0=100, x1=900, y1=130)
+    left = PixelBox(x0=120, y0=220, x1=450, y1=420)
+    right = PixelBox(x0=550, y0=200, x1=880, y1=430)
+    placements = [
+        HybridBlockPlacement(
+            block_id="prompt",
+            block_index=0,
+            page_number=1,
+            source_bbox=prompt,
+            source_rows=[prompt],
+            source_gap_before=60,
+        ),
+        HybridBlockPlacement(
+            block_id="left-image",
+            block_index=1,
+            page_number=1,
+            source_bbox=left,
+            source_gap_before=90,
+        ),
+        HybridBlockPlacement(
+            block_id="right-image",
+            block_index=2,
+            page_number=1,
+            source_bbox=right,
+            source_gap_before=0,
+        ),
+    ]
+
+    budget = build_page_vertical_fit_budget(
+        page,
+        placements,
+        blocks=blocks,
+        printable_height_points=780,
+        font_size_points=12,
+        line_height_points=18,
+    )
+
+    scale = page.pdf_width / page.width
+    assert budget.calibrated
+    assert budget.fixed_ink_height == pytest.approx((prompt.height + right.height) * scale)
+
+
+def test_authoritative_block_evidence_page_beats_group_asset_propagation() -> None:
+    pages = [
+        ScanPageLayout(
+            number=number,
+            width=600,
+            height=800,
+            pdf_width=595,
+            pdf_height=793,
+            content_bbox=PixelBox(x0=40, y0=20, x1=560, y1=780),
+            line_pitch=30,
+            image=Image.new("RGB", (600, 800), "white"),
+            metadata={"source_kind": "pdf", "column_count": 1},
+        )
+        for number in (1, 2)
+    ]
+    blocks = [
+        MarkdownBlock(
+            id="question-image",
+            index=0,
+            kind=MarkdownBlockKind.IMAGE,
+            source="https://assets.invalid/question.png",
+            group_id="question",
+        ),
+        MarkdownBlock(
+            id="page-one-folio",
+            index=1,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Page 1/2",
+        ),
+        MarkdownBlock(
+            id="repeated-header",
+            index=2,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Fanpage: https://example.invalid/official",
+            group_id="question",
+        ),
+        MarkdownBlock(
+            id="second-copy",
+            index=3,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Fanpage: https://example.invalid/official",
+        ),
+    ]
+    content = MarkdownContent(source="content.md", blocks=blocks)
+    layout = ScanDocumentLayout(source="layout.pdf", pages=pages)
+    image_box = PixelBox(x0=350, y0=500, x1=520, y1=700)
+    header_box = PixelBox(x0=180, y0=25, x1=520, y1=50)
+
+    plan = build_hybrid_layout_plan(
+        content,
+        layout,
+        [
+            AssetMatch(
+                block_id="question-image",
+                source=blocks[0].source or "",
+                page_number=1,
+                bbox=image_box,
+                score=1.0,
+                resolved=False,
+            )
+        ],
+        evidence_matches=[
+            EvidenceMatch(
+                block_id="repeated-header",
+                block_index=2,
+                page_number=2,
+                source_bbox=header_box,
+                source_rows=[header_box],
+                match_score=1.0,
+                confidence=1.0,
+                providers=("provider",),
+                element_ids=("page-2-header",),
+            )
+        ],
+    )
+
+    page_by_block = {
+        placement.block_id: page.number for page in plan.pages for placement in page.placements
+    }
+    assert page_by_block["question-image"] == 1
+    assert page_by_block["repeated-header"] == 2
 
 
 def test_text_geometry_never_crosses_an_intervening_figure_anchor(tmp_path: Path) -> None:

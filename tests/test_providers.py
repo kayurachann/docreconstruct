@@ -27,6 +27,7 @@ from docreconstruct.providers import (
     NativePDFProvider,
     OlmOCRProvider,
     PaddleOCRProvider,
+    PaddleOCRVLServerProvider,
     ProviderContext,
     ProviderInferenceUnsupportedError,
     ProviderRegistry,
@@ -49,8 +50,10 @@ def test_builtin_registry_and_custom_registry() -> None:
         "native_pdf",
         "olmocr",
         "paddleocr",
+        "paddleocr_vl_server",
     }
     assert isinstance(registry.get("PaddleOCR"), PaddleOCRProvider)
+    assert isinstance(registry.get("PaddleOCR-VL-Server"), PaddleOCRVLServerProvider)
     assert isinstance(registry.get("Mistral-OCR"), MistralOCRProvider)
     assert isinstance(registry.get("Mathpix"), MathpixProvider)
     assert isinstance(registry.get("AWS-Textract"), AWSTextractProvider)
@@ -214,6 +217,7 @@ def test_paddleocr_ppstructure_v3_preserves_structured_evidence() -> None:
     assert formula.metadata["latex"] == r"x^2 + y^2 = 1"
     assert formula.reading_order == 1
     assert image.confidence == pytest.approx(0.87)
+    assert image.metadata["reading_order_reliable"] is False
 
     assert ocr_line.polygon[0].x == 110
     assert ocr_line.confidence == pytest.approx(0.97)
@@ -231,6 +235,42 @@ def test_paddleocr_ppstructure_v3_preserves_structured_evidence() -> None:
             "use_doc_unwarping": True,
         },
     }
+
+
+def test_paddleocr_vl_ordered_page_envelopes_preserve_four_pages() -> None:
+    payload = [
+        {
+            "prunedResult": {
+                "parsing_res_list": [
+                    {
+                        "block_bbox": [10, 20, 100, 45],
+                        "block_label": "text",
+                        "block_content": f"Page {page_number}",
+                        "block_id": page_number,
+                        "block_order": 0,
+                    }
+                ],
+                "layout_det_res": {"boxes": []},
+            },
+            "markdown": {"text": f"Page {page_number}", "images": {}},
+            "outputImages": {"layout_det_res": f"page-{page_number}-layout"},
+            "inputImage": f"page-{page_number}.png",
+        }
+        for page_number in range(1, 5)
+    ]
+
+    document = PaddleOCRProvider().normalize(payload)
+
+    assert [page.number for page in document.pages] == [1, 2, 3, 4]
+    assert [[element.text for element in page.elements] for page in document.pages] == [
+        ["Page 1"],
+        ["Page 2"],
+        ["Page 3"],
+        ["Page 4"],
+    ]
+    assert all(
+        page.elements[0].metadata["paddle_section"] == "parsing_res_list" for page in document.pages
+    )
 
 
 def test_mineru_middle_json_and_content_list_shapes() -> None:

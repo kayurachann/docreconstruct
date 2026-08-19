@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import io
 import math
+import os
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from docreconstruct.exceptions import ProviderUnavailableError
 from docreconstruct.ir import BBox
+
+_DEFAULT_MAX_PAGE_WORKERS = 4
+_ABSOLUTE_MAX_PAGE_WORKERS = 8
 
 
 class ScanRegionKind(StrEnum):
@@ -1767,8 +1772,53 @@ def _extract_with_pymupdf(path: Path, dpi: int) -> list[tuple[Image.Image, float
     return pages
 
 
-def analyze_scan_pdf(source: str | Path, *, dpi: int = 192) -> ScanDocumentLayout:
-    """Extract and analyze every PDF page using installed local backends only."""
+def _scan_page_worker_count(page_count: int, maximum_workers: int | None) -> int:
+    """Resolve a conservative page-analysis worker count.
+
+    Page rasters are held in memory while they are analyzed, so an unbounded
+    executor can multiply memory pressure on long, high-DPI documents.  The
+    automatic setting respects both available CPUs and a small project-wide
+    ceiling.  Explicit settings remain bounded by the page count, CPU count,
+    and a higher hard safety ceiling.
+    """
+
+    if page_count < 1:
+        return 0
+    if isinstance(maximum_workers, bool) or (
+        maximum_workers is not None
+        and (not isinstance(maximum_workers, int) or maximum_workers < 1)
+    ):
+        raise ValueError("maximum scan page workers must be a positive integer")
+    cpu_count = max(1, os.cpu_count() or 1)
+    requested = _DEFAULT_MAX_PAGE_WORKERS if maximum_workers is None else maximum_workers
+    return min(page_count, cpu_count, requested, _ABSOLUTE_MAX_PAGE_WORKERS)
+
+
+def _analyze_extracted_pdf_page(
+    work_item: tuple[int, Image.Image, float, float],
+) -> ScanPageLayout:
+    number, image, pdf_width, pdf_height = work_item
+    return analyze_scan_page(
+        image,
+        number=number,
+        pdf_width=pdf_width,
+        pdf_height=pdf_height,
+        metadata={"source_kind": "pdf", "rectified": False},
+    )
+
+
+def analyze_scan_pdf(
+    source: str | Path,
+    *,
+    dpi: int = 192,
+    maximum_workers: int | None = None,
+) -> ScanDocumentLayout:
+    """Extract and analyze every PDF page using installed local backends only.
+
+    Independent page analyses use bounded worker processes for multi-page inputs.
+    The returned pages always retain source order regardless of completion order.
+    Set ``maximum_workers=1`` for serial analysis.
+    """
 
     path = Path(source).expanduser().resolve()
     if not path.is_file():
@@ -1779,16 +1829,20 @@ def analyze_scan_pdf(source: str | Path, *, dpi: int = 192) -> ScanDocumentLayou
         extracted = _extract_with_pypdf(path)
     except (ProviderUnavailableError, ValueError, OSError):
         extracted = _extract_with_pymupdf(path, dpi)
-    pages = [
-        analyze_scan_page(
-            image,
-            number=index,
-            pdf_width=pdf_width,
-            pdf_height=pdf_height,
-            metadata={"source_kind": "pdf", "rectified": False},
-        )
+    work_items = [
+        (index, image, pdf_width, pdf_height)
         for index, (image, pdf_width, pdf_height) in enumerate(extracted, start=1)
     ]
+    worker_count = _scan_page_worker_count(len(work_items), maximum_workers)
+    if worker_count == 1:
+        pages = [_analyze_extracted_pdf_page(item) for item in work_items]
+    elif worker_count > 1:
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+        ) as executor:
+            pages = list(executor.map(_analyze_extracted_pdf_page, work_items))
+    else:
+        pages = []
     if not pages:
         raise ValueError("layout PDF contains no pages")
     return ScanDocumentLayout(source=str(path), pages=pages)
@@ -1817,12 +1871,17 @@ def analyze_scan_image(source: str | Path) -> ScanDocumentLayout:
     return ScanDocumentLayout(source=str(path), pages=[page])
 
 
-def analyze_scan_source(source: str | Path, *, dpi: int = 192) -> ScanDocumentLayout:
+def analyze_scan_source(
+    source: str | Path,
+    *,
+    dpi: int = 192,
+    maximum_workers: int | None = None,
+) -> ScanDocumentLayout:
     """Dispatch a PDF or raster layout authority to the matching analyzer."""
 
     path = Path(source).expanduser().resolve()
     if path.suffix.lower() == ".pdf":
-        return analyze_scan_pdf(path, dpi=dpi)
+        return analyze_scan_pdf(path, dpi=dpi, maximum_workers=maximum_workers)
     return analyze_scan_image(path)
 
 

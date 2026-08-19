@@ -22,6 +22,21 @@ from docreconstruct.evaluation import (
 from docreconstruct.evidence import SidecarEvidenceError
 from docreconstruct.providers.mistral_ocr import MistralOCRProvider
 from docreconstruct.reconstruction import reconstruct_hybrid
+from docreconstruct.reconstruction.hybrid_planner import (
+    HybridBlockPlacement,
+    HybridLayoutPlan,
+    HybridPagePlan,
+)
+from docreconstruct.reconstruction.markdown_content import (
+    MarkdownBlock,
+    MarkdownBlockKind,
+    MarkdownContent,
+)
+from docreconstruct.reconstruction.scan_layout import (
+    PixelBox,
+    ScanDocumentLayout,
+    ScanPageLayout,
+)
 
 _WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
@@ -52,6 +67,212 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
 def _physical_page_sizes(layout: Path) -> tuple[tuple[float, float], ...]:
     scan = hybrid_validation.analyze_scan_source(layout)
     return tuple((float(page.pdf_width), float(page.pdf_height)) for page in scan.pages)
+
+
+def test_expected_furniture_reuses_multilingual_weak_bbox_footer_partition(
+    tmp_path: Path,
+) -> None:
+    texts = [
+        "Editable first page.",
+        "Open: https://example.invalid/source",
+        "Page 1/2",
+        "Editable second page.",
+        "Open: https://example.invalid/source",
+        "Страница 2/2",
+        "Repeated top banner.",
+    ]
+    blocks = [
+        MarkdownBlock(
+            id=f"md-{index}",
+            index=index,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text=text,
+        )
+        for index, text in enumerate(texts)
+    ]
+    content = MarkdownContent(source=str(tmp_path / "content.md"), blocks=blocks)
+    pages = [
+        ScanPageLayout(
+            number=number,
+            width=600,
+            height=800,
+            pdf_width=595,
+            pdf_height=793,
+            content_bbox=PixelBox(x0=35, y0=20, x1=565, y1=780),
+            line_pitch=30,
+            image=Image.new("RGB", (600, 800), "white"),
+            metadata={"source_kind": "image", "column_count": 1},
+        )
+        for number in (1, 2)
+    ]
+    layout = ScanDocumentLayout(source=str(tmp_path / "layout.png"), pages=pages)
+    body_1 = PixelBox(x0=60, y0=100, x1=500, y1=124)
+    link_1 = PixelBox(x0=180, y0=744, x1=500, y1=762)
+    number_1 = PixelBox(x0=480, y0=764, x1=555, y1=780)
+    body_2 = PixelBox(x0=60, y0=100, x1=500, y1=124)
+    banner_2 = PixelBox(x0=160, y0=28, x1=500, y1=48)
+    placements = [
+        HybridBlockPlacement(
+            block_id="md-0",
+            block_index=0,
+            page_number=1,
+            source_bbox=body_1,
+            source_rows=[body_1],
+            source_gap_before=0,
+        ),
+        HybridBlockPlacement(
+            block_id="md-1",
+            block_index=1,
+            page_number=1,
+            source_bbox=link_1,
+            source_rows=[link_1],
+            source_gap_before=0,
+        ),
+        HybridBlockPlacement(
+            block_id="md-2",
+            block_index=2,
+            page_number=1,
+            source_bbox=number_1,
+            source_rows=[number_1],
+            source_gap_before=0,
+        ),
+        HybridBlockPlacement(
+            block_id="md-3",
+            block_index=3,
+            page_number=2,
+            source_bbox=body_2,
+            source_rows=[body_2],
+            source_gap_before=0,
+        ),
+        HybridBlockPlacement(block_id="md-4", block_index=4, page_number=2),
+        HybridBlockPlacement(block_id="md-5", block_index=5, page_number=2),
+        HybridBlockPlacement(
+            block_id="md-6",
+            block_index=6,
+            page_number=2,
+            source_bbox=banner_2,
+            source_rows=[banner_2],
+            source_gap_before=0,
+        ),
+    ]
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=layout.source,
+        pages=[
+            HybridPagePlan(
+                number=page.number,
+                pdf_width=page.pdf_width,
+                pdf_height=page.pdf_height,
+                raster_width=page.width,
+                raster_height=page.height,
+                content_bbox=page.content_bbox,
+                line_pitch=page.line_pitch,
+                placements=[
+                    placement for placement in placements if placement.page_number == page.number
+                ],
+            )
+            for page in pages
+        ],
+    )
+
+    mastheads, footers = hybrid_validation._expected_layout_furniture(content, layout, plan)
+
+    assert mastheads == 0
+    assert footers == [
+        "Open: https://example.invalid/source",
+        "Page 1/2",
+        "Open: https://example.invalid/source",
+        "Страница 2/2",
+    ]
+    assert footers.count("Страница 2/2") == 1
+
+
+def test_anchor_order_allows_same_group_side_visual_but_keeps_full_width_gate(
+    tmp_path: Path,
+) -> None:
+    blocks = [
+        MarkdownBlock(
+            id="side-text",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable text beside a figure.",
+            group_id="side-group",
+        ),
+        MarkdownBlock(
+            id="side-image",
+            index=1,
+            kind=MarkdownBlockKind.IMAGE,
+            text="Side image",
+            group_id="side-group",
+        ),
+        MarkdownBlock(
+            id="full-text",
+            index=2,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable text that truly crosses a full-width anchor.",
+            group_id="full-group",
+        ),
+        MarkdownBlock(
+            id="full-image",
+            index=3,
+            kind=MarkdownBlockKind.IMAGE,
+            text="Full image",
+            group_id="full-group",
+        ),
+    ]
+    content = MarkdownContent(source=str(tmp_path / "content.md"), blocks=blocks)
+    # Coarse question geometry can extend into its right-side figure even
+    # though the editable flow and figure share one native row.
+    side_text = PixelBox(x0=50, y0=90, x1=450, y1=290)
+    side_image = PixelBox(x0=400, y0=140, x1=550, y1=260)
+    full_text = PixelBox(x0=50, y0=300, x1=550, y1=460)
+    full_image = PixelBox(x0=45, y0=350, x1=555, y1=430)
+    page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=800,
+        pdf_width=595,
+        pdf_height=793,
+        content_bbox=PixelBox(x0=35, y0=20, x1=565, y1=780),
+        line_pitch=30,
+        image=Image.new("RGB", (600, 800), "white"),
+        metadata={"source_kind": "pdf", "column_count": 1},
+    )
+    layout = ScanDocumentLayout(source=str(tmp_path / "layout.pdf"), pages=[page])
+    boxes = [side_text, side_image, full_text, full_image]
+    placements = [
+        HybridBlockPlacement(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+            source_bbox=box,
+            source_rows=[] if block.kind is MarkdownBlockKind.IMAGE else [box],
+            source_gap_before=0,
+        )
+        for block, box in zip(blocks, boxes, strict=True)
+    ]
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=layout.source,
+        pages=[
+            HybridPagePlan(
+                number=1,
+                pdf_width=page.pdf_width,
+                pdf_height=page.pdf_height,
+                raster_width=page.width,
+                raster_height=page.height,
+                content_bbox=page.content_bbox,
+                line_pitch=page.line_pitch,
+                placements=placements,
+            )
+        ],
+    )
+
+    metrics = hybrid_validation._plan_geometry_metrics(content, layout, plan)
+
+    assert metrics["source_anchor_order_violations"] == [
+        {"page": 1, "block_id": "full-text", "anchor_id": "full-image"}
+    ]
 
 
 def _mistral_evidence(tmp_path: Path) -> Path:
@@ -101,6 +322,21 @@ def _mistral_evidence(tmp_path: Path) -> Path:
 
 def _gate(report: HybridValidationReport, name: str) -> HybridValidationGate:
     return next(gate for gate in report.gates if gate.name == name)
+
+
+def test_docx_projection_preserves_explicit_break_and_tab_boundaries() -> None:
+    root = ElementTree.fromstring(
+        f"""
+        <w:root xmlns:w="{_WORD[1:-1]}">
+          <w:p><w:r>
+            <w:t>First footer block</w:t><w:br/>
+            <w:t>Second</w:t><w:tab/><w:t>block</w:t>
+          </w:r></w:p>
+        </w:root>
+        """
+    )
+
+    assert hybrid_validation._docx_projection(root) == ("First footer block Second block")
 
 
 def _advanced_math_fixture(tmp_path: Path) -> tuple[Path, Path]:

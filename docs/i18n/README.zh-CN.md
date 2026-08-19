@@ -7,6 +7,21 @@
 文档。在整个流程中，OCR 结果只是用于核对的输入之一，并非最终成品。项目
 会通过统一的文档模型、版面规划和输出模块生成 DOCX 文档、网页或 JSON 数据。
 
+## 网页界面与文件上传
+
+GitHub Pages 部署完成后，可通过
+[kayurachann.github.io/docreconstruct](https://kayurachann.github.io/docreconstruct/)
+访问静态网页界面。该页面只是浏览器端界面，并非托管式文档重建服务。
+GitHub Pages 无法运行 Python、LibreOffice、Triton、vLLM 或 GPU OCR 模型；
+本仓库也不附带公共后端，更不提供不限量的免费 GPU 算力。
+
+使用该界面时，用户必须选择由可信机构运营的后端。提交前，界面会明确说明
+校对后的 Markdown、原始 PDF 或图像以及可选 JSON 将上传到该后端，并要求
+用户确认同意。启用 PaddleOCR-VL 后，后端可能把原始文件转交给运营方所配置
+的 OCR 服务。更改后端地址或 OCR 选项后，必须重新确认。数据保留期限、隐私
+保护、处理地区、使用限额和费用均由相应运营方决定。详情参见
+[性能与部署说明](../PERFORMANCE.md)。
+
 ## 推荐的三类输入
 
 同时提供以下三类相互补充的输入，通常能得到最可靠的结果。三者各有用途，

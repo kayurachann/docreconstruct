@@ -451,6 +451,34 @@ def _new_paragraph(
             if source_geometry.row_heights
             else rendered_size * 1.08
         )
+        if (
+            placement is not None
+            and layout is not None
+            and kind
+            in {
+                MarkdownBlockKind.PARAGRAPH,
+                MarkdownBlockKind.OPTION,
+                MarkdownBlockKind.LIST_ITEM,
+                MarkdownBlockKind.CODE,
+            }
+        ):
+            page = layout.pages[placement.page_number - 1]
+            page_scale = (
+                page.pdf_height / page.height
+                if page.metadata.get("source_kind") == "image"
+                else page.pdf_width / page.width
+            )
+            ordinary_row_ceiling = page.line_pitch * page_scale * 1.50
+            ordinary_rows = [
+                height for height in source_geometry.row_heights if height <= ordinary_row_ceiling
+            ]
+            if ordinary_rows:
+                measured_row_height = statistics.median(ordinary_rows)
+            elif source_geometry.row_heights:
+                # Provider evidence can merge several baselines around a
+                # figure into one tall bbox. It is a paragraph envelope, not
+                # a native Word line-height instruction.
+                measured_row_height = rendered_size * 1.08
         if heading and (
             measured_row_height > rendered_size * 1.22
             or source_geometry.height >= max(rendered_size * 2.8, line_height * 3.6)
@@ -871,6 +899,35 @@ def _crop_bytes(layout: ScanDocumentLayout, page_number: int, bbox: PixelBox) ->
     return output.getvalue()
 
 
+def _source_figure_bytes(
+    asset_bytes: dict[str, bytes],
+    block_id: str,
+    layout: ScanDocumentLayout,
+    page_number: int,
+    bbox: PixelBox,
+) -> bytes:
+    """Prefer saved asset bytes only when their shape agrees with geometry."""
+
+    data = asset_bytes.get(block_id)
+    if data is not None:
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                intrinsic_aspect = image.width / max(1, image.height)
+            source_aspect = bbox.width / max(1, bbox.height)
+            aspect_factor = max(
+                intrinsic_aspect / max(source_aspect, 1e-6),
+                source_aspect / max(intrinsic_aspect, 1e-6),
+            )
+            if aspect_factor <= 1.35:
+                return data
+        except OSError:
+            pass
+    # Provider URLs can point at a padded or differently scaled preview even
+    # when JSON owns an exact source bbox. Recropping that authoritative box
+    # preserves the physical aspect and prevents a Word row from inflating.
+    return _crop_bytes(layout, page_number, bbox)
+
+
 def _top_boundary_ink_rate(data: bytes) -> float:
     try:
         image = Image.open(io.BytesIO(data)).convert("L")
@@ -1051,7 +1108,13 @@ def _render_linear(
             if bbox:
                 page = layout.pages[placement.page_number - 1]
                 picture_width = bbox.width / page.width * page.pdf_width / 72.0
-                data = asset_bytes.get(block.id) or _crop_bytes(layout, placement.page_number, bbox)
+                data = _source_figure_bytes(
+                    asset_bytes,
+                    block.id,
+                    layout,
+                    placement.page_number,
+                    bbox,
+                )
                 display_width = min(width, picture_width)
                 left_outdent = 0.0
                 right_outdent = 0.0
@@ -1123,6 +1186,148 @@ def _overlap_ratio(left: PixelBox, right: PixelBox) -> float:
     return overlap / max(1, min(left.height, right.height))
 
 
+def _horizontal_image_row(
+    blocks: Sequence[MarkdownBlock],
+    placements: dict[str, HybridBlockPlacement],
+) -> list[tuple[MarkdownBlock, PixelBox]]:
+    """Return same-page images that form one disjoint, overlapping row."""
+
+    candidates: list[tuple[MarkdownBlock, PixelBox]] = []
+    page_numbers: set[int] = set()
+    for block in blocks:
+        if block.kind is not MarkdownBlockKind.IMAGE:
+            continue
+        placement = placements.get(block.id)
+        if placement is None or placement.source_bbox is None:
+            return []
+        page_numbers.add(placement.page_number)
+        candidates.append((block, placement.source_bbox))
+    if len(candidates) < 2 or len(page_numbers) != 1:
+        return []
+    candidates.sort(key=lambda item: item[1].x0)
+    boxes = [box for _block, box in candidates]
+    if any(left.x1 > right.x0 for left, right in zip(boxes, boxes[1:], strict=False)):
+        return []
+    common_overlap = max(0, min(box.y1 for box in boxes) - max(box.y0 for box in boxes))
+    if common_overlap / max(1, min(box.height for box in boxes)) < 0.55:
+        return []
+    return candidates
+
+
+def _add_horizontal_image_row(
+    parent: WordDocumentType | _Cell,
+    images: Sequence[tuple[MarkdownBlock, PixelBox]],
+    *,
+    frame: PixelBox,
+    width: float,
+    size: float,
+    line_height: float,
+    asset_bytes: dict[str, bytes],
+    layout: ScanDocumentLayout,
+    page_number: int,
+) -> Table:
+    """Render independently editable image objects in one native table row."""
+
+    source_widths = [float(max(1, images[0][1].x0 - frame.x0))]
+    for index, (_block, box) in enumerate(images):
+        source_widths.append(float(box.width))
+        if index + 1 < len(images):
+            source_widths.append(float(max(1, images[index + 1][1].x0 - box.x1)))
+    source_widths.append(float(max(1, frame.x1 - images[-1][1].x1)))
+    normalization = max(1.0, sum(source_widths))
+    widths = [width * value / normalization for value in source_widths]
+    table = _borderless_table(
+        parent,
+        1,
+        len(widths),
+        widths,
+        size=size,
+        line_height=line_height,
+    )
+    caption = OxmlElement("w:tblCaption")
+    caption.set(qn("w:val"), "docreconstruct:horizontal-visual-row")
+    table._tbl.tblPr.append(caption)
+    page = layout.pages[page_number - 1]
+    for image_index, (block, box) in enumerate(images):
+        column = image_index * 2 + 1
+        data = _source_figure_bytes(asset_bytes, block.id, layout, page_number, box)
+        source_width = box.width / page.width * page.pdf_width / 72.0
+        _add_picture(
+            table.cell(0, column),
+            data,
+            width_inches=min(widths[column], source_width),
+        )
+    return table
+
+
+def _render_horizontal_visual_group(
+    parent: WordDocumentType | _Cell,
+    blocks: list[MarkdownBlock],
+    placements: dict[str, HybridBlockPlacement],
+    *,
+    width: float,
+    size: float,
+    line_height: float,
+    asset_bytes: dict[str, bytes],
+    layout: ScanDocumentLayout,
+) -> bool:
+    """Render a full-width same-group image band without vertical stacking."""
+
+    images = _horizontal_image_row(blocks, placements)
+    if not images:
+        return False
+    image_ids = {block.id for block, _box in images}
+    image_indices = [index for index, block in enumerate(blocks) if block.id in image_ids]
+    if image_indices != list(range(min(image_indices), max(image_indices) + 1)):
+        return False
+    page_number = placements[images[0][0].id].page_number
+    page = layout.pages[page_number - 1]
+    union = PixelBox(
+        x0=min(box.x0 for _block, box in images),
+        y0=min(box.y0 for _block, box in images),
+        x1=max(box.x1 for _block, box in images),
+        y1=max(box.y1 for _block, box in images),
+    )
+    flow = [block for block in blocks if block.id not in image_ids]
+    left_fraction = (union.x0 - page.content_bbox.x0) / max(1, page.content_bbox.width)
+    if flow and left_fraction >= 0.34 and union.width <= page.content_bbox.width * 0.58:
+        return False
+    first = min(image_indices)
+    last = max(image_indices)
+    _render_linear(
+        parent,
+        blocks[:first],
+        placements,
+        width=width,
+        size=size,
+        line_height=line_height,
+        asset_bytes=asset_bytes,
+        layout=layout,
+    )
+    _add_horizontal_image_row(
+        parent,
+        images,
+        frame=page.content_bbox,
+        width=width,
+        size=size,
+        line_height=line_height,
+        asset_bytes=asset_bytes,
+        layout=layout,
+        page_number=page_number,
+    )
+    _render_linear(
+        parent,
+        blocks[last + 1 :],
+        placements,
+        width=width,
+        size=size,
+        line_height=line_height,
+        asset_bytes=asset_bytes,
+        layout=layout,
+    )
+    return True
+
+
 def _render_image_table_pair(
     parent: WordDocumentType | _Cell,
     blocks: list[MarkdownBlock],
@@ -1181,7 +1386,7 @@ def _render_image_table_pair(
         line_height=line_height,
     )
     image_width = image_box.width / page.width * page.pdf_width / 72.0
-    data = asset_bytes.get(image.id) or _crop_bytes(layout, page.number, image_box)
+    data = _source_figure_bytes(asset_bytes, image.id, layout, page.number, image_box)
     _add_picture(pair.cell(0, 0), data, width_inches=min(width * left_fraction, image_width))
     _add_native_table(
         pair.cell(0, 1),
@@ -1268,27 +1473,31 @@ def _render_side_visual_group(
     )
     right = pair.cell(0, 1)
     if visuals:
-        adjacent = len(visuals) == 2 and all(
-            _overlap_ratio(boxes[0], box) >= 0.55 for box in boxes[1:]
-        )
-        if adjacent:
-            expanded = PixelBox(
-                x0=max(page.content_bbox.x0, union.x0),
-                y0=max(page.content_bbox.y0, union.y0 - round(page.line_pitch * 0.12)),
-                x1=min(page.content_bbox.x1, union.x1 + round(page.line_pitch * 0.80)),
-                y1=min(page.content_bbox.y1, union.y1 + round(page.line_pitch * 1.05)),
-            )
-            _add_picture(
+        horizontal = _horizontal_image_row(visuals, placements)
+        if horizontal:
+            _add_horizontal_image_row(
                 right,
-                _crop_bytes(layout, page_number, expanded),
-                width_inches=width * (1 - left_fraction),
+                horizontal,
+                frame=union,
+                width=width * (1 - left_fraction),
+                size=size,
+                line_height=line_height,
+                asset_bytes=asset_bytes,
+                layout=layout,
+                page_number=page_number,
             )
         else:
             for block in visuals:
                 placement = placements[block.id]
                 box = placement.source_bbox
                 if box:
-                    data = asset_bytes.get(block.id) or _crop_bytes(layout, page_number, box)
+                    data = _source_figure_bytes(
+                        asset_bytes,
+                        block.id,
+                        layout,
+                        page_number,
+                        box,
+                    )
                     if 0.04 <= _top_boundary_ink_rate(data) <= 0.75:
                         expanded = PixelBox(
                             x0=box.x0,
@@ -1511,6 +1720,17 @@ def _render_group(
     asset_bytes: dict[str, bytes],
     layout: ScanDocumentLayout,
 ) -> None:
+    if _render_horizontal_visual_group(
+        parent,
+        blocks,
+        placements,
+        width=width,
+        size=size,
+        line_height=line_height,
+        asset_bytes=asset_bytes,
+        layout=layout,
+    ):
+        return
     if _render_image_table_pair(
         parent,
         blocks,
@@ -2628,7 +2848,56 @@ def _partition_source_footer(
         ):
             break
         split -= 1
-    return blocks[:split], blocks[split:]
+    footer_ids = {block.id for block in blocks[split:]}
+
+    # Saved OCR can omit or weaken the bbox for page furniture, especially
+    # when a repeated top banner follows it in Markdown reading order.  A
+    # short multilingual label containing the current n/m page fraction is a
+    # safe fallback near the tail; ordinary answer fractions are excluded by
+    # kind, current-page validation, and the compact label envelope.
+    fraction_pattern = re.compile(r"(?<!\d)(\d{1,4})\s*/\s*(\d{1,4})(?!\d)")
+    search_start = max(0, len(blocks) - 3)
+    for index in range(len(blocks) - 1, search_start - 1, -1):
+        block = blocks[index]
+        if (
+            block.kind not in {MarkdownBlockKind.PARAGRAPH, MarkdownBlockKind.HEADING}
+            or len(block.text) > 80
+            or "$" in block.text
+        ):
+            continue
+        match = fraction_pattern.search(block.text)
+        if match is None:
+            continue
+        current, total = (int(value) for value in match.groups())
+        if current != page.number or not 1 <= current <= total:
+            continue
+        prefix = block.text[: match.start()].strip(" \t:：—–-()[]")
+        suffix = block.text[match.end() :].strip(" \t:：—–-()[]")
+        compact_label = bool(prefix) and len(prefix) <= 32 and len(prefix.split()) <= 4
+        placement = placements.get(block.id)
+        box = placement.source_bbox if placement is not None else None
+        low_on_page = box is not None and box.y0 >= (
+            page.content_bbox.y0 + page.content_bbox.height * 0.88
+        )
+        if not low_on_page and (
+            not compact_label or len(suffix) > 24 or re.search(r"[?;=]", prefix + suffix)
+        ):
+            continue
+        footer_ids.add(block.id)
+        if index > 0:
+            preceding = blocks[index - 1]
+            if (
+                preceding.kind in {MarkdownBlockKind.PARAGRAPH, MarkdownBlockKind.HEADING}
+                and len(preceding.text) <= 160
+                and re.search(r"(?:https?://|www\.)", preceding.text, flags=re.IGNORECASE)
+            ):
+                footer_ids.add(preceding.id)
+        break
+
+    return (
+        [block for block in blocks if block.id not in footer_ids],
+        [block for block in blocks if block.id in footer_ids],
+    )
 
 
 def _render_source_footer(
@@ -2640,13 +2909,13 @@ def _render_source_footer(
     size: float,
     line_height: float,
 ) -> None:
-    if not blocks:
-        return
     footer = section.footer
     footer.is_linked_to_previous = False
     paragraph = footer.paragraphs[0]
     for run in list(paragraph.runs):
         paragraph._p.remove(run._r)
+    if not blocks:
+        return
     rendered_size = max(8.0, size * 0.82)
     _format_paragraph(
         paragraph,
@@ -2847,12 +3116,23 @@ def render_hybrid_docx(
         body_placements = [
             placement for placement in page_plan.placements if placement.block_id in body_ids
         ]
+        budget_options: dict[str, Any] = {}
+        if any(
+            placement.source_bbox is None or placement.source_gap_before is None
+            for placement in body_placements
+        ):
+            budget_options["blocks"] = blocks
+        if source_page.text_lines:
+            budget_options.update({"blocks": blocks, "line_height_points": line_height})
         vertical_budget = build_page_vertical_fit_budget(
             source_page,
             body_placements,
             printable_height_points=(page_plan.pdf_height - page_top_margin - page_bottom_margin),
             font_size_points=body_size,
+            **budget_options,
         )
+        page_body_size = body_size * vertical_budget.font_size_scale
+        page_line_height = line_height * vertical_budget.line_height_scale
         fitted_placements = apply_page_vertical_fit_budget(
             source_page,
             body_placements,
@@ -2867,8 +3147,8 @@ def render_hybrid_docx(
             footer_blocks,
             placement_by_id,
             source_page,
-            size=body_size,
-            line_height=line_height,
+            size=page_body_size,
+            line_height=page_line_height,
         )
         masthead_rendered, blocks = _render_split_masthead(
             document,
@@ -2876,11 +3156,11 @@ def render_hybrid_docx(
             body_placement_by_id,
             source_page,
             width=available_width,
-            size=body_size,
-            line_height=line_height,
+            size=page_body_size,
+            line_height=page_line_height,
         )
         if masthead_rendered:
-            _add_vertical_spacer(document, line_height * 0.05)
+            _add_vertical_spacer(document, page_line_height * 0.05)
         rendered_columns = False
         column_count = source_page.metadata.get("column_count")
         if column_count == 2:
@@ -2889,8 +3169,8 @@ def render_hybrid_docx(
                 blocks,
                 body_placement_by_id,
                 width=available_width,
-                size=body_size,
-                line_height=line_height,
+                size=page_body_size,
+                line_height=page_line_height,
                 asset_bytes=asset_bytes,
                 layout=layout,
                 page_number=page_index + 1,
@@ -2901,8 +3181,8 @@ def render_hybrid_docx(
                 blocks,
                 body_placement_by_id,
                 width=available_width,
-                size=body_size,
-                line_height=line_height,
+                size=page_body_size,
+                line_height=page_line_height,
                 asset_bytes=asset_bytes,
                 layout=layout,
                 page_number=page_index + 1,
@@ -2923,8 +3203,8 @@ def render_hybrid_docx(
                     blocks[cursor:end],
                     body_placement_by_id,
                     width=available_width,
-                    size=body_size,
-                    line_height=line_height,
+                    size=page_body_size,
+                    line_height=page_line_height,
                     asset_bytes=asset_bytes,
                     layout=layout,
                 )

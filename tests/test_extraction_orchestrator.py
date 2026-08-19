@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -161,6 +163,91 @@ class _NoGeometryCloudProvider(_SuccessfulCloudProvider):
         return super().parse(source, context=context)
 
 
+class _ConcurrencyState:
+    lock = threading.Lock()
+    concurrent = threading.Event()
+    active = 0
+    maximum_active = 0
+    completion_order: list[str] = []
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.concurrent = threading.Event()
+        cls.active = 0
+        cls.maximum_active = 0
+        cls.completion_order = []
+
+
+class _ConcurrentCloudProvider(_SuccessfulCloudProvider):
+    delay_seconds = 0.0
+
+    def parse(
+        self,
+        source: ProviderInput,
+        *,
+        context: ProviderContext | None = None,
+    ) -> ProviderResult:
+        del source
+        assert context is not None
+        assert context.options["timeout_seconds"] == 1.0
+        with _ConcurrencyState.lock:
+            _ConcurrencyState.active += 1
+            _ConcurrencyState.maximum_active = max(
+                _ConcurrencyState.maximum_active,
+                _ConcurrencyState.active,
+            )
+            if _ConcurrencyState.active >= 2:
+                _ConcurrencyState.concurrent.set()
+        try:
+            assert _ConcurrencyState.concurrent.wait(timeout=0.5)
+            time.sleep(self.delay_seconds)
+            with _ConcurrencyState.lock:
+                _ConcurrencyState.completion_order.append(self.name)
+            return ProviderResult(provider=self.name, document=self.normalize({}))
+        finally:
+            with _ConcurrencyState.lock:
+                _ConcurrencyState.active -= 1
+
+
+class _ConcurrentFirstCloudProvider(_ConcurrentCloudProvider):
+    name = "concurrent_first_cloud"
+    _capabilities = _capabilities(name)
+    delay_seconds = 0.08
+
+
+class _ConcurrentSecondCloudProvider(_ConcurrentCloudProvider):
+    name = "concurrent_second_cloud"
+    _capabilities = _capabilities(name)
+    delay_seconds = 0.01
+
+
+class _ConcurrentThirdCloudProvider(_ConcurrentCloudProvider):
+    name = "concurrent_third_cloud"
+    _capabilities = _capabilities(name)
+    delay_seconds = 0.005
+
+
+class _TimedOutCloudProvider(_SuccessfulCloudProvider):
+    name = "timed_out_cloud"
+    _capabilities = _capabilities(name)
+    finished = threading.Event()
+
+    def parse(
+        self,
+        source: ProviderInput,
+        *,
+        context: ProviderContext | None = None,
+    ) -> ProviderResult:
+        del source
+        assert context is not None
+        leaked = context.options.get("api_key")
+        try:
+            time.sleep(0.15)
+            raise RuntimeError(f"late provider failure api_key={leaked}")
+        finally:
+            type(self).finished.set()
+
+
 def _registry() -> ProviderRegistry:
     registry = ProviderRegistry()
     registry.register(_FailingCloudProvider)
@@ -311,6 +398,121 @@ def test_ensemble_persists_one_canonical_evidence_file_per_success(
         "counting_cloud-document",
     ]
     assert all(attempt.evidence_sha256 for attempt in result.manifest.attempts)
+
+
+def test_ensemble_runs_with_bounded_concurrency_and_preserves_provider_order(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    source.write_bytes(b"source")
+    registry = ProviderRegistry()
+    registry.register(_ConcurrentFirstCloudProvider)
+    registry.register(_ConcurrentSecondCloudProvider)
+    registry.register(_ConcurrentThirdCloudProvider)
+    _ConcurrencyState.reset()
+
+    result = extract_to_markdown(
+        source,
+        mode="cloud",
+        providers=[
+            "concurrent_first_cloud",
+            "concurrent_second_cloud",
+            "concurrent_third_cloud",
+        ],
+        allow_cloud=True,
+        ensemble=True,
+        maximum_providers=3,
+        maximum_concurrency=2,
+        provider_timeout_seconds=1.0,
+        registry=registry,
+    )
+
+    assert _ConcurrencyState.maximum_active == 2
+    assert _ConcurrencyState.completion_order == [
+        "concurrent_second_cloud",
+        "concurrent_third_cloud",
+        "concurrent_first_cloud",
+    ]
+    assert result.manifest.maximum_concurrency == 2
+    assert result.manifest.provider_timeout_seconds == 1.0
+    assert result.manifest.successful_providers == [
+        "concurrent_first_cloud",
+        "concurrent_second_cloud",
+        "concurrent_third_cloud",
+    ]
+    assert [document.id for document in result.documents] == [
+        "concurrent_first_cloud-document",
+        "concurrent_second_cloud-document",
+        "concurrent_third_cloud-document",
+    ]
+    assert [attempt.status for attempt in result.manifest.attempts] == [
+        "succeeded",
+        "succeeded",
+        "succeeded",
+    ]
+
+
+def test_timed_out_provider_is_isolated_and_fallback_error_redacts_secrets(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    source.write_bytes(b"source")
+    registry = ProviderRegistry()
+    registry.register(_TimedOutCloudProvider)
+    registry.register(_SuccessfulCloudProvider)
+    _TimedOutCloudProvider.finished = threading.Event()
+
+    result = extract_to_markdown(
+        source,
+        mode="cloud",
+        providers=["timed_out_cloud", "successful_cloud"],
+        allow_cloud=True,
+        maximum_providers=2,
+        maximum_concurrency=2,
+        provider_timeout_seconds=0.03,
+        provider_options={"timed_out_cloud": {"api_key": "late-secret"}},
+        registry=registry,
+    )
+
+    assert result.manifest.selected_providers == ["timed_out_cloud", "successful_cloud"]
+    assert result.manifest.successful_providers == ["successful_cloud"]
+    assert [attempt.status for attempt in result.manifest.attempts] == [
+        "timed_out",
+        "succeeded",
+    ]
+    assert "late-secret" not in result.manifest.model_dump_json()
+    assert "api_key" not in result.manifest.model_dump_json()
+    assert result.output.read_text(encoding="utf-8") == "Cloud Markdown\n"
+    assert _TimedOutCloudProvider.finished.wait(timeout=1.0)
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("maximum_concurrency", 0, "maximum_concurrency"),
+        ("maximum_concurrency", 9, "maximum_concurrency"),
+        ("provider_timeout_seconds", 0.0, "provider_timeout_seconds"),
+        ("provider_timeout_seconds", float("inf"), "provider_timeout_seconds"),
+    ],
+)
+def test_provider_execution_bounds_are_validated(
+    tmp_path: Path,
+    option: str,
+    value: float,
+    message: str,
+) -> None:
+    source = tmp_path / "page.png"
+    source.write_bytes(b"source")
+
+    with pytest.raises(ValueError, match=message):
+        extract_to_markdown(
+            source,
+            mode="cloud",
+            providers=["successful_cloud"],
+            allow_cloud=True,
+            registry=_registry(),
+            **{option: value},
+        )
 
 
 def test_canonical_cache_hit_uses_no_provider_and_ignores_secret_rotation(

@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ReconstructionMode(StrEnum):
@@ -34,6 +34,13 @@ class OutputFormat(StrEnum):
     HTML = "html"
     DOCX = "docx"
     MARKDOWN = "markdown"
+
+
+class HybridQuality(StrEnum):
+    """How much synchronous verification a hybrid upload requests."""
+
+    FAST = "fast"
+    VERIFIED = "verified"
 
 
 class AnalyzeOptions(BaseModel):
@@ -149,6 +156,50 @@ class CompareOptions(BaseModel):
 
     profile: ReconstructionMode = ReconstructionMode.BALANCED
     output_format: OutputFormat | None = None
+
+
+class HybridOptions(BaseModel):
+    """Safe options for Markdown + layout + optional JSON reconstruction."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_provider: str | None = Field(default=None, max_length=80)
+    strict_evidence: bool = True
+    remote_assets: bool = False
+    quality: HybridQuality = HybridQuality.FAST
+    minimum_visual_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    output_filename: str | None = Field(default=None, max_length=240)
+    use_paddleocr_vl: bool = False
+
+    @field_validator("evidence_provider")
+    @classmethod
+    def normalize_evidence_provider(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(character in normalized for character in ("/", "\\", "=", ":")):
+            raise ValueError("evidence_provider must be a registered provider name")
+        return normalized
+
+    @field_validator("output_filename")
+    @classmethod
+    def hybrid_filename_only(cls, filename: str | None) -> str | None:
+        if filename is None:
+            return None
+        filename = filename.strip()
+        if not filename:
+            return None
+        if filename in {".", ".."} or "/" in filename or "\\" in filename:
+            raise ValueError("output_filename must be a plain filename")
+        return filename if filename.casefold().endswith(".docx") else f"{filename}.docx"
+
+    @model_validator(mode="after")
+    def validate_quality_options(self) -> HybridOptions:
+        if self.quality is HybridQuality.FAST and self.minimum_visual_score is not None:
+            raise ValueError("minimum_visual_score requires quality='verified'")
+        return self
 
 
 class HealthResponse(BaseModel):

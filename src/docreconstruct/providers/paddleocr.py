@@ -103,11 +103,7 @@ class PaddleOCRProvider(SavedJSONProvider):
             while number in used_numbers:
                 number += 1
             used_numbers.add(number)
-            data = (
-                page_payload.get("res", page_payload)
-                if isinstance(page_payload, Mapping)
-                else page_payload
-            )
+            data = _paddle_page_data(page_payload)
             dimension_payload: Any = page_payload
             if isinstance(page_payload, Mapping) and isinstance(data, Mapping):
                 dimension_payload = {**page_payload, **data}
@@ -144,11 +140,7 @@ class PaddleOCRProvider(SavedJSONProvider):
 
     def _elements(self, page_payload: Any, page_index: int) -> list[Element]:
         elements: list[Element] = []
-        data = (
-            page_payload.get("res", page_payload)
-            if isinstance(page_payload, Mapping)
-            else page_payload
-        )
+        data = _paddle_page_data(page_payload)
 
         if isinstance(data, Mapping):
             texts = data.get("rec_texts")
@@ -287,9 +279,10 @@ class PaddleOCRProvider(SavedJSONProvider):
         bbox = coerce_bbox(box_value)
         if bbox is None:
             return None
+        element_metadata = dict(metadata or {})
         element_id = f"page-{page_index + 1}-element-{element_index + 1}"
         score_value = confidence(score)
-        style_data = (metadata or {}).pop("style", None)
+        style_data = element_metadata.pop("style", None)
         style = ElementStyle()
         if isinstance(style_data, Mapping):
             allowed = set(ElementStyle.model_fields)
@@ -301,10 +294,16 @@ class PaddleOCRProvider(SavedJSONProvider):
                 }
             )
         clean_text = text if isinstance(text, str) and text != "" else None
-        reading_order = _reading_order((metadata or {}).get("block_order"), element_index)
+        kind = element_type(label)
+        if kind in {ElementType.IMAGE, ElementType.FIGURE, ElementType.CHART}:
+            element_metadata.setdefault(
+                "reading_order_reliable",
+                "block_order" in element_metadata,
+            )
+        reading_order = _reading_order(element_metadata.get("block_order"), element_index)
         return Element(
             id=element_id,
-            type=element_type(label),
+            type=kind,
             bbox=bbox,
             polygon=coerce_polygon(box_value),
             text=clean_text,
@@ -329,7 +328,7 @@ class PaddleOCRProvider(SavedJSONProvider):
                 if clean_text is not None
                 else []
             ),
-            metadata=metadata or {},
+            metadata=element_metadata,
         )
 
 
@@ -353,6 +352,12 @@ def _paddle_pages(payload: Any) -> list[Any]:
     payload = list(payload)
     if not payload:
         return []
+    if all(is_paddle_vl_page_wrapper(item) for item in payload):
+        # PaddleOCR-VL's web export is a bare ordered list of page envelopes.
+        # The envelopes intentionally omit page_index at their outer level;
+        # list order is the only page boundary.  Treating the list as legacy
+        # PP-Structure regions collapses every page into one canonical page.
+        return payload
     if _looks_like_legacy_entry(payload[0]):
         return [payload]
     if all(isinstance(item, Mapping) for item in payload):
@@ -363,6 +368,48 @@ def _paddle_pages(payload: Any) -> list[Any]:
     if all(isinstance(item, Sequence) for item in payload):
         return payload
     return [payload]
+
+
+def _paddle_page_data(page_payload: Any) -> Any:
+    """Return the provider result nested inside one saved page envelope."""
+
+    if not isinstance(page_payload, Mapping):
+        return page_payload
+    if "res" in page_payload:
+        return page_payload["res"]
+    for key in ("prunedResult", "pruned_result"):
+        nested = page_payload.get(key)
+        if isinstance(nested, Mapping):
+            return nested
+    return page_payload
+
+
+def is_paddle_vl_page_wrapper(value: Any) -> bool:
+    """Recognize one per-page envelope emitted by PaddleOCR-VL web exports."""
+
+    if not isinstance(value, Mapping):
+        return False
+    result = value.get("prunedResult")
+    if not isinstance(result, Mapping):
+        result = value.get("pruned_result")
+    if not isinstance(result, Mapping):
+        return False
+    result_markers = {
+        "parsing_res_list",
+        "layout_det_res",
+        "overall_ocr_res",
+        "table_res_list",
+        "formula_res_list",
+        "doc_preprocessor_res",
+    }
+    envelope_markers = {
+        "markdown",
+        "outputImages",
+        "output_images",
+        "inputImage",
+        "input_image",
+    }
+    return bool(result_markers.intersection(result)) and bool(envelope_markers.intersection(value))
 
 
 def _has_page_marker(value: Mapping[str, Any]) -> bool:

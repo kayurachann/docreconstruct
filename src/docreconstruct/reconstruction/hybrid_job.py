@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,6 +19,7 @@ from docreconstruct.evidence import ProviderHints
 from docreconstruct.extraction import ExtractionMode, ExtractionResult, extract_to_markdown
 from docreconstruct.reconstruction.hybrid import (
     HybridReconstructionResult,
+    prepare_hybrid_sources,
     reconstruct_hybrid,
 )
 
@@ -70,6 +72,7 @@ class HybridJobResult:
     generated_markdown: Path | None = None
     extraction_report: Path | None = None
     qa_report: Path | None = None
+    phase_seconds: Mapping[str, float] = field(default_factory=dict)
 
 
 def _sha256(path: Path) -> str:
@@ -183,10 +186,14 @@ def run_hybrid_job(
     provenance. LibreOffice is reached only through ``render_backend``.
     """
 
+    job_started = perf_counter()
+    phase_seconds: dict[str, float] = {}
     content_path = Path(content).expanduser().resolve()
     layout_path = Path(layout).expanduser().resolve()
+    phase_started = perf_counter()
     content_before = _sha256(content_path)
     layout_before = _sha256(layout_path)
+    phase_seconds["authority.hash"] = perf_counter() - phase_started
     user_evidence = _paths(evidence)
     combined_evidence = list(user_evidence)
     hints = _hint_mapping(user_evidence, evidence_provider_hints)
@@ -195,6 +202,7 @@ def run_hybrid_job(
     extraction_report: Path | None = None
 
     if online_ocr is not None:
+        phase_started = perf_counter()
         artifacts = online_ocr.artifacts_directory.expanduser().resolve()
         evidence_directory = artifacts / "evidence"
         cache_directory = artifacts / "cache" if online_ocr.cache else None
@@ -236,8 +244,19 @@ def run_hybrid_job(
             raise RuntimeError("Markdown content authority changed during online OCR")
         if _sha256(layout_path) != layout_before:
             raise RuntimeError("layout authority changed during online OCR")
+        phase_seconds["ocr.online"] = perf_counter() - phase_started
+    else:
+        phase_seconds["ocr.online"] = 0.0
 
     hint_argument: Mapping[str | Path, str] | None = hints or None
+    prepared = prepare_hybrid_sources(
+        content_path,
+        layout_path,
+        evidence=tuple(combined_evidence),
+        evidence_provider_hints=hint_argument,
+        strict_evidence=strict_evidence,
+        _phase_seconds=phase_seconds,
+    )
     reconstruction = reconstruct_hybrid(
         content_path,
         layout_path,
@@ -246,6 +265,8 @@ def run_hybrid_job(
         strict_evidence=strict_evidence,
         output=output,
         allow_remote_assets=allow_remote_assets,
+        _prepared_sources=prepared,
+        _phase_seconds=phase_seconds,
     )
     if reconstruction.manifest.content.sha256 != content_before:
         raise RuntimeError("Markdown content authority changed during reconstruction")
@@ -262,6 +283,8 @@ def run_hybrid_job(
         renderer_path=renderer_path,
         minimum_visual_score=minimum_visual_score,
         render_output_dir=render_output_dir,
+        _prepared_sources=prepared,
+        _phase_seconds=phase_seconds,
     )
     qa_path = None
     if qa_report is not None:
@@ -269,6 +292,7 @@ def run_hybrid_job(
             Path(qa_report).expanduser().resolve(),
             validation.model_dump_json(indent=2),
         )
+    phase_seconds["job.total"] = perf_counter() - job_started
     return HybridJobResult(
         reconstruction=reconstruction,
         validation=validation,
@@ -277,6 +301,7 @@ def run_hybrid_job(
         generated_markdown=generated_markdown,
         extraction_report=extraction_report,
         qa_report=qa_path,
+        phase_seconds=dict(phase_seconds),
     )
 
 

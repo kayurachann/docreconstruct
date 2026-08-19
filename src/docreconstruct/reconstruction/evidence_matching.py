@@ -15,6 +15,7 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any, Literal, Protocol, TypeAlias
 from urllib.parse import unquote, urlsplit
@@ -59,6 +60,7 @@ EvidenceDocuments: TypeAlias = _SidecarEvidenceBundleLike | Document | Sequence[
 
 _MAX_SPAN = 8
 _MAX_CANDIDATES_PER_BLOCK = 256
+_TEXT_CACHE_SIZE = 65_536
 _GEOMETRY_AGREEMENT = 0.42
 _VISUAL_TYPES = frozenset({ElementType.IMAGE, ElementType.FIGURE, ElementType.CHART})
 _IGNORED_COORDINATE_SYSTEMS = {
@@ -164,6 +166,7 @@ class _Unit:
     provider: str
     source_key: str
     visual_keys: tuple[str, ...]
+    reading_order_reliable: bool
     warnings: tuple[str, ...]
 
 
@@ -220,7 +223,14 @@ def match_sidecar_evidence(
     for source in sources:
         units = _evidence_units(source, scan_pages)
         if units:
-            contributions.extend(_align_source(content.blocks, units))
+            aligned = _align_source(content.blocks, units)
+            contributions.extend(aligned)
+            contributions.extend(
+                _shared_consecutive_text_candidates(content.blocks, units, aligned)
+            )
+            contributions.extend(
+                _unreliable_exact_visual_candidates(content.blocks, units, aligned)
+            )
 
     by_block: dict[str, list[_Candidate]] = defaultdict(list)
     for contribution in contributions:
@@ -338,6 +348,7 @@ def _evidence_units(
                     provider=provider,
                     source_key=source.key,
                     visual_keys=(_element_visual_keys(element) if is_visual else ()),
+                    reading_order_reliable=_element_reading_order_reliable(element),
                     warnings=tuple(_unique(warnings)),
                 )
             )
@@ -538,6 +549,11 @@ _VISUAL_REFERENCE_FIELDS = {
 }
 _VISUAL_TEXT_FIELDS = {"alt", "alt_text", "caption", "description", "title"}
 _GENERIC_VISUAL_STEMS = {"asset", "chart", "figure", "image", "img", "photo", "picture"}
+_HTML_VISUAL_REFERENCE_PATTERN = re.compile(
+    r"<(?:img|source)\b[^>]*?\b(?:src|data-src)\b\s*=\s*"
+    r"(?:\"(?P<double>[^\"]+)\"|'(?P<single>[^']+)'|(?P<bare>[^\s>]+))",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def _element_visual_keys(element: Element) -> tuple[str, ...]:
@@ -605,7 +621,12 @@ def _visual_reference_keys(value: str) -> list[str]:
 
 def _visual_text_keys(value: str) -> list[str]:
     normalized = _normalize_text(value)
-    return [f"text:{normalized}"] if normalized else []
+    keys = [f"text:{normalized}"] if normalized else []
+    for match in _HTML_VISUAL_REFERENCE_PATTERN.finditer(value):
+        reference = match.group("double") or match.group("single") or match.group("bare")
+        if reference:
+            keys.extend(_visual_reference_keys(reference))
+    return _unique(keys)
 
 
 def _metadata_rows(metadata: Mapping[str, Any]) -> list[list[str]]:
@@ -633,6 +654,11 @@ def _element_confidence(element: Element) -> float | None:
     return None
 
 
+def _element_reading_order_reliable(element: Element) -> bool:
+    value = element.metadata.get("reading_order_reliable")
+    return value if isinstance(value, bool) else True
+
+
 def _nonempty_style(style: ElementStyle) -> ElementStyle | None:
     return style if style.model_dump(exclude_none=True) else None
 
@@ -643,6 +669,7 @@ def _block_text(block: MarkdownBlock) -> str:
     return block.text
 
 
+@lru_cache(maxsize=32_768)
 def _normalize_text(value: str, *, formula: bool = False) -> str:
     value = html.unescape(unicodedata.normalize("NFKC", value)).strip()
     if formula:
@@ -670,7 +697,12 @@ def _inline_latex_text(value: str) -> str:
         return value
 
 
-def _text_similarity(left: str, right: str) -> float:
+def _canonical_text_pair(left: str, right: str) -> tuple[str, str]:
+    return (left, right) if left <= right else (right, left)
+
+
+@lru_cache(maxsize=_TEXT_CACHE_SIZE)
+def _cached_text_similarity(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
     if left == right:
@@ -690,10 +722,80 @@ def _text_similarity(left: str, right: str) -> float:
     return min(1.0, max(sequence, 0.68 * sequence + 0.32 * token_f1, containment))
 
 
+def _text_similarity(left: str, right: str) -> float:
+    """Return exact symmetric similarity with bounded cross-call memoization."""
+
+    return _cached_text_similarity(*_canonical_text_pair(left, right))
+
+
+@lru_cache(maxsize=_TEXT_CACHE_SIZE)
+def _cached_text_similarity_at_least(
+    left: str,
+    right: str,
+    minimum: float,
+) -> float | None:
+    """Return exact similarity only when it can reach ``minimum``.
+
+    The number of characters in matching blocks cannot exceed the multiset
+    character overlap.  That gives a strict upper bound for SequenceMatcher's
+    ratio; combining it with the exact token and containment components lets
+    obviously impossible spans avoid the expensive quadratic comparison
+    without changing any accepted candidate or its score.
+    """
+
+    if not left or not right:
+        return None
+    if left == right:
+        return 1.0 if minimum <= 1.0 else None
+
+    left_characters = Counter(left)
+    right_characters = Counter(right)
+    character_overlap = sum((left_characters & right_characters).values())
+    sequence_upper_bound = 2.0 * character_overlap / (len(left) + len(right))
+
+    left_tokens = Counter(left.split())
+    right_tokens = Counter(right.split())
+    token_overlap = sum((left_tokens & right_tokens).values())
+    token_f1 = (
+        2.0 * token_overlap / (sum(left_tokens.values()) + sum(right_tokens.values()))
+        if token_overlap
+        else 0.0
+    )
+    containment = (
+        min(len(left), len(right)) / max(len(left), len(right))
+        if (left in right or right in left)
+        else 0.0
+    )
+    upper_bound = min(
+        1.0,
+        max(
+            sequence_upper_bound,
+            0.68 * sequence_upper_bound + 0.32 * token_f1,
+            containment,
+        ),
+    )
+    if upper_bound < minimum - 1e-12:
+        return None
+    similarity = _cached_text_similarity(left, right)
+    return similarity if similarity >= minimum else None
+
+
+def _text_similarity_at_least(
+    left: str,
+    right: str,
+    minimum: float,
+) -> float | None:
+    return _cached_text_similarity_at_least(
+        *_canonical_text_pair(left, right),
+        minimum,
+    )
+
+
 def _align_source(blocks: Sequence[MarkdownBlock], units: Sequence[_Unit]) -> list[_Candidate]:
     states: dict[int, _State] = {0: _State(total_score=0.0, match_count=0, node=None)}
+    text_candidate_cache: dict[int, list[_Candidate]] = {}
     for block in blocks:
-        candidates = _block_candidates(block, blocks, units)
+        candidates = _block_candidates(block, blocks, units, text_candidate_cache)
         if not candidates:
             continue
         state_ends, prefix_states = _prefix_states(states)
@@ -722,14 +824,262 @@ def _align_source(blocks: Sequence[MarkdownBlock], units: Sequence[_Unit]) -> li
     return result
 
 
+def _shared_consecutive_text_candidates(
+    blocks: Sequence[MarkdownBlock],
+    units: Sequence[_Unit],
+    aligned: Sequence[_Candidate],
+) -> list[_Candidate]:
+    """Recover leading Markdown text fused into one provider text unit.
+
+    Layout OCR commonly emits a heading stack or a complete question plus its
+    A--D choices as one rectangle, while Markdown deliberately exposes those
+    parts as consecutive editable blocks.  A provider rectangle may anchor
+    the unmatched *leading text owners* only when the normalized concatenation
+    of the whole Markdown span accounts for that provider unit almost exactly.
+    Option children deliberately remain unmatched here: the hybrid planner can
+    split their distinct scan rows/columns without pretending that every
+    choice owns the same coarse provider rectangle.
+
+    Repeated text and locations that contradict already aligned surrounding
+    blocks are rejected.  The matcher contributes geometry only; Markdown
+    remains the content authority and no text is split or rewritten.
+    """
+
+    if len(blocks) < 2:
+        return []
+    aligned_by_block = {candidate.block.id: candidate for candidate in aligned}
+    ordered_aligned = sorted(aligned, key=lambda candidate: candidate.block.index)
+    normalized_blocks = [
+        _normalize_text(
+            _block_text(block),
+            formula=block.kind is MarkdownBlockKind.EQUATION,
+        )
+        for block in blocks
+    ]
+    eligible_units = [unit for unit in units if unit.element_type not in _VISUAL_TYPES]
+    proposals: list[tuple[int, int, _Unit, float, tuple[MarkdownBlock, ...]]] = []
+
+    for start in range(len(blocks) - 1):
+        fragments: list[str] = []
+        for end in range(start + 1, min(len(blocks), start + _MAX_SPAN) + 1):
+            block = blocks[end - 1]
+            if (
+                block.kind
+                in {
+                    MarkdownBlockKind.IMAGE,
+                    MarkdownBlockKind.TABLE,
+                    MarkdownBlockKind.RULE,
+                }
+                or not normalized_blocks[end - 1]
+                or block.index != blocks[start].index + (end - start - 1)
+            ):
+                break
+            fragments.append(normalized_blocks[end - 1])
+            if end - start < 2:
+                continue
+
+            recoverable: list[MarkdownBlock] = []
+            for member in blocks[start:end]:
+                if member.kind is MarkdownBlockKind.OPTION:
+                    break
+                if member.id not in aligned_by_block:
+                    recoverable.append(member)
+            if not recoverable:
+                continue
+
+            combined_text = " ".join(fragments)
+            previous = next(
+                (
+                    candidate
+                    for candidate in reversed(ordered_aligned)
+                    if candidate.block.index < blocks[start].index
+                ),
+                None,
+            )
+            following = next(
+                (
+                    candidate
+                    for candidate in ordered_aligned
+                    if candidate.block.index > blocks[end - 1].index
+                ),
+                None,
+            )
+            for unit in eligible_units:
+                if not _inside_anchor_window(unit, previous, following):
+                    continue
+                source_text = unit.normalized_text
+                length_agreement = min(len(combined_text), len(source_text)) / max(
+                    1,
+                    max(len(combined_text), len(source_text)),
+                )
+                if length_agreement < 0.985:
+                    continue
+                similarity = _text_similarity_at_least(
+                    combined_text,
+                    source_text,
+                    0.985,
+                )
+                if similarity is None:
+                    continue
+                proposals.append((start, end, unit, similarity, tuple(recoverable)))
+
+    # One provider unit cannot prove two different Markdown spans, and one
+    # Markdown block cannot choose between repeated provider units.  Reject
+    # both ambiguity shapes instead of resolving them by list position.
+    spans_by_unit: dict[tuple[str, int], set[tuple[int, int]]] = defaultdict(set)
+    proposals_by_block: dict[
+        str,
+        list[tuple[int, int, _Unit, float, tuple[MarkdownBlock, ...]]],
+    ] = defaultdict(list)
+    for proposal in proposals:
+        start, end, unit, _similarity, recovered_blocks = proposal
+        spans_by_unit[(unit.source_key, unit.position)].add((start, end))
+        for block in recovered_blocks:
+            proposals_by_block[block.id].append(proposal)
+
+    result: list[_Candidate] = []
+    for block in blocks:
+        block_proposals = [
+            proposal
+            for proposal in proposals_by_block.get(block.id, ())
+            if len(spans_by_unit[(proposal[2].source_key, proposal[2].position)]) == 1
+        ]
+        identities = {
+            (proposal[0], proposal[1], proposal[2].source_key, proposal[2].position)
+            for proposal in block_proposals
+        }
+        if len(identities) != 1:
+            continue
+        start, end, unit, similarity, _recoverable = max(
+            block_proposals,
+            key=lambda proposal: (
+                proposal[3],
+                -(proposal[1] - proposal[0]),
+                -proposal[2].position,
+            ),
+        )
+        type_score = _type_score(block.kind, [unit.element_type])
+        confidence_factor = unit.confidence if unit.confidence is not None else 0.5
+        match_score = min(
+            1.0,
+            0.82 * similarity + 0.13 * type_score + 0.05 * confidence_factor,
+        )
+        result.append(
+            _Candidate(
+                block=block,
+                start=unit.position,
+                end=unit.position + 1,
+                page_number=unit.page_number,
+                bbox=unit.bbox,
+                source_rows=(unit.bbox,),
+                text_score=similarity,
+                type_score=type_score,
+                match_score=match_score,
+                confidence=unit.confidence,
+                provider=unit.provider,
+                source_key=unit.source_key,
+                element_ids=(unit.element_id,),
+                style=unit.style,
+                warnings=tuple(
+                    _unique(
+                        [
+                            *unit.warnings,
+                            (
+                                "Markdown block shares one exact provider line with "
+                                f"consecutive authority blocks {blocks[start].id}--"
+                                f"{blocks[end - 1].id}"
+                            ),
+                        ]
+                    )
+                ),
+            )
+        )
+    return result
+
+
+def _unreliable_exact_visual_candidates(
+    blocks: Sequence[MarkdownBlock],
+    units: Sequence[_Unit],
+    aligned: Sequence[_Candidate],
+) -> list[_Candidate]:
+    """Retain exact side visuals whose provider supplied no stable order.
+
+    Some layout providers assign a fallback list index to side figures that
+    deliberately have no reading-order field.  A unique shared filename is
+    still strong identity evidence, but it must remain on the page interval
+    established by surrounding text matches.  Reliable provider order and
+    ambiguous/repeated visual identifiers continue to use the strict
+    monotonic alignment path.
+    """
+
+    aligned_ids = {candidate.block.id for candidate in aligned}
+    visual_units = [unit for unit in units if unit.element_type in _VISUAL_TYPES]
+    ordered_aligned = sorted(aligned, key=lambda candidate: candidate.block.index)
+    result: list[_Candidate] = []
+    for block in blocks:
+        if block.kind is not MarkdownBlockKind.IMAGE or block.id in aligned_ids:
+            continue
+        block_keys = set(_block_visual_keys(block))
+        identity_matches = [
+            (_visual_identity_strength(block_keys, set(unit.visual_keys)), unit)
+            for unit in visual_units
+            if not unit.reading_order_reliable
+        ]
+        identity_matches = [item for item in identity_matches if item[0] > 0]
+        if not identity_matches:
+            continue
+        best_strength = max(strength for strength, _unit in identity_matches)
+        exact = [unit for strength, unit in identity_matches if strength == best_strength]
+        if len(exact) != 1:
+            continue
+        unit = exact[0]
+        previous = next(
+            (
+                candidate
+                for candidate in reversed(ordered_aligned)
+                if candidate.block.index < block.index
+            ),
+            None,
+        )
+        following = next(
+            (candidate for candidate in ordered_aligned if candidate.block.index > block.index),
+            None,
+        )
+        if not _inside_anchor_page_window(unit, previous, following):
+            continue
+        result.append(
+            _visual_candidate(
+                block,
+                unit,
+                exact_reference=True,
+                unreliable_order_override=True,
+            )
+        )
+    return result
+
+
 def _block_candidates(
     block: MarkdownBlock,
     blocks: Sequence[MarkdownBlock],
     units: Sequence[_Unit],
+    text_candidate_cache: dict[int, list[_Candidate]],
 ) -> list[_Candidate]:
     if block.kind is MarkdownBlockKind.IMAGE:
-        return _visual_candidates(block, blocks, units)
-    return _text_block_candidates(block, units)
+        return _visual_candidates(block, blocks, units, text_candidate_cache)
+    return _cached_text_block_candidates(block, units, text_candidate_cache)
+
+
+def _cached_text_block_candidates(
+    block: MarkdownBlock,
+    units: Sequence[_Unit],
+    cache: dict[int, list[_Candidate]],
+) -> list[_Candidate]:
+    key = id(block)
+    candidates = cache.get(key)
+    if candidates is None:
+        candidates = _text_block_candidates(block, units)
+        cache[key] = candidates
+    return candidates
 
 
 def _text_block_candidates(
@@ -777,13 +1127,26 @@ def _visual_candidates(
     block: MarkdownBlock,
     blocks: Sequence[MarkdownBlock],
     units: Sequence[_Unit],
+    text_candidate_cache: dict[int, list[_Candidate]],
 ) -> list[_Candidate]:
     visual_units = [unit for unit in units if unit.element_type in _VISUAL_TYPES]
     if not visual_units:
         return []
     block_keys = set(_block_visual_keys(block))
-    previous = _nearest_text_anchor(block, blocks, units, reverse=True)
-    following = _nearest_text_anchor(block, blocks, units, reverse=False)
+    previous = _nearest_text_anchor(
+        block,
+        blocks,
+        units,
+        text_candidate_cache,
+        reverse=True,
+    )
+    following = _nearest_text_anchor(
+        block,
+        blocks,
+        units,
+        text_candidate_cache,
+        reverse=False,
+    )
     identity_matches = [
         (_visual_identity_strength(block_keys, set(unit.visual_keys)), unit)
         for unit in visual_units
@@ -854,10 +1217,21 @@ def _inside_anchor_window(
     return following is None or unit.position < following.start
 
 
+def _inside_anchor_page_window(
+    unit: _Unit,
+    previous: _Candidate | None,
+    following: _Candidate | None,
+) -> bool:
+    if previous is not None and unit.page_number < previous.page_number:
+        return False
+    return following is None or unit.page_number <= following.page_number
+
+
 def _nearest_text_anchor(
     block: MarkdownBlock,
     blocks: Sequence[MarkdownBlock],
     units: Sequence[_Unit],
+    text_candidate_cache: dict[int, list[_Candidate]],
     *,
     reverse: bool,
 ) -> _Candidate | None:
@@ -869,7 +1243,11 @@ def _nearest_text_anchor(
     ]
     neighbors.sort(key=lambda candidate: candidate.index, reverse=reverse)
     for neighbor in neighbors:
-        candidates = _text_block_candidates(neighbor, units)
+        candidates = _cached_text_block_candidates(
+            neighbor,
+            units,
+            text_candidate_cache,
+        )
         if not candidates:
             continue
         best_score = max(candidate.match_score for candidate in candidates)
@@ -897,6 +1275,7 @@ def _visual_candidate(
     unit: _Unit,
     *,
     exact_reference: bool,
+    unreliable_order_override: bool = False,
 ) -> _Candidate:
     confidence_factor = unit.confidence if unit.confidence is not None else 0.5
     match_score = (
@@ -909,6 +1288,8 @@ def _visual_candidate(
         warnings.append(
             "visual geometry matched by a unique monotonic position; no shared asset identifier"
         )
+    if unreliable_order_override:
+        warnings.append("exact visual identity overrides provider fallback order on the same page")
     return _Candidate(
         block=block,
         start=unit.position,
@@ -936,7 +1317,15 @@ def _plausible_start(target: str, unit: str, unit_count: int) -> bool:
     if target_tokens & unit_tokens:
         return True
     prefix = min(12, len(target), len(unit))
-    return prefix >= 3 and _text_similarity(target[:prefix], unit[:prefix]) >= 0.55
+    return (
+        prefix >= 3
+        and _text_similarity_at_least(
+            target[:prefix],
+            unit[:prefix],
+            0.55,
+        )
+        is not None
+    )
 
 
 def _span_candidate(
@@ -947,7 +1336,6 @@ def _span_candidate(
     units: Sequence[_Unit],
 ) -> _Candidate | None:
     candidate_text = " ".join(unit.normalized_text for unit in units)
-    text_score = _text_similarity(target, candidate_text)
     threshold = (
         0.56
         if block.kind is MarkdownBlockKind.EQUATION
@@ -957,7 +1345,8 @@ def _span_candidate(
         if len(target) <= 3
         else 0.62
     )
-    if text_score < threshold:
+    text_score = _text_similarity_at_least(target, candidate_text, threshold)
+    if text_score is None:
         return None
     type_score = _type_score(block.kind, [unit.element_type for unit in units])
     confidences = [unit.confidence for unit in units if unit.confidence is not None]

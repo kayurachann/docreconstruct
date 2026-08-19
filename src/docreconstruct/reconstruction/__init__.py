@@ -3,10 +3,12 @@
 from .evidence_matching import EvidenceDocuments, EvidenceMatch, match_sidecar_evidence
 from .hybrid import (
     HybridEvidenceSummary,
+    HybridPreparedSources,
     HybridReconstructionResult,
     HybridSourceManifest,
     SourceFingerprint,
     finalize_hybrid_reconstruction,
+    prepare_hybrid_sources,
     prepare_markdown_layout_sources,
     prepare_markdown_pdf_sources,
     reconstruct_hybrid,
@@ -25,6 +27,7 @@ __all__ = [
     "EvidenceDocuments",
     "EvidenceMatch",
     "HybridEvidenceSummary",
+    "HybridPreparedSources",
     "HybridReconstructionResult",
     "HybridSourceManifest",
     "LayoutCorrection",
@@ -37,6 +40,7 @@ __all__ = [
     "choose_output_format",
     "finalize_hybrid_reconstruction",
     "match_sidecar_evidence",
+    "prepare_hybrid_sources",
     "prepare_markdown_layout_sources",
     "prepare_markdown_pdf_sources",
     "reconstruct_hybrid",

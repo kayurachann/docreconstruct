@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import tempfile
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -57,6 +59,8 @@ class ExtractionRunManifest(CanonicalModel):
     ensemble: bool
     document_id: str
     output: str
+    maximum_concurrency: int = 1
+    provider_timeout_seconds: float = 120.0
     warnings: list[str] = Field(default_factory=list)
     cache_key: str | None = None
     cache_hit: bool = False
@@ -71,6 +75,12 @@ class ExtractionResult:
     manifest: ExtractionRunManifest
     documents: tuple[Document, ...] = ()
     evidence_outputs: tuple[Path, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderOutcome:
+    attempt: ProviderAttempt
+    document: Document | None = None
 
 
 class _CacheArtifact(CanonicalModel):
@@ -240,6 +250,248 @@ def _sanitized_metadata(
     return result
 
 
+def _provider_options_with_timeout(
+    name: str,
+    provider_options: Mapping[str, Any] | None,
+    *,
+    allow_cloud: bool,
+    provider_timeout_seconds: float,
+) -> dict[str, Any]:
+    """Return isolated adapter options with a bounded transport timeout.
+
+    The executor deadline below isolates the orchestration layer. Hosted HTTP
+    calls also need their own timeout so a discarded worker does not retain a
+    connection indefinitely. Existing shorter provider-specific limits remain
+    authoritative; invalid explicit values are left for the adapter to reject.
+    """
+
+    options = _options_for_provider(name, provider_options, allow_cloud=allow_cloud)
+    configured = options.get("timeout_seconds")
+    transport_limit = max(1.0, provider_timeout_seconds)
+    if configured is None:
+        options["timeout_seconds"] = transport_limit
+        return options
+    if isinstance(configured, bool):
+        return options
+    try:
+        configured_seconds = float(configured)
+    except (TypeError, ValueError):
+        return options
+    if math.isfinite(configured_seconds) and configured_seconds > 0:
+        options["timeout_seconds"] = min(configured_seconds, transport_limit)
+    return options
+
+
+def _attempt_provider(
+    name: str,
+    *,
+    path: Path,
+    normalized_mode: ExtractionMode,
+    languages: Sequence[str],
+    provider_options: Mapping[str, Any] | None,
+    allow_cloud: bool,
+    provider_timeout_seconds: float,
+    registry: ProviderRegistry,
+    secret_values: set[str],
+) -> _ProviderOutcome:
+    """Execute one provider without allowing its exception to escape the worker."""
+
+    try:
+        provider = registry.get(name)
+        context = ProviderContext(
+            source=str(path),
+            options=_provider_options_with_timeout(
+                name,
+                provider_options,
+                allow_cloud=allow_cloud,
+                provider_timeout_seconds=provider_timeout_seconds,
+            ),
+            metadata={
+                "extraction_mode": normalized_mode.value,
+                "languages": list(languages),
+            },
+        )
+        result = provider.parse(path, context=context)
+        return _ProviderOutcome(
+            attempt=ProviderAttempt(
+                provider=name,
+                status="succeeded",
+                pages=len(result.document.pages),
+                warnings=result.warnings,
+                metadata=_sanitized_metadata(
+                    name,
+                    result.metadata,
+                    registry=registry,
+                ),
+            ),
+            document=result.document,
+        )
+    except Exception as exc:  # every provider has an independent auditable failure
+        return _ProviderOutcome(
+            attempt=ProviderAttempt(
+                provider=name,
+                status="failed",
+                error=_redact_error(exc, secrets=secret_values),
+            )
+        )
+
+
+def _timed_out_outcome(name: str, *, timeout_seconds: float) -> _ProviderOutcome:
+    return _ProviderOutcome(
+        attempt=ProviderAttempt(
+            provider=name,
+            status="timed_out",
+            error=(f"TimeoutError: provider exceeded {timeout_seconds:g} second limit"),
+        )
+    )
+
+
+def _attempt_provider_ensemble(
+    names: Sequence[str],
+    *,
+    path: Path,
+    normalized_mode: ExtractionMode,
+    languages: Sequence[str],
+    provider_options: Mapping[str, Any] | None,
+    allow_cloud: bool,
+    provider_timeout_seconds: float,
+    maximum_concurrency: int,
+    registry: ProviderRegistry,
+    secret_values: set[str],
+) -> list[_ProviderOutcome]:
+    """Execute a bounded provider batch and return outcomes in request order.
+
+    A shared deadline bounds each ensemble member from batch submission. The
+    worker pool is deliberately not used as a context manager: waiting for an
+    uncooperative timed-out worker during ``__exit__`` would defeat failure
+    isolation. Hosted adapters receive a matching transport timeout above.
+    """
+
+    if not names:
+        return []
+    workers = min(maximum_concurrency, len(names))
+    executor = ThreadPoolExecutor(
+        max_workers=workers,
+        thread_name_prefix="docreconstruct-ocr",
+    )
+    futures: list[Future[_ProviderOutcome]] = []
+    try:
+        futures = [
+            executor.submit(
+                _attempt_provider,
+                name,
+                path=path,
+                normalized_mode=normalized_mode,
+                languages=languages,
+                provider_options=provider_options,
+                allow_cloud=allow_cloud,
+                provider_timeout_seconds=provider_timeout_seconds,
+                registry=registry,
+                secret_values=secret_values,
+            )
+            for name in names
+        ]
+        completed, _ = wait(futures, timeout=provider_timeout_seconds)
+        outcomes: list[_ProviderOutcome] = []
+        for name, future in zip(names, futures, strict=True):
+            if future not in completed:
+                future.cancel()
+                outcomes.append(
+                    _timed_out_outcome(
+                        name,
+                        timeout_seconds=provider_timeout_seconds,
+                    )
+                )
+                continue
+            try:
+                outcomes.append(future.result())
+            except Exception as exc:  # defensive: worker normally captures provider errors
+                outcomes.append(
+                    _ProviderOutcome(
+                        attempt=ProviderAttempt(
+                            provider=name,
+                            status="failed",
+                            error=_redact_error(exc, secrets=secret_values),
+                        )
+                    )
+                )
+        return outcomes
+    finally:
+        for future in futures:
+            if not future.done():
+                future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _attempt_provider_fallback(
+    names: Sequence[str],
+    *,
+    path: Path,
+    normalized_mode: ExtractionMode,
+    languages: Sequence[str],
+    provider_options: Mapping[str, Any] | None,
+    allow_cloud: bool,
+    provider_timeout_seconds: float,
+    maximum_concurrency: int,
+    registry: ProviderRegistry,
+    secret_values: set[str],
+) -> list[_ProviderOutcome]:
+    """Try providers in order while isolating each call behind a deadline."""
+
+    if not names:
+        return []
+    executor = ThreadPoolExecutor(
+        max_workers=min(maximum_concurrency, len(names)),
+        thread_name_prefix="docreconstruct-ocr",
+    )
+    futures: list[Future[_ProviderOutcome]] = []
+    outcomes: list[_ProviderOutcome] = []
+    try:
+        for name in names:
+            future = executor.submit(
+                _attempt_provider,
+                name,
+                path=path,
+                normalized_mode=normalized_mode,
+                languages=languages,
+                provider_options=provider_options,
+                allow_cloud=allow_cloud,
+                provider_timeout_seconds=provider_timeout_seconds,
+                registry=registry,
+                secret_values=secret_values,
+            )
+            futures.append(future)
+            completed, _ = wait((future,), timeout=provider_timeout_seconds)
+            if future not in completed:
+                future.cancel()
+                outcomes.append(
+                    _timed_out_outcome(
+                        name,
+                        timeout_seconds=provider_timeout_seconds,
+                    )
+                )
+                continue
+            try:
+                outcome = future.result()
+            except Exception as exc:  # defensive: worker normally captures provider errors
+                outcome = _ProviderOutcome(
+                    attempt=ProviderAttempt(
+                        provider=name,
+                        status="failed",
+                        error=_redact_error(exc, secrets=secret_values),
+                    )
+                )
+            outcomes.append(outcome)
+            if outcome.document is not None:
+                break
+        return outcomes
+    finally:
+        for future in futures:
+            if not future.done():
+                future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _stable_cache_key(
     *,
     source_sha256: str,
@@ -256,6 +508,8 @@ def _stable_cache_key(
     require_geometry: bool,
     ensemble: bool,
     maximum_providers: int,
+    maximum_concurrency: int,
+    provider_timeout_seconds: float,
     allow_cloud: bool,
     provider_options: Mapping[str, Any] | None,
     registry: ProviderRegistry,
@@ -292,6 +546,8 @@ def _stable_cache_key(
             "require_geometry": require_geometry,
             "ensemble": ensemble,
             "maximum_providers": maximum_providers,
+            "maximum_concurrency": maximum_concurrency,
+            "provider_timeout_seconds": provider_timeout_seconds,
         },
         "provider_options": effective_options,
     }
@@ -557,6 +813,8 @@ def extract_to_markdown(
     allow_cloud: bool = False,
     ensemble: bool = False,
     maximum_providers: int = 2,
+    maximum_concurrency: int = 4,
+    provider_timeout_seconds: float = 120.0,
     languages: Sequence[str] = (),
     handwriting: bool = False,
     formulas: bool = True,
@@ -579,7 +837,9 @@ def extract_to_markdown(
     successful provider's canonical document. ``cache_directory`` enables an
     artifact-hash-verified canonical result cache; it performs no live provider
     call on a valid hit. ``require_geometry`` makes bounding boxes a hard
-    routing capability.
+    routing capability. Ensemble calls use at most ``maximum_concurrency``
+    workers, and every attempted provider is isolated by
+    ``provider_timeout_seconds`` in addition to its adapter transport timeout.
     """
 
     path = Path(source).expanduser().resolve()
@@ -593,6 +853,15 @@ def extract_to_markdown(
         )
     if maximum_providers < 1 or maximum_providers > 8:
         raise ValueError("maximum_providers must be between 1 and 8")
+    if maximum_concurrency < 1 or maximum_concurrency > 8:
+        raise ValueError("maximum_concurrency must be between 1 and 8")
+    if (
+        isinstance(provider_timeout_seconds, bool)
+        or not math.isfinite(provider_timeout_seconds)
+        or provider_timeout_seconds <= 0
+        or provider_timeout_seconds > 600
+    ):
+        raise ValueError("provider_timeout_seconds must be greater than 0 and at most 600")
     destination = (
         Path(output).expanduser() if output is not None else path.with_name(f"{path.stem}.ocr.md")
     ).resolve()
@@ -655,6 +924,8 @@ def extract_to_markdown(
             require_geometry=require_geometry,
             ensemble=ensemble,
             maximum_providers=maximum_providers,
+            maximum_concurrency=maximum_concurrency,
+            provider_timeout_seconds=provider_timeout_seconds,
             allow_cloud=allow_cloud,
             provider_options=provider_options,
             registry=active_registry,
@@ -691,50 +962,45 @@ def extract_to_markdown(
                 cache_hit = True
 
     if not cache_hit:
-        target_successes = maximum_providers if ensemble else 1
-        for name in candidates:
-            if len(selected) >= maximum_providers:
-                break
-            if len(successful) >= target_successes:
-                break
-            selected.append(name)
-            try:
-                provider = active_registry.get(name)
-                context = ProviderContext(
-                    source=str(path),
-                    options=_options_for_provider(
-                        name,
-                        provider_options,
-                        allow_cloud=allow_cloud,
-                    ),
-                    metadata={
-                        "extraction_mode": normalized_mode.value,
-                        "languages": list(languages),
-                    },
-                )
-                result = provider.parse(path, context=context)
-                attempt = ProviderAttempt(
-                    provider=name,
-                    status="succeeded",
-                    pages=len(result.document.pages),
-                    warnings=result.warnings,
-                    metadata=_sanitized_metadata(
-                        name,
-                        result.metadata,
-                        registry=active_registry,
-                    ),
-                )
-                documents.append(result.document)
-                successful.append(name)
-                attempts.append(attempt)
-            except Exception as exc:  # fallback errors belong in the auditable run report
-                attempts.append(
-                    ProviderAttempt(
-                        provider=name,
-                        status="failed",
-                        error=_redact_error(exc, secrets=secret_values),
-                    )
-                )
+        if ensemble:
+            selected = list(candidates[:maximum_providers])
+            outcomes = _attempt_provider_ensemble(
+                selected,
+                path=path,
+                normalized_mode=normalized_mode,
+                languages=languages,
+                provider_options=provider_options,
+                allow_cloud=allow_cloud,
+                provider_timeout_seconds=provider_timeout_seconds,
+                maximum_concurrency=maximum_concurrency,
+                registry=active_registry,
+                secret_values=secret_values,
+            )
+            for name, outcome in zip(selected, outcomes, strict=True):
+                attempts.append(outcome.attempt)
+                if outcome.document is not None:
+                    successful.append(name)
+                    documents.append(outcome.document)
+        else:
+            outcomes = _attempt_provider_fallback(
+                candidates[:maximum_providers],
+                path=path,
+                normalized_mode=normalized_mode,
+                languages=languages,
+                provider_options=provider_options,
+                allow_cloud=allow_cloud,
+                provider_timeout_seconds=provider_timeout_seconds,
+                maximum_concurrency=maximum_concurrency,
+                registry=active_registry,
+                secret_values=secret_values,
+            )
+            for outcome in outcomes:
+                name = outcome.attempt.provider
+                selected.append(name)
+                attempts.append(outcome.attempt)
+                if outcome.document is not None:
+                    successful.append(name)
+                    documents.append(outcome.document)
 
     if not documents:
         details = "; ".join(
@@ -795,6 +1061,8 @@ def extract_to_markdown(
         successful_providers=successful,
         attempts=attempts,
         ensemble=len(documents) > 1,
+        maximum_concurrency=maximum_concurrency,
+        provider_timeout_seconds=provider_timeout_seconds,
         document_id=document.id,
         output=str(destination),
         warnings=warnings,

@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import TracebackType
+from typing import Any
+
+import pytest
+from PIL import Image, ImageDraw
+
+from docreconstruct.reconstruction import scan_layout
+from docreconstruct.reconstruction.scan_layout import PixelBox, ScanPageLayout
+
+
+def _page(number: int, image: Image.Image) -> ScanPageLayout:
+    return ScanPageLayout(
+        number=number,
+        width=image.width,
+        height=image.height,
+        pdf_width=595.0,
+        pdf_height=842.0,
+        content_bbox=PixelBox(x0=1, y0=1, x1=image.width, y1=image.height),
+        line_pitch=12.0,
+        metadata={"source_kind": "pdf", "rectified": False},
+        image=image,
+    )
+
+
+def _pdf_path(tmp_path: Path) -> Path:
+    path = tmp_path / "layout.pdf"
+    path.write_bytes(b"%PDF-1.7\n")
+    return path
+
+
+def test_scan_page_worker_count_is_conservative(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(scan_layout.os, "cpu_count", lambda: 16)
+
+    assert scan_layout._scan_page_worker_count(0, None) == 0
+    assert scan_layout._scan_page_worker_count(3, None) == 3
+    assert scan_layout._scan_page_worker_count(12, None) == 4
+    assert scan_layout._scan_page_worker_count(12, 6) == 6
+    assert scan_layout._scan_page_worker_count(12, 100) == 8
+
+    monkeypatch.setattr(scan_layout.os, "cpu_count", lambda: 2)
+    assert scan_layout._scan_page_worker_count(12, None) == 2
+    assert scan_layout._scan_page_worker_count(12, 8) == 2
+
+    for invalid in (0, -1, True, 1.5):
+        with pytest.raises(ValueError, match="positive integer"):
+            scan_layout._scan_page_worker_count(4, invalid)  # type: ignore[arg-type]
+
+
+def test_pdf_page_analysis_is_parallel_but_returns_source_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _pdf_path(tmp_path)
+    images = [Image.new("RGB", (40, 60), "white") for _ in range(4)]
+    monkeypatch.setattr(
+        scan_layout,
+        "_extract_with_pypdf",
+        lambda _path: [(image, 595.0, 842.0) for image in images],
+    )
+    monkeypatch.setattr(scan_layout.os, "cpu_count", lambda: 8)
+
+    class ThreadedExecutor:
+        def __init__(self, *, max_workers: int) -> None:
+            self.executor = ThreadPoolExecutor(max_workers=max_workers)
+
+        def __enter__(self) -> ThreadedExecutor:
+            return self
+
+        def __exit__(
+            self,
+            exc_type: type[BaseException] | None,
+            exc_value: BaseException | None,
+            traceback: TracebackType | None,
+        ) -> None:
+            self.executor.shutdown(wait=True)
+
+        def map(
+            self,
+            function: Callable[[Any], ScanPageLayout],
+            items: Iterable[Any],
+        ) -> Iterable[ScanPageLayout]:
+            return self.executor.map(function, items)
+
+    monkeypatch.setattr(scan_layout, "ProcessPoolExecutor", ThreadedExecutor)
+
+    lock = threading.Lock()
+    all_started = threading.Event()
+    finished = {number: threading.Event() for number in range(1, 5)}
+    started_numbers: list[int] = []
+    completion_order: list[int] = []
+    thread_ids: set[int] = set()
+
+    def analyze(work_item: tuple[int, Image.Image, float, float]) -> ScanPageLayout:
+        number, image, _pdf_width, _pdf_height = work_item
+        with lock:
+            started_numbers.append(number)
+            thread_ids.add(threading.get_ident())
+            if len(started_numbers) == 4:
+                all_started.set()
+        assert all_started.wait(timeout=3.0)
+        if number < 4:
+            assert finished[number + 1].wait(timeout=3.0)
+        with lock:
+            completion_order.append(number)
+        finished[number].set()
+        return _page(number, image)
+
+    monkeypatch.setattr(scan_layout, "_analyze_extracted_pdf_page", analyze)
+
+    document = scan_layout.analyze_scan_source(path)
+
+    assert len(thread_ids) == 4
+    assert completion_order == [4, 3, 2, 1]
+    assert [page.number for page in document.pages] == [1, 2, 3, 4]
+
+
+def test_parallel_and_serial_page_analysis_have_identical_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("numpy")
+    path = _pdf_path(tmp_path)
+    images: list[Image.Image] = []
+    for page_number in range(1, 5):
+        image = Image.new("RGB", (180, 240), "white")
+        draw = ImageDraw.Draw(image)
+        for top in range(24 + page_number, 216, 18):
+            draw.rectangle((16, top, 164 - page_number, top + 5), fill="black")
+        images.append(image)
+    extracted = [(image, 595.0, 842.0) for image in images]
+    monkeypatch.setattr(scan_layout, "_extract_with_pypdf", lambda _path: extracted)
+    monkeypatch.setattr(scan_layout.os, "cpu_count", lambda: 8)
+
+    serial = scan_layout.analyze_scan_pdf(path, maximum_workers=1)
+    parallel = scan_layout.analyze_scan_pdf(path, maximum_workers=4)
+
+    assert [page.model_dump() for page in parallel.pages] == [
+        page.model_dump() for page in serial.pages
+    ]
+
+
+def test_single_page_analysis_stays_on_calling_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _pdf_path(tmp_path)
+    image = Image.new("RGB", (40, 60), "white")
+    monkeypatch.setattr(
+        scan_layout,
+        "_extract_with_pypdf",
+        lambda _path: [(image, 595.0, 842.0)],
+    )
+    caller = threading.get_ident()
+    observed_threads: list[int] = []
+
+    def analyze(work_item: tuple[int, Image.Image, float, float]) -> ScanPageLayout:
+        number, extracted_image, _pdf_width, _pdf_height = work_item
+        observed_threads.append(threading.get_ident())
+        return _page(number, extracted_image)
+
+    monkeypatch.setattr(scan_layout, "_analyze_extracted_pdf_page", analyze)
+
+    document = scan_layout.analyze_scan_pdf(path, maximum_workers=8)
+
+    assert [page.number for page in document.pages] == [1]
+    assert observed_threads == [caller]

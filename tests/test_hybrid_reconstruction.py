@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import urllib.request
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
@@ -19,6 +20,8 @@ from docreconstruct.reconstruction import (
 from docreconstruct.reconstruction.asset_matching import (
     AssetMatch,
     _download_remote,
+    _SafeAssetRedirectHandler,
+    _write_asset_cache,
     match_markdown_assets,
     resolve_markdown_asset,
 )
@@ -27,6 +30,7 @@ from docreconstruct.reconstruction.hybrid_docx import (
     _dialogue_story_boundary,
     _new_paragraph,
     _source_column_ink_capacities,
+    _source_figure_bytes,
     render_hybrid_docx,
 )
 from docreconstruct.reconstruction.hybrid_planner import (
@@ -243,6 +247,79 @@ def test_tinted_paper_becomes_native_word_background_not_a_page_scan(tmp_path: P
     background = root.find(f"{word}background")
     assert background is not None
     assert background.get(f"{word}color") == color
+
+
+def test_saved_figure_with_wrong_aspect_recrops_authoritative_source_box(
+    tmp_path: Path,
+) -> None:
+    page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=800,
+        pdf_width=595,
+        pdf_height=793,
+        content_bbox=PixelBox(x0=30, y0=20, x1=570, y1=780),
+        line_pitch=30,
+        image=Image.new("RGB", (600, 800), "white"),
+        metadata={"source_kind": "pdf"},
+    )
+    layout = ScanDocumentLayout(source=str(tmp_path / "layout.pdf"), pages=[page])
+    wrong = io.BytesIO()
+    Image.new("RGB", (40, 120), "black").save(wrong, format="PNG")
+    bbox = PixelBox(x0=100, y0=200, x1=340, y1=300)
+
+    selected = _source_figure_bytes(
+        {"figure": wrong.getvalue()},
+        "figure",
+        layout,
+        1,
+        bbox,
+    )
+
+    with Image.open(io.BytesIO(selected)) as image:
+        assert image.size == (bbox.width, bbox.height)
+
+
+def test_coarse_provider_paragraph_bbox_does_not_inflate_native_line_height(
+    tmp_path: Path,
+) -> None:
+    page = ScanPageLayout(
+        number=1,
+        width=1200,
+        height=1697,
+        pdf_width=595,
+        pdf_height=842,
+        content_bbox=PixelBox(x0=80, y0=60, x1=1120, y1=1620),
+        line_pitch=40,
+        image=Image.new("RGB", (1200, 1697), "white"),
+        metadata={"source_kind": "pdf"},
+    )
+    layout = ScanDocumentLayout(source=str(tmp_path / "layout.pdf"), pages=[page])
+    coarse = PixelBox(x0=100, y0=200, x1=1050, y1=420)
+    placement = HybridBlockPlacement(
+        block_id="paragraph",
+        block_index=0,
+        page_number=1,
+        source_bbox=coarse,
+        source_rows=[coarse],
+        source_gap_before=0,
+        geometry_source="json_consensus",
+    )
+    document = WordDocument()
+
+    paragraph = _new_paragraph(
+        document,
+        "Editable prose represented by a multi-line provider envelope.",
+        size=12,
+        line_height=18,
+        kind=MarkdownBlockKind.PARAGRAPH,
+        available_width_points=500,
+        placement=placement,
+        layout=layout,
+    )
+
+    assert paragraph.paragraph_format.line_spacing is not None
+    assert paragraph.paragraph_format.line_spacing.pt == pytest.approx(18)
 
 
 def test_markdown_parser_retains_solution_groups_lists_and_display_math(tmp_path: Path) -> None:
@@ -1300,6 +1377,10 @@ def test_remote_markdown_images_are_reused_from_disk_cache(
 
     class Headers:
         @staticmethod
+        def get(name: str) -> str | None:
+            return None
+
+        @staticmethod
         def get_content_type() -> str:
             return "image/png"
 
@@ -1320,7 +1401,16 @@ def test_remote_markdown_images_are_reused_from_disk_cache(
         return Response(payload.getvalue())
 
     monkeypatch.setenv("DOCRECONSTRUCT_ASSET_CACHE", str(tmp_path / "cache"))
-    monkeypatch.setattr("urllib.request.urlopen", open_once)
+    monkeypatch.setattr(
+        "docreconstruct.reconstruction.asset_matching.socket.getaddrinfo",
+        lambda *args, **kwargs: [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    monkeypatch.setattr(
+        "docreconstruct.reconstruction.asset_matching._open_remote_asset",
+        open_once,
+    )
     block = MarkdownBlock(
         id="md-1",
         index=0,
@@ -1335,6 +1425,103 @@ def test_remote_markdown_images_are_reused_from_disk_cache(
     assert first is not None and second is not None
     assert first.data == second.data == payload.getvalue()
     assert calls == 1
+
+
+def test_local_markdown_assets_are_confined_to_markdown_directory(tmp_path: Path) -> None:
+    markdown_directory = tmp_path / "authority"
+    markdown_directory.mkdir()
+    safe_image = markdown_directory / "figure.png"
+    outside_image = tmp_path / "private.png"
+    Image.new("RGB", (8, 6), "white").save(safe_image)
+    Image.new("RGB", (8, 6), "black").save(outside_image)
+
+    safe = MarkdownBlock(
+        id="safe",
+        index=0,
+        kind=MarkdownBlockKind.IMAGE,
+        source="figure.png",
+    )
+    resolved = resolve_markdown_asset(safe, markdown_directory=markdown_directory)
+    assert resolved is not None
+    assert resolved.source == "figure.png"
+
+    for source in ("../private.png", str(outside_image.resolve())):
+        escaped = safe.model_copy(update={"id": f"escaped-{source}", "source": source})
+        with pytest.raises(ValueError, match="relative path|escapes the Markdown directory"):
+            resolve_markdown_asset(escaped, markdown_directory=markdown_directory)
+
+
+def test_remote_markdown_asset_rejects_private_dns_before_fetch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "docreconstruct.reconstruction.asset_matching.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
+    )
+    monkeypatch.setattr(
+        "docreconstruct.reconstruction.asset_matching._open_remote_asset",
+        lambda *args, **kwargs: pytest.fail("private targets must be rejected before HTTP"),
+    )
+    block = MarkdownBlock(
+        id="private-remote",
+        index=0,
+        kind=MarkdownBlockKind.IMAGE,
+        source="https://assets.example.test/private.png",
+    )
+    _download_remote.cache_clear()
+    with pytest.raises(ValueError, match="private, loopback, link-local, or reserved"):
+        resolve_markdown_asset(block, markdown_directory=tmp_path)
+
+
+def test_remote_markdown_asset_revalidates_redirect_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "docreconstruct.reconstruction.asset_matching.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("169.254.169.254", 443))],
+    )
+    request = urllib.request.Request("https://public.example.test/figure.png")
+    handler = _SafeAssetRedirectHandler()
+
+    with pytest.raises(ValueError, match="private, loopback, link-local, or reserved"):
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://169.254.169.254/latest/meta-data/",
+        )
+
+
+def test_data_uri_obeys_asset_byte_limit(tmp_path: Path) -> None:
+    block = MarkdownBlock(
+        id="large-data-uri",
+        index=0,
+        kind=MarkdownBlockKind.IMAGE,
+        source="data:image/png;base64,QUJDREVGRw==",
+    )
+    with pytest.raises(ValueError, match="safety limit"):
+        resolve_markdown_asset(block, markdown_directory=tmp_path, maximum_bytes=4)
+
+
+def test_remote_asset_disk_cache_prunes_to_operator_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("DOCRECONSTRUCT_ASSET_CACHE_MAX_MB", "1")
+    first = cache / "first.bin"
+    second = cache / "second.bin"
+    payload = b"x" * (600 * 1024)
+
+    _write_asset_cache(cache, first, cache / "first.type", payload, "image/png")
+    _write_asset_cache(cache, second, cache / "second.type", payload, "image/png")
+
+    assert not first.exists()
+    assert second.stat().st_size == len(payload)
+    assert sum(path.stat().st_size for path in cache.glob("*.bin")) <= 1024 * 1024
 
 
 def test_provider_crop_filename_is_an_offline_source_figure_fallback(
@@ -1365,6 +1552,51 @@ def test_provider_crop_filename_is_an_offline_source_figure_fallback(
     assert len(matches) == 1
     assert matches[0].bbox == PixelBox(x0=10, y0=20, x1=110, y1=80)
     assert not matches[0].resolved
+
+
+def test_provider_page_folder_selects_explicit_page_across_equal_sized_pages(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "content.md"
+    sources = [
+        "https://assets.invalid/export/"
+        f"markdown_{page_index}/imgs/img_in_image_box_10_20_110_80.jpg"
+        for page_index in range(4)
+    ]
+    sources.extend(
+        [
+            # An explicit page behind the monotonic cursor must not move backwards.
+            "https://assets.invalid/export/markdown_1/imgs/img_in_image_box_20_30_120_90.jpg",
+            # An explicit page must not fall through to another page when out of bounds.
+            "https://assets.invalid/export/markdown_3/imgs/img_in_image_box_10_20_210_80.jpg",
+        ]
+    )
+    markdown.write_text(
+        "\n".join(f'<img src="{source}" alt="Figure" />' for source in sources) + "\n",
+        encoding="utf-8",
+    )
+    content = parse_markdown_content(markdown)
+    pages = [
+        ScanPageLayout(
+            number=page_number,
+            width=200,
+            height=160,
+            pdf_width=595,
+            pdf_height=476,
+            content_bbox=PixelBox(x0=0, y0=0, x1=200, y1=160),
+            line_pitch=20,
+            image=Image.new("RGB", (200, 160), "white"),
+            metadata={"source_kind": "pdf", "rectified": False},
+        )
+        for page_number in range(1, 5)
+    ]
+    layout = ScanDocumentLayout(source=str(tmp_path / "layout.pdf"), pages=pages)
+
+    matches = match_markdown_assets(content, layout, allow_remote=False)
+
+    assert [match.page_number for match in matches] == [1, 2, 3, 4]
+    assert all(match.bbox == PixelBox(x0=10, y0=20, x1=110, y1=80) for match in matches)
+    assert all(not match.resolved for match in matches)
 
 
 def test_docx_side_layout_keeps_valid_trailing_paragraph_after_nested_table(
@@ -1459,6 +1691,104 @@ def test_docx_side_layout_keeps_valid_trailing_paragraph_after_nested_table(
 
     assert nested_table_cells
     assert all(children[-1].tag == f"{namespace}p" for children in nested_table_cells)
+
+
+def test_same_group_disjoint_images_render_in_one_native_horizontal_row(
+    tmp_path: Path,
+) -> None:
+    group = "section-1:question-1"
+    blocks = [
+        MarkdownBlock(
+            id="prompt",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable prompt above two figures.",
+            group_id=group,
+            starts_group=True,
+        ),
+        MarkdownBlock(
+            id="left",
+            index=1,
+            kind=MarkdownBlockKind.IMAGE,
+            source="left.png",
+            group_id=group,
+        ),
+        MarkdownBlock(
+            id="right",
+            index=2,
+            kind=MarkdownBlockKind.IMAGE,
+            source="right.png",
+            group_id=group,
+        ),
+        MarkdownBlock(
+            id="answer",
+            index=3,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable answer below both figures.",
+            group_id=group,
+        ),
+    ]
+    content = MarkdownContent(source=str(tmp_path / "content.md"), blocks=blocks)
+    content_box = PixelBox(x0=40, y0=25, x1=560, y1=775)
+    prompt_box = PixelBox(x0=60, y0=80, x1=540, y1=105)
+    left_box = PixelBox(x0=80, y0=180, x1=270, y1=360)
+    right_box = PixelBox(x0=330, y0=160, x1=530, y1=370)
+    answer_box = PixelBox(x0=60, y0=420, x1=540, y1=445)
+    page_image = Image.new("RGB", (600, 800), "white")
+    scan_page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=800,
+        pdf_width=595,
+        pdf_height=793,
+        content_bbox=content_box,
+        line_pitch=30,
+        image=page_image,
+        metadata={"source_kind": "pdf", "column_count": 1},
+    )
+    scan = ScanDocumentLayout(source=str(tmp_path / "layout.pdf"), pages=[scan_page])
+    boxes = [prompt_box, left_box, right_box, answer_box]
+    placements = [
+        HybridBlockPlacement(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+            source_bbox=box,
+            source_rows=[] if block.kind is MarkdownBlockKind.IMAGE else [box],
+            source_gap_before=0,
+        )
+        for block, box in zip(blocks, boxes, strict=True)
+    ]
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=scan.source,
+        pages=[
+            HybridPagePlan(
+                number=1,
+                pdf_width=595,
+                pdf_height=793,
+                raster_width=600,
+                raster_height=800,
+                content_bbox=content_box,
+                line_pitch=30,
+                placements=placements,
+            )
+        ],
+    )
+
+    payload = render_hybrid_docx(content, scan, plan, [])
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        root = ElementTree.fromstring(package.read("word/document.xml"))
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    drawing = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+    visual_row = next(
+        table
+        for table in root.iter(f"{word}tbl")
+        if (caption := table.find(f"{word}tblPr/{word}tblCaption")) is not None
+        and caption.get(f"{word}val") == "docreconstruct:horizontal-visual-row"
+    )
+
+    assert len(list(visual_row.iter(f"{drawing}inline"))) == 2
 
 
 def _mixed_masthead_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -1659,3 +1989,147 @@ def test_separate_masthead_blocks_and_bottom_furniture_use_native_zones(
     left_alignment = left_footer.find(f".//{word}jc")
     assert left_alignment is not None
     assert left_alignment.get(f"{word}val") == "left"
+
+
+def test_multilingual_page_fraction_footer_fallback_is_unique_per_section(
+    tmp_path: Path,
+) -> None:
+    blocks = [
+        MarkdownBlock(
+            id="page-1-body",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable first-page body.",
+        ),
+        MarkdownBlock(
+            id="page-1-link",
+            index=1,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Open source: https://example.invalid/document",
+        ),
+        MarkdownBlock(
+            id="page-1-number",
+            index=2,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Page 1/2",
+        ),
+        MarkdownBlock(
+            id="page-2-body",
+            index=3,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable second-page body.",
+        ),
+        MarkdownBlock(
+            id="page-2-link",
+            index=4,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Open source: https://example.invalid/document",
+        ),
+        MarkdownBlock(
+            id="page-2-number",
+            index=5,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Страница 2/2",
+        ),
+        MarkdownBlock(
+            id="page-2-banner",
+            index=6,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Repeated editable top banner.",
+        ),
+    ]
+    content = MarkdownContent(source=str(tmp_path / "content.md"), blocks=blocks)
+    pages = [
+        ScanPageLayout(
+            number=number,
+            width=600,
+            height=800,
+            pdf_width=595,
+            pdf_height=793,
+            content_bbox=PixelBox(x0=35, y0=20, x1=565, y1=780),
+            line_pitch=30,
+            image=Image.new("RGB", (600, 800), "white"),
+            metadata={"source_kind": "image", "column_count": 1},
+        )
+        for number in (1, 2)
+    ]
+    scan = ScanDocumentLayout(source=str(tmp_path / "layout.png"), pages=pages)
+    first_page_boxes = [
+        PixelBox(x0=60, y0=100, x1=500, y1=124),
+        PixelBox(x0=180, y0=744, x1=500, y1=762),
+        PixelBox(x0=480, y0=764, x1=555, y1=780),
+    ]
+    placements = [
+        HybridBlockPlacement(
+            block_id=blocks[index].id,
+            block_index=index,
+            page_number=1,
+            source_bbox=box,
+            source_rows=[box],
+            source_gap_before=0,
+        )
+        for index, box in enumerate(first_page_boxes)
+    ]
+    second_body = PixelBox(x0=60, y0=100, x1=500, y1=124)
+    top_banner = PixelBox(x0=160, y0=28, x1=500, y1=48)
+    placements.extend(
+        [
+            HybridBlockPlacement(
+                block_id="page-2-body",
+                block_index=3,
+                page_number=2,
+                source_bbox=second_body,
+                source_rows=[second_body],
+                source_gap_before=0,
+            ),
+            HybridBlockPlacement(block_id="page-2-link", block_index=4, page_number=2),
+            HybridBlockPlacement(block_id="page-2-number", block_index=5, page_number=2),
+            HybridBlockPlacement(
+                block_id="page-2-banner",
+                block_index=6,
+                page_number=2,
+                source_bbox=top_banner,
+                source_rows=[top_banner],
+                source_gap_before=0,
+            ),
+        ]
+    )
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=scan.source,
+        pages=[
+            HybridPagePlan(
+                number=page.number,
+                pdf_width=page.pdf_width,
+                pdf_height=page.pdf_height,
+                raster_width=page.width,
+                raster_height=page.height,
+                content_bbox=page.content_bbox,
+                line_pitch=page.line_pitch,
+                placements=[
+                    placement for placement in placements if placement.page_number == page.number
+                ],
+            )
+            for page in pages
+        ],
+    )
+
+    payload = render_hybrid_docx(content, scan, plan, [])
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        document = ElementTree.fromstring(package.read("word/document.xml"))
+        footer_names = sorted(name for name in package.namelist() if name.startswith("word/footer"))
+        footers = [ElementTree.fromstring(package.read(name)) for name in footer_names]
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    body_text = " ".join(node.text or "" for node in document.iter(f"{word}t"))
+    footer_texts = [
+        " ".join(node.text or "" for node in footer.iter(f"{word}t")) for footer in footers
+    ]
+
+    assert "Page 1/2" not in body_text
+    assert "Страница 2/2" not in body_text
+    assert "https://example.invalid/document" not in body_text
+    assert "Repeated editable top banner." in body_text
+    assert footer_texts == [
+        "Open source: https://example.invalid/document Page 1/2",
+        "Open source: https://example.invalid/document Страница 2/2",
+    ]

@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 from pydantic import ValidationError
 
+import docreconstruct.reconstruction.evidence_matching as evidence_matching
 from docreconstruct.evidence import (
     DetectionCandidate,
     SidecarDetection,
@@ -556,6 +557,399 @@ def test_textless_json_image_geometry_matches_markdown_asset_deterministically()
     assert match.match_score > 0.95
 
 
+def test_html_chart_src_matches_markdown_image_on_its_normalized_page() -> None:
+    filename = "img_in_chart_box_838_409_1121_630.jpg"
+    content = MarkdownContent(
+        source="authority.md",
+        blocks=[
+            MarkdownBlock(
+                id="md-chart",
+                index=0,
+                kind=MarkdownBlockKind.IMAGE,
+                source=(
+                    "https://assets.invalid/export/markdown_2/imgs/"
+                    f"{filename}?authorization=expired"
+                ),
+            )
+        ],
+    )
+    document = Document(
+        id="paddle-pages",
+        pages=[
+            Page(id="page-1", number=1, width=500, height=1000, elements=[]),
+            Page(id="page-2", number=2, width=500, height=1000, elements=[]),
+            Page(
+                id="page-3",
+                number=3,
+                width=500,
+                height=1000,
+                elements=[
+                    _element(
+                        "unrelated-figure",
+                        '<div><img src="imgs/other-figure.jpg" alt="Image" /></div>',
+                        (20, 40, 120, 140),
+                        provider="paddleocr",
+                        kind=ElementType.FIGURE,
+                        order=0,
+                    ),
+                    _element(
+                        "chart-12",
+                        f'<div><img src="imgs/{filename}" alt="Image" /></div>',
+                        (100, 200, 300, 400),
+                        provider="paddleocr",
+                        kind=ElementType.CHART,
+                        order=1,
+                    ),
+                ],
+            ),
+        ],
+        metadata={"provider": "paddleocr"},
+    )
+
+    matches = match_sidecar_evidence(
+        content,
+        _multi_page_layout(pages=3),
+        document,
+    )
+
+    assert len(matches) == 1
+    match = matches[0]
+    assert match.block_id == "md-chart"
+    assert match.page_number == 3
+    assert match.element_ids == ("chart-12",)
+    assert match.source_bbox == PixelBox(x0=200, y0=400, x1=600, y1=800)
+    assert match.source_rows == [match.source_bbox]
+    assert match.match_score > 0.95
+
+
+def test_section_heading_shares_exact_provider_line_with_next_group() -> None:
+    heading = "PART II. True or false questions."
+    question = (
+        "Question 1: A sufficiently long prompt follows the section heading "
+        "on the same source line and remains the editable content authority."
+    )
+    content = MarkdownContent(
+        source="authority.md",
+        blocks=[
+            MarkdownBlock(
+                id="page-one",
+                index=0,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="End of page one",
+            ),
+            MarkdownBlock(
+                id="section-heading",
+                index=1,
+                kind=MarkdownBlockKind.HEADING,
+                text=heading,
+                level=1,
+            ),
+            MarkdownBlock(
+                id="question-one",
+                index=2,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text=question,
+                group_id="section-1:question 1:",
+                starts_group=True,
+            ),
+        ],
+    )
+    document = Document(
+        id="combined-heading-line",
+        pages=[
+            Page(
+                id="provider-page-1",
+                number=1,
+                width=1000,
+                height=2000,
+                elements=[
+                    _element(
+                        "page-one-text",
+                        "End of page one",
+                        (100, 1700, 500, 1750),
+                        provider="paddleocr",
+                    )
+                ],
+            ),
+            Page(
+                id="provider-page-2",
+                number=2,
+                width=1000,
+                height=2000,
+                elements=[
+                    _element(
+                        "combined-line",
+                        f"{heading} {question}",
+                        (100, 100, 900, 180),
+                        provider="paddleocr",
+                    )
+                ],
+            ),
+        ],
+        metadata={"provider": "paddleocr"},
+    )
+
+    matches = match_sidecar_evidence(content, _multi_page_layout(), document)
+    by_block = {match.block_id: match for match in matches}
+
+    assert set(by_block) == {"page-one", "section-heading", "question-one"}
+    heading_match = by_block["section-heading"]
+    question_match = by_block["question-one"]
+    assert heading_match.page_number == question_match.page_number == 2
+    assert heading_match.element_ids == question_match.element_ids == ("combined-line",)
+    assert heading_match.source_bbox == question_match.source_bbox
+    assert any("shares one exact provider line" in item for item in heading_match.warnings)
+
+
+def test_exact_combined_provider_units_recover_only_leading_text_owners() -> None:
+    header_blocks = [
+        MarkdownBlock(
+            id="teacher",
+            index=1,
+            kind=MarkdownBlockKind.HEADING,
+            text="TEACHER NGUYEN VAN A",
+            level=1,
+        ),
+        MarkdownBlock(
+            id="test-title",
+            index=2,
+            kind=MarkdownBlockKind.HEADING,
+            text="PRACTICE TEST 05",
+            level=1,
+        ),
+        MarkdownBlock(
+            id="page-note",
+            index=3,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="This test contains four pages",
+        ),
+    ]
+    question = MarkdownBlock(
+        id="question",
+        index=4,
+        kind=MarkdownBlockKind.PARAGRAPH,
+        text="Question 2: Choose the correct statement.",
+        group_id="question-2",
+        starts_group=True,
+    )
+    options = [
+        MarkdownBlock(
+            id=f"option-{label.casefold()}",
+            index=5 + offset,
+            kind=MarkdownBlockKind.OPTION,
+            text=f"{label}. " + phrase,
+            group_id="question-2",
+        )
+        for offset, (label, phrase) in enumerate(
+            (
+                ("A", "The first deliberately long answer remains editable text."),
+                ("B", "The second deliberately long answer remains editable text."),
+                ("C", "The third deliberately long answer remains editable text."),
+                ("D", "The fourth deliberately long answer remains editable text."),
+            )
+        )
+    ]
+    content = MarkdownContent(
+        source="authority.md",
+        blocks=[
+            MarkdownBlock(
+                id="before",
+                index=0,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="Top anchor",
+            ),
+            *header_blocks,
+            question,
+            *options,
+            MarkdownBlock(
+                id="after",
+                index=9,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="Bottom anchor",
+            ),
+        ],
+    )
+    header_text = " ".join(block.text for block in header_blocks)
+    question_text = " ".join(block.text for block in (question, *options))
+    document = _document(
+        "paddleocr",
+        [
+            _element("before-unit", "Top anchor", (100, 100, 400, 150), provider="paddleocr"),
+            _element(
+                "header-stack",
+                header_text,
+                (100, 200, 500, 380),
+                provider="paddleocr",
+            ),
+            _element(
+                "question-stack",
+                question_text,
+                (100, 450, 900, 850),
+                provider="paddleocr",
+            ),
+            _element(
+                "after-unit",
+                "Bottom anchor",
+                (100, 900, 400, 950),
+                provider="paddleocr",
+            ),
+        ],
+    )
+
+    matches = match_sidecar_evidence(content, _layout(), document)
+    by_block = {match.block_id: match for match in matches}
+
+    assert set(by_block) == {
+        "before",
+        "teacher",
+        "test-title",
+        "page-note",
+        "question",
+        "after",
+    }
+    for block in header_blocks:
+        assert by_block[block.id].element_ids == ("header-stack",)
+        assert by_block[block.id].source_bbox == PixelBox(x0=100, y0=200, x1=500, y1=380)
+    assert by_block["question"].element_ids == ("question-stack",)
+    assert all(option.id not in by_block for option in options)
+
+
+def test_combined_provider_unit_rejects_repeated_location_ambiguity() -> None:
+    content = MarkdownContent(
+        source="authority.md",
+        blocks=[
+            MarkdownBlock(
+                id="before",
+                index=0,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="Before repeated stack",
+            ),
+            MarkdownBlock(
+                id="heading-a",
+                index=1,
+                kind=MarkdownBlockKind.HEADING,
+                text="UNIQUE HEADING ALPHA",
+                level=1,
+            ),
+            MarkdownBlock(
+                id="heading-b",
+                index=2,
+                kind=MarkdownBlockKind.HEADING,
+                text="UNIQUE HEADING BETA",
+                level=1,
+            ),
+            MarkdownBlock(
+                id="heading-c",
+                index=3,
+                kind=MarkdownBlockKind.HEADING,
+                text="UNIQUE HEADING GAMMA",
+                level=1,
+            ),
+            MarkdownBlock(
+                id="after",
+                index=4,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="After repeated stack",
+            ),
+        ],
+    )
+    combined = "UNIQUE HEADING ALPHA UNIQUE HEADING BETA UNIQUE HEADING GAMMA"
+    document = _document(
+        "provider",
+        [
+            _element(
+                "before-unit",
+                "Before repeated stack",
+                (100, 100, 500, 150),
+                provider="provider",
+            ),
+            _element(
+                "stack-one",
+                combined,
+                (100, 250, 600, 350),
+                provider="provider",
+            ),
+            _element(
+                "stack-two",
+                combined,
+                (100, 450, 600, 550),
+                provider="provider",
+            ),
+            _element(
+                "after-unit",
+                "After repeated stack",
+                (100, 650, 500, 700),
+                provider="provider",
+            ),
+        ],
+    )
+
+    matches = match_sidecar_evidence(content, _layout(), document)
+
+    assert [match.block_id for match in matches] == ["before", "after"]
+
+
+def test_combined_provider_unit_rejects_reversed_anchor_order() -> None:
+    content = MarkdownContent(
+        source="authority.md",
+        blocks=[
+            MarkdownBlock(
+                id="before",
+                index=0,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="Before combined stack",
+            ),
+            MarkdownBlock(
+                id="heading-a",
+                index=1,
+                kind=MarkdownBlockKind.HEADING,
+                text="ORDERED HEADING ALPHA",
+                level=1,
+            ),
+            MarkdownBlock(
+                id="heading-b",
+                index=2,
+                kind=MarkdownBlockKind.HEADING,
+                text="ORDERED HEADING BETA",
+                level=1,
+            ),
+            MarkdownBlock(
+                id="after",
+                index=3,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="After combined stack",
+            ),
+        ],
+    )
+    document = _document(
+        "provider",
+        [
+            _element(
+                "reversed-stack",
+                "ORDERED HEADING ALPHA ORDERED HEADING BETA",
+                (100, 50, 600, 100),
+                provider="provider",
+            ),
+            _element(
+                "before-unit",
+                "Before combined stack",
+                (100, 150, 500, 200),
+                provider="provider",
+            ),
+            _element(
+                "after-unit",
+                "After combined stack",
+                (100, 650, 500, 700),
+                provider="provider",
+            ),
+        ],
+    )
+
+    matches = match_sidecar_evidence(content, _layout(), document)
+
+    assert [match.block_id for match in matches] == ["before", "after"]
+
+
 def test_textless_visual_order_fallback_is_unique_or_rejected_as_ambiguous() -> None:
     content = MarkdownContent(
         source="authority.md",
@@ -672,6 +1066,70 @@ def test_out_of_order_exact_visual_does_not_displace_text_matches() -> None:
     ]
 
 
+def test_exact_visual_identity_overrides_explicitly_unreliable_order_on_same_page() -> None:
+    content = MarkdownContent(
+        source="authority.md",
+        blocks=[
+            MarkdownBlock(
+                id="before",
+                index=0,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="Before side chart",
+            ),
+            MarkdownBlock(
+                id="chart",
+                index=1,
+                kind=MarkdownBlockKind.IMAGE,
+                source="https://assets.invalid/markdown_2/imgs/side-chart.jpg?expired=1",
+            ),
+            MarkdownBlock(
+                id="after",
+                index=2,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text="After side chart",
+            ),
+        ],
+    )
+    document = _document(
+        "paddleocr",
+        [
+            _element(
+                "side-chart",
+                '<div><img src="imgs/side-chart.jpg" alt="Image" /></div>',
+                (600, 100, 900, 500),
+                provider="paddleocr",
+                kind=ElementType.CHART,
+                order=0,
+                metadata={"reading_order_reliable": False},
+            ),
+            _element(
+                "before-text",
+                "Before side chart",
+                (100, 200, 500, 300),
+                provider="paddleocr",
+                order=1,
+            ),
+            _element(
+                "after-text",
+                "After side chart",
+                (100, 400, 500, 500),
+                provider="paddleocr",
+                order=2,
+            ),
+        ],
+    )
+
+    matches = match_sidecar_evidence(content, _layout(), document)
+    by_block = {match.block_id: match for match in matches}
+
+    assert set(by_block) == {"before", "chart", "after"}
+    assert by_block["chart"].element_ids == ("side-chart",)
+    assert by_block["chart"].source_bbox == PixelBox(x0=600, y0=100, x1=900, y1=500)
+    assert any(
+        "overrides provider fallback order" in warning for warning in by_block["chart"].warnings
+    )
+
+
 @pytest.mark.parametrize(
     ("rotation", "width", "height", "bbox", "expected"),
     [
@@ -773,3 +1231,114 @@ def test_public_evidence_type_hints_resolve_without_import_cycles() -> None:
 
     assert "EvidenceBundleLike" in str(hints["evidence"])
     assert hints["return"] == list[EvidenceMatch]
+
+
+def test_candidate_pruning_and_memoization_bound_expensive_similarity_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence_matching._normalize_text.cache_clear()
+    evidence_matching._cached_text_similarity.cache_clear()
+    evidence_matching._cached_text_similarity_at_least.cache_clear()
+
+    blocks: list[MarkdownBlock] = []
+    elements: list[Element] = []
+    authority_index = 0
+    reading_order = 0
+    for text_index in range(12):
+        blocks.append(
+            MarkdownBlock(
+                id=f"latency-block-{text_index}",
+                index=authority_index,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text=f"authority phrase {text_index:02d} alpha beta",
+            )
+        )
+        authority_index += 1
+        for fragment in (
+            f"zzzz qqqq vvvv {text_index:02d}",
+            f"authority phrase {text_index:02d} alpha beta",
+            f"yyyy xxxx wwww {text_index:02d}",
+            f"kkkk jjjj hhhh {text_index:02d}",
+        ):
+            y0 = reading_order * 50 + 10
+            elements.append(
+                _element(
+                    f"latency-unit-{reading_order}",
+                    fragment,
+                    (100, y0, 800, y0 + 30),
+                    provider="latency-provider",
+                    order=reading_order,
+                )
+            )
+            reading_order += 1
+        if text_index == 5:
+            blocks.append(
+                MarkdownBlock(
+                    id="latency-visual",
+                    index=authority_index,
+                    kind=MarkdownBlockKind.IMAGE,
+                    source="assets/latency-figure.png",
+                )
+            )
+            authority_index += 1
+            y0 = reading_order * 50 + 10
+            elements.append(
+                _element(
+                    "latency-figure",
+                    None,
+                    (100, y0, 800, y0 + 30),
+                    provider="latency-provider",
+                    kind=ElementType.FIGURE,
+                    order=reading_order,
+                    metadata={"path": "assets/latency-figure.png"},
+                )
+            )
+            reading_order += 1
+
+    content = MarkdownContent(source="latency.md", blocks=blocks)
+    document = _document(
+        "latency-provider",
+        elements,
+        height=3000,
+    )
+    original_sequence_matcher = evidence_matching.difflib.SequenceMatcher
+    ratio_calls = 0
+    text_candidate_calls = 0
+
+    def counting_sequence_matcher(*args: object, **kwargs: object) -> object:
+        nonlocal ratio_calls
+        ratio_calls += 1
+        return original_sequence_matcher(*args, **kwargs)
+
+    original_text_candidates = evidence_matching._text_block_candidates
+
+    def counting_text_candidates(
+        block: MarkdownBlock,
+        units: list[object],
+    ) -> list[object]:
+        nonlocal text_candidate_calls
+        text_candidate_calls += 1
+        return original_text_candidates(block, units)  # type: ignore[arg-type,return-value]
+
+    monkeypatch.setattr(
+        evidence_matching.difflib,
+        "SequenceMatcher",
+        counting_sequence_matcher,
+    )
+    monkeypatch.setattr(
+        evidence_matching,
+        "_text_block_candidates",
+        counting_text_candidates,
+    )
+
+    matches = match_sidecar_evidence(content, _layout(height=3000), document)
+    first_ratio_calls = ratio_calls
+    first_candidate_calls = text_candidate_calls
+    repeated = match_sidecar_evidence(content, _layout(height=3000), document)
+
+    assert len(matches) == len(blocks)
+    assert matches == repeated
+    assert first_candidate_calls == 12
+    assert text_candidate_calls == 24
+    assert first_ratio_calls < 600
+    assert ratio_calls == first_ratio_calls

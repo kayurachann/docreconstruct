@@ -18,10 +18,11 @@ confidence, and preprocessing transform in provenance.
 | Forms, tables, checkboxes, signatures | Azure, Google Document AI, or AWS Textract | PaddleOCR-VL |
 | Born-digital PDF | native PDF extraction | OCR only missing raster regions |
 
-The core includes saved-result adapters for PaddleOCR, MinerU, and olmOCR.
-Hosted adapters are explicit and credential-gated. Other engines should be
-installed through the `docreconstruct.providers` entry-point interface rather
-than vendored into the core package.
+The core includes saved-result adapters for PaddleOCR, MinerU, and olmOCR,
+explicit credential-gated hosted adapters, and an operator-managed live
+PaddleOCR-VL pipeline adapter named `paddleocr_vl_server`. Other engines should
+be installed through the `docreconstruct.providers` entry-point interface
+rather than vendored into the core package.
 
 Primary projects reviewed:
 
@@ -47,6 +48,15 @@ Do not automate a provider's consumer website by scraping or browser macros.
 Use its documented API. A website UI may remain useful for manual export, whose
 saved Markdown/JSON can be passed back to this project.
 
+Open-source code and free hosted computation are different promises.
+PaddleOCR and olmOCR can be installed or deployed under their published
+licenses, but a third party that runs the model must still pay for hardware and
+may impose accounts, quotas, fees, retention, regional processing, or changing
+terms. The [olmOCR repository](https://github.com/allenai/olmocr) documents
+local inference and OpenAI-compatible external model servers, including
+separately operated providers; those services are not bundled with or
+guaranteed by `docreconstruct`.
+
 ## Privacy modes
 
 - `local`: document bytes never leave the machine; only installed local
@@ -58,6 +68,36 @@ saved Markdown/JSON can be passed back to this project.
 
 No credential is written to a run report. Remote providers are disabled by
 default, even if an API key exists in the environment.
+
+### Operator-managed PaddleOCR-VL
+
+`paddleocr_vl_server` calls the complete official `/layout-parsing` pipeline
+contract rather than a bare chat/completions endpoint. That distinction retains
+the preprocessing, layout, page restructuring, table, formula, and Markdown
+evidence needed by reconstruction. The adapter then normalizes the response to
+the same canonical IR used for saved PaddleOCR JSON.
+
+The API operator supplies configuration; a browser client cannot submit an OCR
+URL or token:
+
+```powershell
+$env:PADDLEOCR_VL_SERVER_URL = "http://127.0.0.1:8080"
+$env:PADDLEOCR_VL_SERVER_TOKEN = "optional-private-token"
+$env:DOCRECONSTRUCT_CORS_ORIGINS = "https://kayurachann.github.io"
+docreconstruct-api
+```
+
+Loopback HTTP is allowed for a sidecar or local reverse proxy. Direct
+non-loopback connections must use HTTPS and require a separate trusted-endpoint
+opt-in in the programmatic provider context. Every live inference call also
+requires remote-upload consent. The server URL and credential belong to the
+operator, never to an untrusted multipart request.
+
+The official high-performance PaddleOCR-VL deployment uses a FastAPI gateway,
+Triton, and vLLM with dynamic and continuous batching. It is an operator
+deployment recipe, not a free public endpoint supplied by the PaddleOCR project
+or this repository. See the
+[official serving guide](https://github.com/PaddlePaddle/PaddleOCR/blob/main/deploy/paddleocr_vl_docker/hps/README_en.md).
 
 ### Hosted extraction to Markdown
 
@@ -127,6 +167,28 @@ Official vendor endpoints are enforced by default. A trusted self-hosted
 endpoint needs the separate programmatic `allow_custom_endpoint=true` opt-in,
 in addition to cloud consent, so an untrusted benchmark manifest cannot silently
 redirect API credentials.
+
+### Static web client and upload consent
+
+After deployment, GitHub Pages will host the static interface at
+[kayurachann.github.io/docreconstruct](https://kayurachann.github.io/docreconstruct/).
+It contains only HTML, CSS, and JavaScript; it cannot run the Python
+reconstruction pipeline, LibreOffice, Triton, vLLM, PaddleOCR, or olmOCR. No
+public backend or public GPU is bundled.
+
+The user must enter or select a backend operated by a party they trust. Before
+submission, the client discloses that the reviewed Markdown, original
+PDF/image, and optional JSON will be uploaded to that backend; enabling
+PaddleOCR-VL may cause the backend to forward the original to its configured
+OCR operator. Submission is blocked until the user accepts the disclosure, and
+consent must be renewed after changing the backend or OCR choice. The user
+should review the operator's retention, privacy, residency, quota, and pricing
+before continuing.
+
+Linked Markdown images are a separate outbound-network permission. The HTTP
+API keeps them disabled unless its operator sets
+`DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS=1`; clients cannot enable that server
+capability by themselves.
 
 An ensemble is explicit because it can upload the same document to more than
 one service and incur multiple charges:
