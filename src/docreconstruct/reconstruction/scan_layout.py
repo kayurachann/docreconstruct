@@ -1692,15 +1692,27 @@ def _rectify_photographed_page(image: Image.Image) -> tuple[Image.Image, dict[st
         (595.28, 841.89, "a4"),
         (612.0, 792.0, "letter"),
     ]
-    if observed_ratio < 0.64:
+    if min(observed_ratio, 1.0 / max(observed_ratio, 1e-6)) < 0.64:
         standards.append((612.0, 1008.0, "legal"))
+    # Every paper size exists in both orientations.  Offering only the portrait
+    # ones made the closest match portrait for any page, so a landscape sheet
+    # was mesh-stretched into a portrait canvas — the glyphs analyzed after that
+    # are geometrically distorted, and the emitted section was portrait for a
+    # document that is physically wider than it is tall.
+    oriented = [
+        (width, height, name if index == 0 else f"{name}-landscape")
+        for name_width, name_height, name in standards
+        for index, (width, height) in enumerate(
+            ((name_width, name_height), (name_height, name_width))
+        )
+    ]
     pdf_width, pdf_height, page_standard = min(
-        standards,
+        oriented,
         key=lambda item: abs(math.log(max(0.1, observed_ratio) / (item[0] / item[1]))),
     )
     target_ratio = pdf_width / pdf_height
     target_width = max(720, min(1800, round(span_source)))
-    target_height = max(960, round(target_width / target_ratio))
+    target_height = max(round(960 * min(1.0, target_ratio)), round(target_width / target_ratio))
     bands = max(12, min(48, round((bottom - top) / 12)))
     mesh: list[tuple[tuple[int, int, int, int], tuple[float, ...]]] = []
     mapping_bands: list[SourceToScanBand] = []
