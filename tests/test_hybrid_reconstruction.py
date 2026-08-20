@@ -10,6 +10,7 @@ import pytest
 from docx import Document as WordDocument
 from PIL import Image
 
+from docreconstruct.evaluation.hybrid_validation import validate_hybrid
 from docreconstruct.exceptions import UnsupportedInputError
 from docreconstruct.reconstruction import (
     finalize_hybrid_reconstruction,
@@ -28,6 +29,7 @@ from docreconstruct.reconstruction.asset_matching import (
 from docreconstruct.reconstruction.hybrid_docx import (
     _balanced_editable_column_streams,
     _dialogue_story_boundary,
+    _duplicate_figure_annotation_ids,
     _new_paragraph,
     _source_column_ink_capacities,
     _source_figure_bytes,
@@ -2005,6 +2007,65 @@ def test_scan_analysis_recovers_dense_lines_and_split_masthead(tmp_path: Path) -
     assert len(page.text_lines) >= 20
     assert len(page.line_bands) == len(page.text_lines)
     assert page.regions == []
+
+
+def _text_only_exam(tmp_path: Path) -> tuple[Path, Path]:
+    """A Vietnamese exam with no figure anywhere, as reviewed Markdown + scan."""
+
+    from PIL import ImageDraw
+
+    markdown = tmp_path / "exam.md"
+    markdown.write_text(
+        "Câu 5: Tính giá trị của biểu thức sau\n\n"
+        "A. 1\n\nB. 2\n\nC. 3\n\nD. 4\n\n"
+        "Hình 2\n\n"
+        "Câu 6: Cho hàm số y = f(x)\n\n"
+        "A. 5\n\nB. 6\n",
+        encoding="utf-8",
+    )
+    layout = tmp_path / "exam.png"
+    image = Image.new("RGB", (620, 877), "white")
+    draw = ImageDraw.Draw(image)
+    for index in range(9):
+        top = 60 + index * 60
+        draw.rectangle((55, top, 515 - (index % 3) * 40, top + 26), fill="black")
+    image.save(layout)
+    return markdown, layout
+
+
+def test_option_labels_survive_when_no_figure_is_rendered(tmp_path: Path) -> None:
+    """Reviewed Markdown must not be deleted on the promise of absent pixels.
+
+    The duplicate-annotation rule assumes a matched figure already carries the
+    label's pixels. A text-only exam matches the same shape — a short
+    unpunctuated line after the last option, before the next question — so the
+    text was deleted with no figure reproducing it, and the
+    `native_content_projection` gate, which still requires that text, failed.
+    """
+
+    pytest.importorskip("numpy")
+    markdown, layout = _text_only_exam(tmp_path)
+    content = parse_markdown_content(markdown)
+    annotation = next(block for block in content.blocks if block.text == "Hình 2")
+
+    # The shape still matches; only the missing figure withholds the deletion.
+    assert _duplicate_figure_annotation_ids(content.blocks, figures_rendered=True) == {
+        annotation.id
+    }
+    assert _duplicate_figure_annotation_ids(content.blocks, figures_rendered=False) == set()
+
+    output = tmp_path / "exam.docx"
+    reconstruct_hybrid(markdown, layout, output=output)
+    with zipfile.ZipFile(output) as package:
+        root = ElementTree.fromstring(package.read("word/document.xml"))
+    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    visible = "".join(node.text or "" for node in root.iter(f"{namespace}t"))
+
+    assert "Hình 2" in visible
+
+    report = validate_hybrid(markdown, layout, output)
+    projection = next(gate for gate in report.gates if gate.name == "native_content_projection")
+    assert projection.passed
 
 
 def test_structural_roles_and_masthead_rendering_remain_generic(tmp_path: Path) -> None:
