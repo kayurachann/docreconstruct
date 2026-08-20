@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from PIL import Image, ImageDraw
 
-from docreconstruct.exceptions import LayoutBudgetExceededError
+from docreconstruct.exceptions import LayoutBudgetExceededError, UnsupportedInputError
 from docreconstruct.reconstruction import scan_layout
 from docreconstruct.reconstruction.scan_layout import PixelBox, ScanPageLayout
 
@@ -387,3 +387,63 @@ def test_single_page_analysis_stays_on_calling_thread(
 
     assert [page.number for page in document.pages] == [1]
     assert observed_threads == [caller]
+
+
+def _pdf_with_truncated_inline_image(path: Path) -> None:
+    """Write a PDF whose content stream ends mid inline image.
+
+    pypdf rejects this; PyMuPDF reads it. That is exactly the split the
+    fallback exists for.
+    """
+
+    content = b"q 100 0 0 100 0 0 cm\nBI /W 4 /H 4 /BPC 8 /CS /G ID \x00\x01\x02\x03"
+    bodies = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+    ]
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for index, body in enumerate(bodies, start=1):
+        offsets.append(len(out))
+        out += f"{index} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(bodies) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += f"trailer\n<< /Size {len(bodies) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n".encode()
+    out += b"%%EOF\n"
+    path.write_bytes(bytes(out))
+
+
+def test_a_pdf_pypdf_rejects_still_reaches_the_pymupdf_fallback(tmp_path: Path) -> None:
+    """pypdf reports an unreadable file with its own error type.
+
+    That type was not in the fallback's catch list, so a document the renderer
+    parses perfectly well was rejected outright — and the API answered 500,
+    because a malformed upload reached the unhandled-exception branch.
+    """
+
+    pytest.importorskip("pymupdf")
+    path = tmp_path / "truncated-inline-image.pdf"
+    _pdf_with_truncated_inline_image(path)
+
+    # The fast path genuinely cannot read it.
+    with pytest.raises(ValueError, match="pypdf could not read"):
+        scan_layout._extract_with_pypdf(path)
+
+    # The document still reconstructs, through the fallback.
+    layout = scan_layout.analyze_scan_pdf(path, maximum_workers=1)
+    assert len(layout.pages) == 1
+    assert layout.pages[0].width > 0
+
+
+def test_a_pdf_neither_backend_can_read_is_unsupported_input(tmp_path: Path) -> None:
+    """An unreadable upload is a property of the input, not an internal error."""
+
+    path = tmp_path / "garbage.pdf"
+    path.write_bytes(b"%PDF-1.7\nthis is not a pdf at all\n%%EOF\n")
+
+    with pytest.raises(UnsupportedInputError, match="could not be read"):
+        scan_layout.analyze_scan_pdf(path, maximum_workers=1)

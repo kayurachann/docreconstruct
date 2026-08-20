@@ -26,7 +26,11 @@ from typing import Any
 from PIL import Image, ImageFilter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from docreconstruct.exceptions import LayoutBudgetExceededError, ProviderUnavailableError
+from docreconstruct.exceptions import (
+    LayoutBudgetExceededError,
+    ProviderUnavailableError,
+    UnsupportedInputError,
+)
 from docreconstruct.ir import BBox
 
 _DEFAULT_MAX_PAGE_WORKERS = 4
@@ -1993,10 +1997,23 @@ def _rectify_photographed_page(image: Image.Image) -> tuple[Image.Image, dict[st
 def _extract_with_pypdf(path: Path) -> list[tuple[Image.Image, float, float]]:
     try:
         from pypdf import PdfReader
+        from pypdf.errors import PyPdfError
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ProviderUnavailableError("pypdf is not installed") from exc
-    reader = PdfReader(str(path))
-    page_objects = list(reader.pages)
+    # The PyMuPDF fallback exists for documents this fast path cannot read, but
+    # pypdf reports those by raising its own error type, which the caller never
+    # caught.  A PDF pypdf merely dislikes was therefore rejected outright even
+    # though the renderer parses it, and reached the API's unhandled-exception
+    # branch as a 500.  Reporting it the way the caller already understands
+    # restores the fallback.
+    try:
+        return _pypdf_pages(PdfReader(str(path)).pages)
+    except PyPdfError as exc:
+        raise ValueError(f"pypdf could not read this PDF: {exc}") from exc
+
+
+def _pypdf_pages(pages_view: Any) -> list[tuple[Image.Image, float, float]]:
+    page_objects = list(pages_view)
     # Establish that every page qualifies before decoding any of them.  Taking
     # the length only walks the resource dictionary, while indexing decodes the
     # raster, so a document that fails on its last page used to decode every
@@ -2143,7 +2160,15 @@ def analyze_scan_pdf(
     try:
         extracted = _extract_with_pypdf(path)
     except (ProviderUnavailableError, ValueError, OSError):
-        extracted = _extract_with_pymupdf(path, dpi)
+        try:
+            extracted = _extract_with_pymupdf(path, dpi)
+        except (LayoutBudgetExceededError, ProviderUnavailableError):
+            raise
+        except Exception as exc:
+            # Neither backend could read the file.  That is a property of the
+            # upload, not a failure of this process, so it must not surface as
+            # an internal error.
+            raise UnsupportedInputError(f"layout PDF could not be read: {exc}") from exc
     work_items = [
         (index, image, pdf_width, pdf_height)
         for index, (image, pdf_width, pdf_height) in enumerate(extracted, start=1)
