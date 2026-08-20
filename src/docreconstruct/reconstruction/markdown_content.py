@@ -80,6 +80,7 @@ _NUMBERED_GROUP_PATTERN = re.compile(r"^(?P<label>\d{1,4}[.)])\s+")
 _SOLUTION_GROUP_PATTERN = re.compile(r"^(?P<label>[A-Z]\s*[-\u2012-\u2015]\s*\d+)\b")
 _DISPLAY_MATH_PATTERN = re.compile(r"^\$\$\s*(.*?)\s*\$\$$", flags=re.DOTALL)
 _THEMATIC_BREAK_PATTERN = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
+_LIST_ITEM_PATTERN = re.compile(r"^(?:[-*+]|\d{1,4}[.)])\s+\S")
 _OPTION_START = re.compile(r"(?<!\S)(?=[A-D][.)]\s+)")
 _SECTION_START_PATTERN = re.compile(
     r"^(?:phần|phan|part|section)\s+[\wIVXLCDM.-]+\s*[:.)]",
@@ -308,6 +309,7 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
     raw_lines = path.read_text(encoding="utf-8").splitlines()
     tokens: list[tuple[MarkdownBlockKind, str, dict[str, str | int]]] = []
     paragraph: list[str] = []
+    list_indent: int | None = None
     in_code = False
     code_lines: list[str] = []
 
@@ -353,6 +355,8 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             tokens.append((kind, option, dict(metadata or {})))
 
     def flush_paragraph() -> None:
+        nonlocal list_indent
+        list_indent = None
         if not paragraph:
             return
         value = " ".join(line.strip() for line in paragraph)
@@ -437,6 +441,19 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             tokens.append((MarkdownBlockKind.TABLE, "\n".join(table_lines), {}))
             index += 1
             continue
+        # A list marker starts its own block.  Without this every item fell
+        # through to the paragraph buffer, and `flush_paragraph` joined the
+        # whole list into one run-on block whose kind was decided by the first
+        # marker alone — four bullets became a single justified Word paragraph,
+        # and consecutive numbered items could not start their own groups.
+        indent = len(line) - len(line.lstrip())
+        if _LIST_ITEM_PATTERN.match(stripped):
+            flush_paragraph()
+            list_indent = indent
+        elif list_indent is not None and indent <= list_indent:
+            # Only a more-indented line continues the open item; anything at or
+            # left of the marker has left the list.
+            flush_paragraph()
         paragraph.append(stripped)
         index += 1
     flush_paragraph()

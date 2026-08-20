@@ -387,6 +387,62 @@ def test_markdown_parser_retains_solution_groups_lists_and_display_math(tmp_path
     assert content.blocks[4].group_id != content.blocks[1].group_id
 
 
+def test_consecutive_list_items_stay_separate_blocks(tmp_path: Path) -> None:
+    """Each marker starts its own block instead of one run-on paragraph.
+
+    Every list line used to fall through to the paragraph buffer, which joined
+    them with spaces, so a four-item list reached the renderer as one justified
+    Word paragraph classified by its first marker alone.
+    """
+
+    markdown = tmp_path / "lists.md"
+    markdown.write_text(
+        "- First item\n"
+        "- Second item\n"
+        "  wrapped onto another line\n"
+        "  - Nested item\n"
+        "- Third item\n"
+        "\n"
+        "1. Numbered one\n"
+        "2. Numbered two\n",
+        encoding="utf-8",
+    )
+
+    blocks = parse_markdown_content(markdown).blocks
+
+    assert [block.text for block in blocks] == [
+        "- First item",
+        "- Second item wrapped onto another line",
+        "- Nested item",
+        "- Third item",
+        "1. Numbered one",
+        "2. Numbered two",
+    ]
+    assert all(block.kind is MarkdownBlockKind.LIST_ITEM for block in blocks[:4])
+    # Consecutive numbered items each open their own group; merging them left
+    # only the first number visible to `_group_label`.
+    assert blocks[4].starts_group
+    assert blocks[5].starts_group
+    assert blocks[4].group_id != blocks[5].group_id
+
+
+def test_prose_around_a_list_is_not_absorbed_into_it(tmp_path: Path) -> None:
+    markdown = tmp_path / "mixed.md"
+    markdown.write_text(
+        "Intro prose.\n- Only item\nBack to prose.\n\n3.14159 stays prose.\n",
+        encoding="utf-8",
+    )
+
+    blocks = parse_markdown_content(markdown).blocks
+
+    assert [(block.kind, block.text) for block in blocks] == [
+        (MarkdownBlockKind.PARAGRAPH, "Intro prose."),
+        (MarkdownBlockKind.LIST_ITEM, "- Only item"),
+        (MarkdownBlockKind.PARAGRAPH, "Back to prose."),
+        (MarkdownBlockKind.PARAGRAPH, "3.14159 stays prose."),
+    ]
+
+
 def test_latex_math_becomes_editable_office_math() -> None:
     equation = build_omml(r"\int_{0}^{\infty}\frac{x^{2}}{\sqrt{y}}")
     payload = ElementTree.tostring(equation, encoding="unicode")
