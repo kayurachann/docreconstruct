@@ -1,0 +1,4 @@
+# Published benchmark hashes are calculated over LF-normalized repository bytes.
+benchmark/**/*.json text eol=lf
+benchmark/**/*.md text eol=lf
+benchmark/**/*.txt text eol=lf
