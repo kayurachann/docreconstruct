@@ -31,6 +31,7 @@ from docreconstruct.reconstruction.hybrid_docx import (
     _dialogue_story_boundary,
     _duplicate_figure_annotation_ids,
     _new_paragraph,
+    _render_image_table_pair,
     _source_column_ink_capacities,
     _source_figure_bytes,
     render_hybrid_docx,
@@ -2007,6 +2008,71 @@ def test_scan_analysis_recovers_dense_lines_and_split_masthead(tmp_path: Path) -
     assert len(page.text_lines) >= 20
     assert len(page.line_bands) == len(page.text_lines)
     assert page.regions == []
+
+
+def test_image_table_pair_keeps_the_other_visuals_in_its_group() -> None:
+    """A third figure in the group must still reach the document.
+
+    The surviving flow was rebuilt by excluding every block whose kind is an
+    image or a table, not just the two the pair renders, so any additional
+    figure or table was absent from the pair, from `pre` and from `post`, and
+    disappeared. No gate catches it: content projection skips image blocks, and
+    visual slot coverage is measured on the plan rather than the render.
+    """
+
+    page = ScanPageLayout(
+        number=1,
+        width=1000,
+        height=1400,
+        pdf_width=612,
+        pdf_height=792,
+        content_bbox=PixelBox(x0=50, y0=50, x1=950, y1=1350),
+        line_pitch=20.0,
+        image=Image.new("RGB", (1000, 1400), "white"),
+        metadata={"source_kind": "pdf"},
+    )
+    layout = ScanDocumentLayout(source="layout.pdf", pages=[page])
+    kinds = [MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE, MarkdownBlockKind.IMAGE]
+    blocks = [
+        MarkdownBlock(
+            id=f"md-{index + 1}",
+            index=index,
+            kind=kind,
+            text="",
+            table_rows=[["a", "b"], ["c", "d"]] if kind is MarkdownBlockKind.TABLE else [],
+        )
+        for index, kind in enumerate(kinds)
+    ]
+    # The first figure and the table sit side by side; the second figure is below.
+    boxes = {
+        "md-1": PixelBox(x0=60, y0=100, x1=480, y1=400),
+        "md-2": PixelBox(x0=520, y0=100, x1=940, y1=400),
+        "md-3": PixelBox(x0=60, y0=500, x1=480, y1=800),
+    }
+    placements = {
+        block.id: HybridBlockPlacement(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+            source_bbox=boxes[block.id],
+        )
+        for block in blocks
+    }
+
+    document = WordDocument()
+    rendered = _render_image_table_pair(
+        document,
+        blocks,
+        placements,
+        width=6.0,
+        size=11.0,
+        line_height=1.15,
+        asset_bytes={},
+        layout=layout,
+    )
+
+    assert rendered
+    assert document.element.xml.count("<pic:pic") == 2
 
 
 def _text_only_exam(tmp_path: Path) -> tuple[Path, Path]:

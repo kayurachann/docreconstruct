@@ -1429,16 +1429,13 @@ def _render_image_table_pair(
     if image_center >= midpoint or table_center <= midpoint:
         return False
     first_visual = min(blocks.index(image), blocks.index(table_block))
-    pre = [
-        block
-        for block in blocks[:first_visual]
-        if block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
-    ]
-    post = [
-        block
-        for block in blocks[first_visual:]
-        if block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
-    ]
+    # Exclude the two blocks this pair actually renders, not every visual in the
+    # group.  Filtering by kind dropped any third figure or table from `pre`,
+    # from `post`, and from the pair itself, so it reached neither
+    # `_render_linear` nor `_add_picture` and vanished from the document.
+    paired = {image.id, table_block.id}
+    pre = [block for block in blocks[:first_visual] if block.id not in paired]
+    post = [block for block in blocks[first_visual:] if block.id not in paired]
     _render_linear(
         parent,
         pre,
