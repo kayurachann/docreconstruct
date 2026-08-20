@@ -175,7 +175,11 @@ def test_expected_furniture_reuses_multilingual_weak_bbox_footer_partition(
         ],
     )
 
-    mastheads, footers = hybrid_validation._expected_layout_furniture(content, layout, plan)
+    mastheads, footers, _footer_ids = hybrid_validation._expected_layout_furniture(
+        content,
+        layout,
+        plan,
+    )
 
     assert mastheads == 0
     assert footers == [
@@ -1191,3 +1195,61 @@ def test_hybrid_cli_writes_docx_and_native_qa_report_in_one_command(tmp_path: Pa
     assert payload["passed"] is True
     assert payload["score"] == 1.0
     assert "QA gates: 100.00%" in result.output
+
+
+def test_a_relocated_footer_does_not_stop_body_order_from_being_checked(
+    tmp_path: Path,
+) -> None:
+    """One page-number footer must not disable ordered checking of the body.
+
+    Any expected furniture collapsed the whole comparison to a document-wide
+    token multiset, so a DOCX with every body paragraph reversed passed with
+    score 1.0 — while the gate's own evidence recorded two different ordered
+    digests. Footer relocation is the only permutation here and exactly which
+    blocks moved is known, so the body must still be compared in order.
+    """
+
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    markdown = tmp_path / "content.md"
+    markdown.write_text(
+        "Alpha paragraph one.\n\nBravo paragraph two.\n\n"
+        "Charlie paragraph three.\n\nDelta paragraph four.\n\n1 / 1\n",
+        encoding="utf-8",
+    )
+    image = Image.new("RGB", (620, 877), "white")
+    draw = ImageDraw.Draw(image)
+    for index in range(5):
+        top = 70 + index * 130
+        draw.rectangle((55, top, 500, top + 30), fill="black")
+    draw.rectangle((280, 820, 340, 845), fill="black")
+    layout = tmp_path / "layout.png"
+    image.save(layout)
+    healthy = tmp_path / "healthy.docx"
+    reconstruct_hybrid(markdown, layout, output=healthy)
+
+    report = validate_hybrid(markdown, layout, healthy)
+    assert report.metrics["expected_source_footers"] == ["1 / 1"]
+    assert report.metrics["expected_split_mastheads"] == 0
+    assert _gate(report, "native_content_projection").passed
+
+    # Reverse the body paragraphs, leaving the relocated footer alone.
+    reversed_path = tmp_path / "reversed.docx"
+    with zipfile.ZipFile(healthy) as package:
+        parts = {name: package.read(name) for name in package.namelist()}
+    root = ElementTree.fromstring(parts["word/document.xml"])
+    body = root.find(word + "body")
+    assert body is not None
+    paragraphs = [child for child in body if child.tag == word + "p"]
+    assert len(paragraphs) >= 4
+    for child in paragraphs:
+        body.remove(child)
+    for child in paragraphs:
+        body.insert(0, child)
+    parts["word/document.xml"] = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+    with zipfile.ZipFile(reversed_path, "w", zipfile.ZIP_DEFLATED) as package:
+        for name, data in parts.items():
+            package.writestr(name, data)
+
+    assert not _gate(
+        validate_hybrid(markdown, layout, reversed_path), "native_content_projection"
+    ).passed
