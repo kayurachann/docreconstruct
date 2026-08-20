@@ -1261,7 +1261,10 @@ def _align_source(
 ) -> list[_Candidate]:
     workspace = workspace or _MatchWorkspace.create()
     candidate_index = candidate_index or _TextCandidateIndex(blocks, units, workspace)
-    states: dict[int, _State] = {0: _State(total_score=0.0, match_count=0, node=None)}
+    initial = _State(total_score=0.0, match_count=0, node=None)
+    states: dict[int, _State] = {0: initial}
+    state_ends: list[int] = [0]
+    prefix_states: list[_State] = [initial]
     text_candidate_cache: dict[int, list[_Candidate]] = {}
     for block in blocks:
         candidates = _block_candidates(
@@ -1275,7 +1278,6 @@ def _align_source(
         )
         if not candidates:
             continue
-        state_ends, prefix_states = _prefix_states(states)
         next_states = dict(states)
         for candidate in candidates:
             index = bisect_right(state_ends, candidate.start) - 1
@@ -1290,7 +1292,7 @@ def _align_source(
             existing = next_states.get(candidate.end)
             if existing is None or _better_state(proposal, existing):
                 next_states[candidate.end] = proposal
-        states = _prune_states(next_states)
+        states, state_ends, prefix_states = _prune_states(next_states)
     best = max(states.values(), key=_state_key)
     result: list[_Candidate] = []
     node = best.node
@@ -2000,26 +2002,31 @@ def _span_style(units: Sequence[_Unit]) -> ElementStyle | None:
     return winner.style
 
 
-def _prefix_states(states: Mapping[int, _State]) -> tuple[list[int], list[_State]]:
+def _prune_states(
+    states: Mapping[int, _State],
+) -> tuple[dict[int, _State], list[int], list[_State]]:
+    """Keep the states that outrank every lower-ending state, and index them.
+
+    A state survives only by outranking every state that ends before it, so the
+    survivors have strictly increasing ranking keys.  The best state over any
+    prefix of the result is therefore the last survivor in that prefix, and the
+    returned lists are already the ``bisect``-searchable ends and their prefix
+    maxima — rescanning them would recompute a result this pass has proved.
+    Each state is also ranked once here rather than once per comparison.
+    """
+
+    result: dict[int, _State] = {}
     ends: list[int] = []
     prefix: list[_State] = []
-    best: _State | None = None
+    best_key: tuple[float, int, int] | None = None
     for end, state in sorted(states.items()):
-        if best is None or _better_state(state, best):
-            best = state
-        ends.append(end)
-        prefix.append(best)
-    return ends, prefix
-
-
-def _prune_states(states: Mapping[int, _State]) -> dict[int, _State]:
-    result: dict[int, _State] = {}
-    best: _State | None = None
-    for end, state in sorted(states.items()):
-        if best is None or _better_state(state, best):
+        key = _state_key(state)
+        if best_key is None or key > best_key:
             result[end] = state
-            best = state
-    return result
+            ends.append(end)
+            prefix.append(state)
+            best_key = key
+    return result, ends, prefix
 
 
 def _state_key(state: _State) -> tuple[float, int, int]:
