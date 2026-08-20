@@ -1541,7 +1541,7 @@ def _estimate_paper_color(image: Image.Image, ink: Any, frame: PixelBox) -> str:
     # including the ink and the area outside the frame that is discarded on the
     # next line; the sample values themselves are unchanged because uint8 is
     # represented exactly in float32.
-    pixels = np.asarray(image.convert("RGB"))[
+    pixels = np.asarray(image if image.mode == "RGB" else image.convert("RGB"))[
         frame.y0 : frame.y1,
         frame.x0 : frame.x1,
     ]
@@ -1549,8 +1549,16 @@ def _estimate_paper_color(image: Image.Image, ink: Any, frame: PixelBox) -> str:
     samples = pixels[non_ink].astype(np.float32, copy=False)
     if len(samples) < 64:
         return "FFFFFF"
-    luminance = samples[:, 0] * 0.299 + samples[:, 1] * 0.587 + samples[:, 2] * 0.114
-    chroma = samples.max(axis=1) - samples.min(axis=1)
+    red_channel = samples[:, 0]
+    green_channel = samples[:, 1]
+    blue_channel = samples[:, 2]
+    luminance = red_channel * 0.299 + green_channel * 0.587 + blue_channel * 0.114
+    # Reducing across axis 1 of an (N, 3) array gathers with a stride of three
+    # per output element.  Comparing the three channel views instead reads each
+    # one contiguously for the same result.
+    chroma = np.maximum(np.maximum(red_channel, green_channel), blue_channel) - np.minimum(
+        np.minimum(red_channel, green_channel), blue_channel
+    )
     # Reject deep page-edge shadows and saturated figures.  The median of the
     # remaining paper pixels preserves off-white/blue paper without embedding
     # the photographed page as a raster background.
