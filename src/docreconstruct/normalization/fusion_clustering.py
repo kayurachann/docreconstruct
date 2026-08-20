@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import math
 import unicodedata
+from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import total_ordering
 from statistics import median
 from typing import Any
 
@@ -208,7 +211,7 @@ def observation_sort_key(observation: FusionObservation) -> tuple[object, ...]:
         element.type.value,
         normalized_text(element.text or ""),
         element.id,
-        _canonical_json(element.model_dump(mode="json")),
+        DeferredKey(lambda: _canonical_json(element.model_dump(mode="json"))),
     )
 
 
@@ -407,7 +410,13 @@ def _pair_match_score(
     overlap = left.bbox.iou(right.bbox)
     if overlap < iou_threshold:
         return None
-    similarity = _text_similarity(left.text, right.text, left.type, right.type)
+    similarity = _text_similarity(
+        left.text,
+        right.text,
+        left.type,
+        right.type,
+        threshold=text_similarity_threshold,
+    )
     if similarity < text_similarity_threshold:
         return None
     return overlap * 0.6 + similarity * 0.4
@@ -426,6 +435,8 @@ def _text_similarity(
     right: str | None,
     left_type: ElementType,
     right_type: ElementType,
+    *,
+    threshold: float,
 ) -> float:
     if left is None and right is None:
         return 1.0
@@ -436,7 +447,19 @@ def _text_similarity(
     if normalized_left == normalized_right:
         return 1.0
     if max(len(normalized_left), len(normalized_right)) > _MAX_SEQUENCE_MATCHER_CHARS:
-        return 0.0
+        # `SequenceMatcher` is quadratic, so a long pair used to be rejected
+        # outright.  That made the decision length-driven rather than
+        # content-driven: two providers' transcriptions of the same full page
+        # fused at 2,000 characters and were emitted twice at 2,049.  A matching
+        # block is a sub-multiset of the shared characters, so
+        # `2 * |intersection| / (len + len)` bounds the ratio from above; the
+        # pair is only rejected when that bound cannot reach the threshold, and
+        # otherwise the real comparison is paid for.  `evidence_matching` guards
+        # its own quadratic comparison the same way.
+        overlap = sum((Counter(normalized_left) & Counter(normalized_right)).values())
+        upper_bound = 2.0 * overlap / (len(normalized_left) + len(normalized_right))
+        if upper_bound < threshold:
+            return 0.0
     forward = SequenceMatcher(None, normalized_left, normalized_right).ratio()
     reverse = SequenceMatcher(None, normalized_right, normalized_left).ratio()
     return min(forward, reverse)
@@ -463,6 +486,48 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+@total_ordering
+class DeferredKey:
+    """A sort-key component computed only once a comparison reaches it.
+
+    The complete canonical serialization of an element is the final tiebreak in
+    both fusion sort keys, and it is only consulted when two observations agree
+    on provider, source, reading order, geometry, type, text, and id.  Building
+    the key tuple eagerly serialized every element on every sort anyway, which
+    on a 600-element page was around 40% of the whole fusion.  Tuple comparison
+    stops at the first differing component, so wrapping the tiebreak defers the
+    work to the rare case that actually needs it without changing any ordering.
+    """
+
+    __slots__ = ("_build", "_value")
+
+    def __init__(self, build: Callable[[], str]) -> None:
+        self._build = build
+        self._value: str | None = None
+
+    @property
+    def value(self) -> str:
+        if self._value is None:
+            self._value = self._build()
+        return self._value
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DeferredKey):
+            return NotImplemented
+        return self.value == other.value
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, DeferredKey):
+            return NotImplemented
+        return self.value < other.value
+
+    def __hash__(self) -> int:
+        return hash(self.value)
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic only
+        return f"DeferredKey({self.value!r})"
+
+
 __all__ = [
     "FusionCluster",
     "FusionClusteringResult",
@@ -470,6 +535,7 @@ __all__ = [
     "FusionPageSource",
     "cluster_page_elements",
     "cluster_sort_key",
+    "DeferredKey",
     "logical_provider_set",
     "normalized_text",
     "observation_sort_key",
