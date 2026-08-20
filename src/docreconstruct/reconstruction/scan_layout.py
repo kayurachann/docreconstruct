@@ -65,9 +65,9 @@ def _reserved_page_workers(count: int) -> Iterator[int]:
 # workers and 1.19 s for four, so the figure below stays a little above the
 # observed cost; it is what the projected saving has to beat.
 _PAGE_POOL_STARTUP_SECONDS = 1.5
-# Autocorrelation score a periodic line rhythm must reach before it may
-# override the measured pitch.
-_MINIMUM_PERIODIC_SCORE = 0.30
+# How many times its own candidate pitch a measured text line may be before that
+# candidate stops being a believable split of it.
+_MAXIMUM_PERIODIC_SPLIT = 3.5
 # A compressed PDF says nothing about how much memory its pages decode to: a
 # 4.7 MiB, 20-page scan expands to roughly 500 MiB of RGB, so page count and
 # decoded pixels are the quantities that have to be bounded, not upload size.
@@ -592,6 +592,42 @@ def _merge_runs(runs: list[tuple[int, int]], gap: int) -> list[tuple[int, int]]:
     return merged
 
 
+def _splits_plausibly(text_lines: list[ScanTextLine], candidate_pitch: float) -> bool:
+    """Report whether a candidate rhythm could be the real pitch of these lines.
+
+    The measured line boxes may each hold two merged baselines, which is what
+    this override is for, but they cannot hold seven. Comparing the observed
+    line height against the candidate separates a genuine merge from an
+    autocorrelation peak that landed on stroke rhythm.
+    """
+
+    if candidate_pitch <= 0:
+        return False
+    heights = [line.bbox.y1 - line.bbox.y0 for line in text_lines]
+    if not heights:
+        return True
+    typical = float(_require_numpy().median(heights))
+    return typical <= candidate_pitch * _MAXIMUM_PERIODIC_SPLIT
+
+
+def _band_ceiling(bands: list[tuple[int, int]]) -> float:
+    """Return the tallest band height that can still be a single text line.
+
+    The bound used to be a fixed 45 pixels, which only describes body type
+    rasterized at roughly 150-200 DPI. Display type, or any page scanned
+    denser, produces taller bands and every one of them was discarded, leaving
+    no measured rhythm at all. What the filter is really for is rejecting a
+    band that merged several lines, so it is derived from the page's own bands:
+    a line that is more than twice the typical height is a merge. The 45-pixel
+    floor keeps ordinary body text behaving exactly as before.
+    """
+
+    heights = [band[1] - band[0] for band in bands if band[1] - band[0] >= 3]
+    if not heights:
+        return 45.0
+    return max(45.0, float(_require_numpy().median(heights)) * 2.2)
+
+
 def _dominant_gap(gaps: list[float]) -> float | None:
     """Return the repeated baseline gap, or ``None`` when there is not one.
 
@@ -629,7 +665,7 @@ def _estimate_line_pitch(ink: Any, content: PixelBox) -> tuple[float, list[tuple
     # then fell back to `content.height / 55` — a guess unrelated to the
     # document.  The window is kept as a preference so no page that already
     # lands inside it moves; the difference is what happens when nothing does.
-    useful = [band for band in bands if 3 <= band[1] - band[0] <= 45]
+    useful = [band for band in bands if 3 <= band[1] - band[0] <= _band_ceiling(bands)]
     centers = [(start + end) / 2 for start, end in useful]
     gaps = [right - left for left, right in zip(centers, centers[1:], strict=False)]
     plausible = [gap for gap in gaps if 16 <= gap <= 60]
@@ -1612,17 +1648,21 @@ def analyze_scan_page(
         line_bands = [(line.bbox.y0, line.bbox.y1) for line in text_lines]
     column_metadata = _detect_column_layout(ink, content, text_lines, line_pitch)
     periodic_pitch = column_metadata.get("periodic_line_pitch")
-    periodic_score = column_metadata.get("periodic_line_score")
-    # Rerunning line detection on the autocorrelation lag is only justified when
-    # that lag is a real rhythm.  A high-DPI page whose true pitch is far beyond
-    # the lag ceiling has no true peak inside the searched range, so the winner
-    # is whatever noise scores highest — 0.13 on one 600 DPI fixture, which was
-    # accepted and drove the page to a 12 px pitch and 338 lines where it has 21.
+    # This override exists to split bands that merged two baselines, so the
+    # candidate rhythm has to be a plausible fraction of the ink already
+    # measured.  Autocorrelation on display type peaks on glyph stroke rhythm
+    # instead: a page of 32 pt text whose line boxes are 83 px tall scored 0.35
+    # at a lag of 12 px, which no correlation threshold separates from a real
+    # 13 px newspaper rhythm under 29 px boxes.  The ratio does separate them —
+    # 6.9 against 2.2 — because a text line cannot be seven of its own pitches
+    # tall.
     if (
         isinstance(periodic_pitch, (int, float))
         and periodic_pitch >= 12
-        and isinstance(periodic_score, (int, float))
-        and periodic_score >= _MINIMUM_PERIODIC_SCORE
+        and _splits_plausibly(
+            text_lines,
+            float(periodic_pitch),
+        )
     ):
         periodic_value = float(periodic_pitch)
         # A dense masthead or display title can make the first global pass

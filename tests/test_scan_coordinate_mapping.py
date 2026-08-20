@@ -9,6 +9,7 @@ from docreconstruct.ir import BBox
 from docreconstruct.reconstruction.scan_layout import (
     PixelBox,
     ScanPageLayout,
+    ScanTextLine,
     SourceToScanBand,
     SourceToScanMap,
     analyze_scan_image,
@@ -288,7 +289,17 @@ def test_dominant_gap_needs_agreement_before_it_overrides_the_page_prior() -> No
 
 @pytest.mark.parametrize(
     ("dpi", "font_points", "leading_points"),
-    [(192, 12.0, 14.0), (192, 12.0, 28.0), (300, 12.0, 24.0), (400, 12.0, 14.0)],
+    [
+        (192, 12.0, 14.0),
+        (192, 12.0, 28.0),
+        (300, 12.0, 24.0),
+        (400, 12.0, 14.0),
+        # Display type: the ink band of one line is far taller than the fixed
+        # 45 px bound, so every band used to be discarded as a merge.
+        (200, 40.0, 50.0),
+        (200, 32.0, 40.0),
+        (150, 44.0, 56.0),
+    ],
 )
 def test_line_pitch_follows_the_page_not_the_pixel_window(
     dpi: int,
@@ -336,3 +347,53 @@ def test_line_pitch_follows_the_page_not_the_pixel_window(
     )
 
     assert page.line_pitch == pytest.approx(pitch, rel=0.05)
+
+
+def test_band_ceiling_follows_the_page_instead_of_a_fixed_pixel_bound() -> None:
+    """The band filter rejects merges, so its bound must scale with the type.
+
+    A fixed 45 px ceiling only describes body text at roughly 150-200 DPI.
+    Display type, or any denser scan, produces taller single-line bands and
+    every one of them was discarded, leaving no measured rhythm at all.
+    """
+
+    from docreconstruct.reconstruction.scan_layout import _band_ceiling
+
+    # Ordinary body text keeps the historical floor.
+    assert _band_ceiling([(0, 18), (30, 48), (60, 78)]) == 45.0
+    assert _band_ceiling([]) == 45.0
+    # Display type raises it in proportion to the page's own bands.
+    assert _band_ceiling([(0, 180), (250, 430), (500, 680)]) == pytest.approx(396.0)
+    # A band that merged several lines is still above the bound.
+    ceiling = _band_ceiling([(0, 20), (30, 50), (60, 80), (100, 190)])
+    assert ceiling < 90
+
+
+def test_a_periodic_rhythm_must_be_a_believable_split_of_the_measured_lines() -> None:
+    """Autocorrelation on display type peaks on stroke rhythm, not baselines.
+
+    The override exists to split line boxes that merged two baselines, and no
+    correlation threshold separates that from a spurious peak — a page of 32 pt
+    text scored 0.35 at a 12 px lag. The ratio does separate them: a text line
+    can be two of its own pitches tall, not seven.
+    """
+
+    from docreconstruct.reconstruction.scan_layout import _splits_plausibly
+
+    def lines(height: int) -> list[ScanTextLine]:
+        return [
+            ScanTextLine(
+                bbox=PixelBox(x0=0, y0=index * 40, x1=100, y1=index * 40 + height),
+                ink_density=0.3,
+            )
+            for index in range(5)
+        ]
+
+    # A newspaper rhythm of 13 px under 29 px boxes is a real merge.
+    assert _splits_plausibly(lines(29), 13.0)
+    # 83 px boxes cannot be built from a 12 px pitch.
+    assert not _splits_plausibly(lines(83), 12.0)
+    assert not _splits_plausibly(lines(86), 12.0)
+    # Degenerate inputs never crash and never veto silently.
+    assert _splits_plausibly([], 12.0)
+    assert not _splits_plausibly(lines(29), 0.0)
