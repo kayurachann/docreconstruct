@@ -36,6 +36,7 @@ from docreconstruct.providers import (
     get_registry,
     registry,
 )
+from docreconstruct.reconstruction.evidence_matching import _orthogonal_page_box
 
 
 def test_builtin_registry_and_custom_registry() -> None:
@@ -365,6 +366,55 @@ def test_native_pdf_preserves_embedded_image_bytes_when_pymupdf_is_available() -
     assert image.metadata["image"]["bytes"].startswith(b"\x89PNG")
     assert image.metadata["image"]["mime_type"] == "image/png"
     assert Document.model_validate_json(document.model_dump_json()) == document
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_native_pdf_page_frame_matches_its_span_coordinates(rotation: int) -> None:
+    """Page dimensions and element boxes must share one coordinate frame.
+
+    PyMuPDF's `page.rect` is already rotated but `get_text` reports every bbox
+    in the unrotated frame, and the IR pairs unrotated page dimensions with
+    `Page.rotation`. Reporting the rotated rect mixed the two, so on a quarter
+    turn every box was reflected about the wrong axis and the declared page
+    size was the transpose of the real one.
+    """
+
+    fitz = pytest.importorskip("pymupdf")
+    pdf = fitz.open()
+    pdf_page = pdf.new_page(width=200, height=400)
+    pdf_page.insert_text((20, 30), "Native text", fontsize=12)
+    if rotation:
+        pdf_page.set_rotation(rotation)
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    # PyMuPDF's own transform is the reference for display space.
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as reference:
+        reference_page = reference[0]
+        raw = next(
+            block["bbox"]
+            for block in reference_page.get_text("dict")["blocks"]
+            if block.get("type") == 0
+        )
+        mapped = fitz.Rect(raw) * reference_page.rotation_matrix
+        expected_box = (
+            min(mapped.x0, mapped.x1),
+            min(mapped.y0, mapped.y1),
+            max(mapped.x0, mapped.x1),
+            max(mapped.y0, mapped.y1),
+        )
+        expected_frame = (reference_page.rect.width, reference_page.rect.height)
+
+    page = NativePDFProvider().parse(pdf_bytes).document.pages[0]
+    element = next(item for item in page.elements if item.text)
+    projected = _orthogonal_page_box(page, element.bbox)
+
+    assert projected is not None
+    box, frame_width, frame_height = projected
+    assert (page.width, page.height) == (200.0, 400.0)
+    assert page.rotation == float(rotation)
+    assert (frame_width, frame_height) == pytest.approx(expected_frame)
+    assert (box.x0, box.y0, box.x1, box.y1) == pytest.approx(expected_box, abs=1e-3)
 
 
 @pytest.mark.parametrize("provider", [PaddleOCRProvider(), MinerUProvider(), OlmOCRProvider()])
