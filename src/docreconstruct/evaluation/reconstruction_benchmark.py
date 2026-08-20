@@ -83,7 +83,12 @@ _PATH_VALUE_KEYS = {
     "run_directory",
     "source",
 }
-_ABSOLUTE_PATH_IN_TEXT = re.compile(r"(?i)(?:[a-z]:[\\/][^\r\n;]+|(?<!https:)(?<!http:)/[^\r\n;]+)")
+_ABSOLUTE_PATH_IN_TEXT = re.compile(
+    r"(?i)(?:"
+    r"(?<![\w])[a-z]:[\\/][^\r\n;]+"
+    r"|(?<![\w/])/(?!/)[^\r\n;]+"
+    r")"
+)
 
 
 def run_hybrid_job(*args: Any, **kwargs: Any) -> HybridJobResult:

@@ -447,6 +447,11 @@ def test_report_redacts_paths_urls_snippets_and_failure_messages(tmp_path: Path)
             "snippet": "private OCR text",
             "download": "https://example.test/file?signature=secret",
             "local_note": str(tmp_path / "private.txt"),
+            "posix_note": "/srv/docreconstruct/private/input.pdf",
+            "media_type": (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ),
+            "pipeline_note": "OCR/parser fallback remains enabled",
         }
     )
     manifest.write_text(json.dumps(payload), encoding="utf-8")
@@ -462,3 +467,16 @@ def test_report_redacts_paths_urls_snippets_and_failure_messages(tmp_path: Path)
     assert "signature=secret" not in serialized
     assert "intentional reconstruction failure" not in serialized
     assert "message_sha256" in serialized
+
+    payload = json.loads(serialized)
+    metadata = next(
+        result["metadata"] for result in payload["results"] if result["case_id"] == "a-success"
+    )
+    assert metadata["download"] == "https://example.test/file"
+    assert metadata["local_note"] == "<local-path-redacted>"
+    assert metadata["posix_note"] == "<local-path-redacted>"
+    assert (
+        metadata["media_type"]
+        == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert metadata["pipeline_note"] == "OCR/parser fallback remains enabled"
