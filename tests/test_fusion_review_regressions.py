@@ -18,7 +18,12 @@ from docreconstruct.ir import (
     Provenance,
     Relationship,
 )
-from docreconstruct.normalization import fuse_documents, fuse_element_evidence, fuse_pages
+from docreconstruct.normalization import (
+    fuse_documents,
+    fuse_element_evidence,
+    fuse_pages,
+    fusion_clustering,
+)
 from docreconstruct.normalization.fusion_assignment import (
     maximum_cardinality_score_assignment,
     maximum_cardinality_score_sparse_assignment,
@@ -76,6 +81,42 @@ def _document(
 ) -> Document:
     element = _observation(engine, f"{engine}-1", text, box, kind=ElementType.PARAGRAPH)
     return Document(id=f"{engine}-document", pages=[_page(engine, [element])])
+
+
+def test_canonical_tiebreak_is_only_serialized_when_a_comparison_needs_it() -> None:
+    """The full-content tiebreak must stay deferred.
+
+    It is the last component of both fusion sort keys and is only consulted
+    when two observations agree on provider, source, reading order, geometry,
+    type, text, and id. Building it eagerly serialized every element on every
+    sort, which dominated fusion on a dense page.
+    """
+
+    builds = 0
+
+    def build() -> str:
+        nonlocal builds
+        builds += 1
+        return "payload"
+
+    key = fusion_clustering.DeferredKey(build)
+    assert builds == 0
+    assert key.value == "payload"
+    assert key.value == "payload"
+    assert builds == 1
+
+    # Ordering matches the string it defers.
+    low = fusion_clustering.DeferredKey(lambda: "a")
+    high = fusion_clustering.DeferredKey(lambda: "b")
+    assert low < high
+    assert high > low
+    assert low != high
+    assert (1, low) < (1, high)
+    # An earlier differing component short-circuits before the tiebreak is built.
+    exploding = fusion_clustering.DeferredKey(
+        lambda: pytest.fail("tiebreak must not be built")  # type: ignore[arg-type,return-value]
+    )
+    assert (0, exploding) < (1, exploding)
 
 
 def test_tied_sort_keys_use_complete_content_and_preserve_all_fields() -> None:
@@ -602,17 +643,52 @@ def test_cardinality_assignment_rejects_ragged_score_rows() -> None:
         maximum_cardinality_score_assignment([[float("nan")]])
 
 
-def test_oversized_different_text_is_safely_split_without_quadratic_match() -> None:
-    left = _page(
-        "a",
-        [_observation("a", "left", "x" * 3_000 + "a", (0, 0, 100, 20))],
-    )
-    right = _page(
-        "b",
-        [_observation("b", "right", "x" * 3_000 + "b", (0, 0, 100, 20))],
-    )
+def test_oversized_different_text_is_safely_split_without_quadratic_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long text that really differs is rejected without a quadratic compare.
+
+    The previous fixture used `"x" * 3000 + "a"` against `"x" * 3000 + "b"`,
+    which are 99.97% identical and should fuse; it passed only because any text
+    over the cap was rejected on length alone. Two genuinely different
+    transcriptions share almost no characters, so the cheap character-overlap
+    bound rejects the pair and `SequenceMatcher` is never reached.
+    """
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("oversized dissimilar text must not reach SequenceMatcher")
+
+    monkeypatch.setattr(fusion_clustering, "SequenceMatcher", forbidden)
+    left = _page("a", [_observation("a", "left", "a" * 3_000, (0, 0, 100, 20))])
+    right = _page("b", [_observation("b", "right", "b" * 3_000, (0, 0, 100, 20))])
 
     assert len(fuse_pages([left, right]).elements) == 2
+
+
+def test_two_transcriptions_of_one_long_page_still_fuse() -> None:
+    """The comparison must be driven by content, not by length.
+
+    Rejecting any text over 2,048 characters made the outcome a cliff: the same
+    two provider readings of one full page fused at 2,000 characters and were
+    emitted twice at 2,049, so a dense page lost all cross-provider
+    corroboration and duplicated its whole transcription.
+    """
+
+    base = " ".join(f"Section {index} carries ordinary prose." for index in range(140))
+    assert len(base) > 2_048
+    # An ordinary OCR confusion every few hundred characters.
+    variant = base.replace("carries", "carties").replace("Section 7 ", "Section 7  ")
+
+    left = _page("a", [_observation("olmocr", "left", base, (0, 0, 100, 20))])
+    right = _page("b", [_observation("mistral_ocr", "right", variant, (0, 0, 100, 20))])
+
+    (fused,) = fuse_pages([left, right]).elements
+
+    assert fused.provenance is not None
+    assert sorted(record.engine for record in fused.provenance.contributors) == [
+        "mistral_ocr",
+        "olmocr",
+    ]
 
 
 def test_all_permutations_of_ambiguous_assignment_are_stable() -> None:
