@@ -947,3 +947,22 @@ def test_upload_api_rejects_server_file_options(
 
     assert response.status_code == 422
     assert "not allowed by the upload API" in response.text or "Extra inputs" in response.text
+
+
+def test_a_layout_source_over_budget_answers_413_not_500() -> None:
+    """An upload that would decode past the ceiling is too large, not broken.
+
+    It passes the byte-size gate — a few megabytes of compressed scan expands to
+    hundreds of megabytes of RGB — so the refusal has to describe size.
+    """
+
+    from fastapi import HTTPException
+
+    from docreconstruct.api.app import _raise_pipeline_error
+    from docreconstruct.exceptions import LayoutBudgetExceededError
+
+    with pytest.raises(HTTPException) as raised:
+        _raise_pipeline_error(LayoutBudgetExceededError("layout PDF has 900 pages"))
+
+    assert raised.value.status_code == 413
+    assert "900 pages" in str(raised.value.detail)

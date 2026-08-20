@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 
 from docreconstruct.exceptions import (
     DocReconstructError,
+    LayoutBudgetExceededError,
     ProviderUnavailableError,
     RendererUnavailableError,
     UnsupportedInputError,
@@ -225,6 +226,11 @@ def _result_warnings(result: Any) -> list[str]:
 def _raise_pipeline_error(exc: Exception) -> None:
     if isinstance(exc, HTTPException):
         raise exc
+    if isinstance(exc, LayoutBudgetExceededError):
+        # The upload passed the byte-size gate but would decode to more pages or
+        # pixels than this process will hold, so it is too large in the sense
+        # 413 describes rather than malformed.
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     if isinstance(exc, (UnsupportedInputError, ValueError, KeyError, FileNotFoundError)):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if isinstance(exc, (ProviderUnavailableError, RendererUnavailableError)):
