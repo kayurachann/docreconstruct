@@ -135,7 +135,13 @@ def _document_paper_color(layout: ScanDocumentLayout) -> str:
 
 
 def _set_native_page_background(document: WordDocumentType, color: str) -> None:
-    """Set editable Word page colour; never insert a full-page scan image."""
+    """Set editable Word page colour; never insert a full-page scan image.
+
+    `w:background` alone is inert: Word and LibreOffice only paint it when
+    `w:displayBackgroundShape` is present in settings.xml, so the detected paper
+    colour was recorded in the package and then never shown. The flag is set
+    from the same early return as the colour, so the two cannot drift apart.
+    """
 
     if color.upper() == "FFFFFF":
         return
@@ -145,6 +151,12 @@ def _set_native_page_background(document: WordDocumentType, color: str) -> None:
         background = OxmlElement("w:background")
         root.insert(0, background)
     background.set(qn("w:color"), color.upper())
+    settings = document.settings.element
+    if settings.find(qn("w:displayBackgroundShape")) is None:
+        settings.insert_element_before(
+            OxmlElement("w:displayBackgroundShape"),
+            *_DISPLAY_BACKGROUND_SUCCESSORS,
+        )
 
 
 def _placement_geometry_points(
@@ -768,6 +780,37 @@ _TABLE_BORDER_SUCCESSORS = (
     "w:tblCaption",
     "w:tblDescription",
     "w:tblPrChange",
+)
+_DISPLAY_BACKGROUND_SUCCESSORS = (
+    "w:printPostScriptOverText",
+    "w:printFractionalCharacterWidth",
+    "w:printFormsData",
+    "w:embedTrueTypeFonts",
+    "w:embedSystemFonts",
+    "w:saveSubsetFonts",
+    "w:saveFormsData",
+    "w:mirrorMargins",
+    "w:alignBordersAndEdges",
+    "w:bordersDoNotSurroundHeader",
+    "w:bordersDoNotSurroundFooter",
+    "w:gutterAtTop",
+    "w:hideSpellingErrors",
+    "w:hideGrammaticalErrors",
+    "w:activeWritingStyle",
+    "w:proofState",
+    "w:formsDesign",
+    "w:attachedTemplate",
+    "w:linkStyles",
+    "w:defaultTabStop",
+    "w:characterSpacingControl",
+    "w:savePreviewPicture",
+    "w:compat",
+    "w:rsids",
+    "m:mathPr",
+    "w:themeFontLang",
+    "w:clrSchemeMapping",
+    "w:decimalSymbol",
+    "w:listSeparator",
 )
 
 

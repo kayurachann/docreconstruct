@@ -249,11 +249,18 @@ def test_tinted_paper_becomes_native_word_background_not_a_page_scan(tmp_path: P
     payload = render_hybrid_docx(content, scan, plan, [])
     with zipfile.ZipFile(io.BytesIO(payload)) as package:
         root = ElementTree.fromstring(package.read("word/document.xml"))
+        settings = ElementTree.fromstring(package.read("word/settings.xml"))
         assert not any(name.startswith("word/media/") for name in package.namelist())
     word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     background = root.find(f"{word}background")
     assert background is not None
     assert background.get(f"{word}color") == color
+    # `w:background` is inert on its own; Word only paints it when settings.xml
+    # enables background shapes, so the colour was recorded and never shown.
+    assert settings.find(f"{word}displayBackgroundShape") is not None
+    # settings.xml is an xsd:sequence, so the flag has to sit in the right place.
+    order = [child.tag.split("}")[-1] for child in settings]
+    assert order.index("displayBackgroundShape") < order.index("proofState")
 
 
 def test_saved_figure_with_wrong_aspect_recrops_authoritative_source_box(
