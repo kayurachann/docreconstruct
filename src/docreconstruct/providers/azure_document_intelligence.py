@@ -376,6 +376,8 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
             number: [] for number in pages_by_number
         }
         counters: dict[int, int] = {number: 0 for number in pages_by_number}
+        # One prepared word table per page, reused by every record on it.
+        word_cache: dict[int, tuple[tuple[int, int, float | None], ...]] = {}
 
         for record in paragraphs:
             page_number = _page_number_for_record(record, pages_by_number)
@@ -388,7 +390,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                 continue
             role = str(record.get("role") or "paragraph")
             kind = _paragraph_type(role)
-            score = _azure_confidence(record, page)
+            score = _azure_confidence(record, page, word_cache)
             bbox, polygon, fallback = _azure_geometry(record, page)
             matching_style = _matching_style(record, styles)
             metadata = {
@@ -429,7 +431,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                 bbox=bbox,
                 polygon=polygon,
                 text=None,
-                score=_azure_confidence(record, page),
+                score=_azure_confidence(record, page, word_cache),
                 order=_span_offset(record),
                 metadata={
                     "rows": rows,
@@ -458,7 +460,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                 bbox=bbox,
                 polygon=polygon,
                 text=text if isinstance(text, str) else None,
-                score=_azure_confidence(record, page),
+                score=_azure_confidence(record, page, word_cache),
                 order=_span_offset(record),
                 metadata={
                     "image_ref": str(record.get("id") or f"figure-{figure_index}"),
@@ -482,7 +484,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                     bbox=bbox,
                     polygon=polygon,
                     text=latex if isinstance(latex, str) else None,
-                    score=_azure_confidence(record, page),
+                    score=_azure_confidence(record, page, word_cache),
                     order=_span_offset(record),
                     metadata={
                         "latex": latex,
@@ -505,7 +507,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                     bbox=bbox,
                     polygon=polygon,
                     text="☒" if selected else "☐",
-                    score=_azure_confidence(record, page),
+                    score=_azure_confidence(record, page, word_cache),
                     order=_span_offset(record),
                     metadata={
                         "selected": selected,
@@ -531,7 +533,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                         bbox=bbox,
                         polygon=polygon,
                         text=text,
-                        score=_azure_confidence(record, page),
+                        score=_azure_confidence(record, page, word_cache),
                         order=_span_offset(record),
                         metadata={
                             "raw": safe_raw(record),
@@ -580,7 +582,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                     number=number,
                     width=width,
                     height=height,
-                    rotation=float(as_float(page.get("angle")) or 0.0),
+                    rotation=_page_quadrant(as_float(page.get("angle"))),
                     elements=elements,
                     source_type=SourceType.IMAGE,
                     metadata={
@@ -588,6 +590,7 @@ class AzureDocumentIntelligenceProvider(SavedJSONProvider):
                         "markdown": page_markdown,
                         "source_unit": page.get("unit"),
                         "coordinate_scale": scale,
+                        "content_skew_degrees": as_float(page.get("angle")),
                         "raw": safe_raw(page),
                     },
                 )
@@ -643,8 +646,38 @@ def _integer(value: Any) -> int | None:
         return None
 
 
+def _page_quadrant(angle: float | None, *, tolerance: float = 1.0) -> float:
+    """Reduce Document Intelligence's content skew to a page quadrant.
+
+    `Page.rotation` means one thing everywhere else in this project: an
+    orthogonal display-space quarter turn, which `_orthogonal_page_box` re-applies
+    to every box.  Azure's `pages[].angle` is the detected skew of the content
+    instead, and its polygons are already reported in the page frame.  Passing
+    that value straight through made a scan tilted by a fraction of a degree
+    non-orthogonal, so the projector returned `None` for every element and the
+    page contributed no evidence at all.  Only a near-exact quarter turn is kept;
+    the measured angle stays available in the page metadata.
+    """
+
+    if angle is None:
+        return 0.0
+    snapped = round(float(angle) / 90.0) * 90.0
+    if abs(float(angle) - snapped) > tolerance:
+        return 0.0
+    return float(snapped % 360.0)
+
+
 def _spans(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    # Document Intelligence reports most records with a plural `spans` list but
+    # emits a singular `span` object for formulas and selection marks — the same
+    # shape `_azure_confidence` already special-cases for words.  Reading only
+    # the plural key left those records with no offset at all, so they sorted
+    # behind every paragraph on the page and could not be confidence-scored
+    # against the words that actually overlap them.  `is None` rather than a
+    # falsy test keeps an explicit `spans: []` meaning "no spans".
     value = record.get("spans")
+    if value is None:
+        value = record.get("span")
     if isinstance(value, Mapping):
         return [value]
     return _mapping_list(value)
@@ -713,19 +746,50 @@ def _azure_geometry(
     return BBox(x0=0, y0=0, x1=width, y1=height), [], True
 
 
-def _azure_confidence(record: Mapping[str, Any], page: Mapping[str, Any]) -> float | None:
-    direct = confidence(record.get("confidence"))
-    if direct is not None:
-        return direct
-    record_spans = _spans(record)
-    values: list[float] = []
+def _span_bounds(span: Mapping[str, Any]) -> tuple[int, int]:
+    start = _integer(span.get("offset")) or 0
+    return start, start + (_integer(span.get("length")) or 0)
+
+
+def _prepare_word_confidences(page: Mapping[str, Any]) -> tuple[tuple[int, int, float | None], ...]:
+    """Reduce a page's words to the span bounds and score confidence needs."""
+
+    prepared: list[tuple[int, int, float | None]] = []
     for word in _mapping_list(page.get("words")):
         word_span = word.get("span")
         if not isinstance(word_span, Mapping):
             continue
-        if record_spans and not any(_span_intersects(span, word_span) for span in record_spans):
+        start, end = _span_bounds(word_span)
+        prepared.append((start, end, confidence(word.get("confidence"))))
+    return tuple(prepared)
+
+
+def _azure_confidence(
+    record: Mapping[str, Any],
+    page: Mapping[str, Any],
+    word_cache: dict[int, tuple[tuple[int, int, float | None], ...]],
+) -> float | None:
+    direct = confidence(record.get("confidence"))
+    if direct is not None:
+        return direct
+    # Every record without its own confidence is averaged over the page words it
+    # overlaps.  Re-deriving the word list, and re-reading four mapping keys per
+    # word, once per record made a dense page quadratic: 120 paragraphs over
+    # 1500 words rebuilt the list 120 times and ran 182,400 mapping-backed
+    # comparisons.  The page is reduced to integer span bounds once instead; the
+    # words are still visited in page order, so the average is unchanged.
+    prepared = word_cache.get(id(page))
+    if prepared is None:
+        prepared = _prepare_word_confidences(page)
+        word_cache[id(page)] = prepared
+    record_bounds = [_span_bounds(span) for span in _spans(record)]
+    values: list[float] = []
+    for start, end, value in prepared:
+        if record_bounds and not any(
+            max(record_start, start) < min(record_end, end)
+            for record_start, record_end in record_bounds
+        ):
             continue
-        value = confidence(word.get("confidence"))
         if value is not None:
             values.append(value)
     return sum(values) / len(values) if values else None

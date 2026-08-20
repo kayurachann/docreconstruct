@@ -18,6 +18,7 @@ from docreconstruct.providers import (
     RemoteInferenceDisabledError,
 )
 from docreconstruct.providers._hosted import load_hosted_source, safe_raw
+from docreconstruct.reconstruction.evidence_matching import _orthogonal_page_box
 
 
 def _mistral_payload() -> dict[str, Any]:
@@ -169,6 +170,64 @@ def test_mistral_saved_response_preserves_markdown_geometry_and_raw_provenance()
     assert omitted["omitted"] is True
     assert omitted["characters"] > 0
     assert "sha256" in omitted
+
+
+def test_azure_singular_span_records_keep_their_reading_position() -> None:
+    """Formulas and selection marks carry `span`, not `spans`.
+
+    Reading only the plural key left them with no content offset, so the
+    `default=10**12` sentinel sorted every one of them behind all the prose on
+    the page regardless of where they actually appear.
+    """
+
+    page = AzureDocumentIntelligenceProvider().parse(_azure_payload()).document.pages[0]
+
+    # Title is at offset 2, formula and table at 16, selection mark at 17.
+    assert [element.type for element in page.elements] == [
+        ElementType.TITLE,
+        ElementType.FORMULA,
+        ElementType.TABLE,
+        ElementType.CHECKBOX,
+    ]
+    assert [element.reading_order for element in page.elements] == [0, 1, 2, 3]
+
+
+@pytest.mark.parametrize(
+    ("angle", "expected"),
+    [
+        (None, 0.0),
+        (0.0, 0.0),
+        (0.4231, 0.0),
+        (-0.7, 0.0),
+        (89.6, 90.0),
+        (180.0, 180.0),
+        (-90.0, 270.0),
+    ],
+)
+def test_azure_content_skew_is_not_treated_as_a_page_quadrant(
+    angle: float | None,
+    expected: float,
+) -> None:
+    """`pages[].angle` is measured content skew, not a page rotation.
+
+    `Page.rotation` means an orthogonal quarter turn everywhere else, and
+    `_orthogonal_page_box` returns `None` for anything else — so a scan tilted
+    by a fraction of a degree projected no boxes at all and the page
+    contributed zero evidence.
+    """
+
+    payload = _azure_payload()
+    if angle is None:
+        payload["analyzeResult"]["pages"][0].pop("angle", None)
+    else:
+        payload["analyzeResult"]["pages"][0]["angle"] = angle
+
+    page = AzureDocumentIntelligenceProvider().parse(payload).document.pages[0]
+
+    assert page.rotation == expected
+    assert page.metadata["content_skew_degrees"] == angle
+    # Whatever the skew, the page must stay projectable.
+    assert _orthogonal_page_box(page, BBox(x0=1, y0=1, x1=2, y1=2)) is not None
 
 
 def test_azure_saved_response_maps_markdown_blocks_styles_and_inch_geometry() -> None:
