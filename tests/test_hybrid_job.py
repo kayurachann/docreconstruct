@@ -263,6 +263,7 @@ def test_hybrid_job_reuses_prepared_scan_and_evidence_for_native_qa(
     monkeypatch.setattr(validation_module, "parse_markdown_content", forbidden)
     monkeypatch.setattr(validation_module, "analyze_scan_source", forbidden)
     monkeypatch.setattr(validation_module, "match_sidecar_evidence", forbidden)
+    monkeypatch.setattr(validation_module, "_validation_plan", forbidden)
 
     result = run_hybrid_job(
         content,
@@ -277,6 +278,28 @@ def test_hybrid_job_reuses_prepared_scan_and_evidence_for_native_qa(
     assert result.phase_seconds["prepare.evidence_match"] >= 0
     assert result.phase_seconds["qa.native"] >= 0
     assert result.phase_seconds["job.total"] >= result.phase_seconds["qa.total"]
+    assert result.reconstruction.render_plan_sha256
+    assert result.reconstruction.render_input_sha256 == result.reconstruction.render_plan_sha256
+    assert (
+        result.validation.metrics["render_plan_sha256"] == result.reconstruction.render_plan_sha256
+    )
+    plan_gate = next(
+        gate for gate in result.validation.gates if gate.name == "render_plan_identity"
+    )
+    assert plan_gate.passed
+    artifact_gate = next(
+        gate for gate in result.validation.gates if gate.name == "render_input_artifact_identity"
+    )
+    assert artifact_gate.passed
+    assert (
+        result.validation.metrics["render_input_artifact_sha256"]
+        == result.reconstruction.render_input_sha256
+    )
+    with zipfile.ZipFile(result.reconstruction.output.path) as package:
+        core_xml = package.read("docProps/core.xml").decode("utf-8")
+    assert (
+        f"docreconstruct-render-input-sha256:{result.reconstruction.render_input_sha256}"
+    ) in core_xml
 
 
 def test_prepared_fast_path_rejects_source_mutation(tmp_path: Path) -> None:
@@ -296,3 +319,236 @@ def test_prepared_fast_path_rejects_source_mutation(tmp_path: Path) -> None:
             output=tmp_path / "must-not-exist.docx",
             _prepared_sources=prepared,
         )
+
+
+def test_prepared_render_plan_rejects_plan_mutation(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from docreconstruct.reconstruction.hybrid import (
+        prepare_hybrid_render_plan,
+        prepare_hybrid_sources,
+        reconstruct_hybrid,
+    )
+
+    content, layout = _sources(tmp_path)
+    prepared = prepare_hybrid_sources(content, layout)
+    prepared_render = prepare_hybrid_render_plan(
+        prepared,
+        allow_remote_assets=False,
+    )
+    changed_plan = prepared_render.plan.model_copy(
+        update={"warnings": [*prepared_render.plan.warnings, "mutated after fingerprint"]}
+    )
+
+    with pytest.raises(ValueError, match="changed after it was fingerprinted"):
+        reconstruct_hybrid(
+            content,
+            layout,
+            output=tmp_path / "must-not-exist.docx",
+            allow_remote_assets=False,
+            _prepared_sources=prepared,
+            _prepared_render_plan=replace(prepared_render, plan=changed_plan),
+        )
+
+
+def test_validation_rejects_candidate_with_tampered_render_input_digest(
+    tmp_path: Path,
+) -> None:
+    from docreconstruct.evaluation.hybrid_validation import validate_hybrid
+    from docreconstruct.reconstruction.hybrid import (
+        prepare_hybrid_render_plan,
+        prepare_hybrid_sources,
+        reconstruct_hybrid,
+    )
+
+    content, layout = _sources(tmp_path)
+    prepared = prepare_hybrid_sources(content, layout)
+    prepared_render = prepare_hybrid_render_plan(
+        prepared,
+        allow_remote_assets=False,
+    )
+    output = tmp_path / "tampered.docx"
+    reconstruction = reconstruct_hybrid(
+        content,
+        layout,
+        output=output,
+        allow_remote_assets=False,
+        _prepared_sources=prepared,
+        _prepared_render_plan=prepared_render,
+    )
+    replacement = "0" * 64
+    if replacement == reconstruction.render_input_sha256:
+        replacement = "1" * 64
+    rewritten = tmp_path / "rewritten.docx"
+    with (
+        zipfile.ZipFile(output) as source_package,
+        zipfile.ZipFile(
+            rewritten,
+            "w",
+        ) as destination_package,
+    ):
+        for info in source_package.infolist():
+            payload = source_package.read(info.filename)
+            if info.filename == "docProps/core.xml":
+                payload = payload.replace(
+                    prepared_render.sha256.encode("ascii"),
+                    replacement.encode("ascii"),
+                )
+            destination_package.writestr(info, payload)
+    rewritten.replace(output)
+
+    report = validate_hybrid(
+        content,
+        layout,
+        output,
+        _prepared_sources=prepared,
+        _prepared_render_plan=prepared_render,
+        _expected_render_plan_sha256=prepared_render.sha256,
+        _expected_candidate_sha256=reconstruction.output.sha256,
+    )
+
+    assert not report.passed
+    assert (
+        next(gate for gate in report.gates if gate.name == "render_input_artifact_identity").passed
+        is False
+    )
+    assert report.metrics["render_input_artifact_sha256"] == replacement
+    assert (
+        next(gate for gate in report.gates if gate.name == "candidate_artifact_identity").passed
+        is False
+    )
+
+
+def test_prepared_render_plan_snapshots_asset_bytes_before_render(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+    import io
+    from dataclasses import replace
+
+    import docreconstruct.reconstruction.asset_matching as asset_module
+    from docreconstruct.reconstruction.asset_matching import AssetMatch, ResolvedAsset
+    from docreconstruct.reconstruction.hybrid import (
+        prepare_hybrid_render_plan,
+        prepare_hybrid_sources,
+        reconstruct_hybrid,
+    )
+    from docreconstruct.reconstruction.scan_layout import PixelBox
+
+    content = tmp_path / "content.md"
+    content.write_text("![Editable figure](figure.png)\n", encoding="utf-8")
+    layout = tmp_path / "layout.png"
+    Image.new("RGB", (600, 849), "white").save(layout)
+    figure = tmp_path / "figure.png"
+    original_image = Image.new("RGB", (64, 48), "red")
+    original_image.save(figure)
+    original_bytes = figure.read_bytes()
+
+    prepared = prepare_hybrid_sources(content, layout)
+    image_block = prepared.markdown.image_blocks[0]
+    resolved = ResolvedAsset(
+        source="figure.png",
+        data=original_bytes,
+        media_type="image/png",
+        image=Image.open(io.BytesIO(original_bytes)).convert("RGB"),
+    )
+
+    def fake_match(
+        content_value: object,
+        layout_value: object,
+        *,
+        allow_remote: bool = True,
+        minimum_score: float = 0.42,
+        resolved_assets: dict[str, ResolvedAsset] | None = None,
+    ) -> list[AssetMatch]:
+        del content_value, layout_value, allow_remote, minimum_score
+        assert resolved_assets is not None
+        resolved_assets[image_block.id] = resolved
+        return [
+            AssetMatch(
+                block_id=image_block.id,
+                source="figure.png",
+                page_number=1,
+                bbox=PixelBox(x0=80, y0=120, x1=320, y1=300),
+                score=1.0,
+            )
+        ]
+
+    monkeypatch.setattr(asset_module, "match_markdown_assets", fake_match)
+    prepared_render = prepare_hybrid_render_plan(
+        prepared,
+        allow_remote_assets=False,
+    )
+    changed_buffer = io.BytesIO()
+    Image.new("RGB", (64, 48), "blue").save(changed_buffer, format="PNG")
+    changed_payload = replace(
+        prepared_render.asset_payloads[0],
+        data=changed_buffer.getvalue(),
+    )
+    with pytest.raises(ValueError, match="changed after it was fingerprinted"):
+        reconstruct_hybrid(
+            content,
+            layout,
+            output=tmp_path / "must-not-use-changed-asset.docx",
+            allow_remote_assets=False,
+            _prepared_sources=prepared,
+            _prepared_render_plan=replace(
+                prepared_render,
+                asset_payloads=(changed_payload,),
+            ),
+        )
+    Image.new("RGB", (64, 48), "blue").save(figure)
+
+    output = tmp_path / "snapshot.docx"
+    result = reconstruct_hybrid(
+        content,
+        layout,
+        output=output,
+        allow_remote_assets=False,
+        _prepared_sources=prepared,
+        _prepared_render_plan=prepared_render,
+    )
+
+    assert result.render_input_sha256 == prepared_render.sha256
+    assert prepared_render.asset_payloads[0].sha256 == hashlib.sha256(original_bytes).hexdigest()
+    with zipfile.ZipFile(output) as package:
+        embedded_images = [
+            package.read(name) for name in package.namelist() if name.startswith("word/media/")
+        ]
+    assert original_bytes in embedded_images
+    assert figure.read_bytes() not in embedded_images
+
+
+def test_prepared_render_plan_uses_snapshotted_page_pixels(
+    tmp_path: Path,
+) -> None:
+    from docreconstruct.reconstruction.hybrid import (
+        materialize_prepared_scan,
+        prepare_hybrid_render_plan,
+        prepare_hybrid_sources,
+        reconstruct_hybrid,
+    )
+
+    content, layout = _sources(tmp_path)
+    prepared = prepare_hybrid_sources(content, layout)
+    prepared_render = prepare_hybrid_render_plan(
+        prepared,
+        allow_remote_assets=False,
+    )
+    prepared.scan.pages[0].image.paste(
+        "black",
+        (0, 0, prepared.scan.pages[0].width, prepared.scan.pages[0].height),
+    )
+
+    snapshotted = materialize_prepared_scan(prepared_render)
+    assert snapshotted.pages[0].image.getpixel((0, 0)) == (255, 255, 255)
+    result = reconstruct_hybrid(
+        content,
+        layout,
+        output=tmp_path / "snapshotted-raster.docx",
+        allow_remote_assets=False,
+        _prepared_sources=prepared,
+        _prepared_render_plan=prepared_render,
+    )
+    assert Path(result.output.path).is_file()

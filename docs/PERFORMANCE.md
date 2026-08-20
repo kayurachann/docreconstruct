@@ -51,14 +51,159 @@ Use this for the interactive download path:
 5. Cache normalized provider evidence by source/configuration/model hash.
 
 The `/v1/hybrid` upload endpoint uses this profile by default with
-`"quality":"fast"`. It never starts LibreOffice.
+`"quality":"fast"`. It never starts LibreOffice. The resulting QA report
+measures OOXML structure, content projection, geometry, editability, evidence
+placement, and artifact identity. Its passed-gate fraction is conditional
+conformance, not a rendered-fidelity or visual-quality score.
 
 ### Verified response
 
 Use `"quality":"verified"` when an Office render is required before delivery.
 The server operator must configure `DOCRECONSTRUCT_LIBREOFFICE_PATH`. This mode
-adds conversion, rasterization, and visual comparison latency; it should be a
-background job for a high-traffic public service.
+adds conversion, rasterization, and visual comparison latency. Visual metric
+v2.1 combines tolerance-aware foreground F1, multi-radius edge alignment,
+region/page macro scores, and page-count/dimension penalties. Adaptive
+low-contrast and blank/missing-page negative controls stop white background
+from dominating the score.
+
+Every completed Office render must clear the built-in `0.05` v2.1 floor. This
+is only a guard against blank or nearly blank renderer failures. It is not a
+universal acceptance threshold, and `--min-visual-score` can raise but cannot
+lower it. Calibrate thresholds by document family, language, degradation, and
+renderer/font environment. Verified work is normally queued or run after the
+interactive download in a high-traffic public service.
+
+## Measured P0 reference runs
+
+The table below records one local development run on 2026-08-20. All three
+cases reused already-reviewed Markdown and saved positioned JSON, disabled
+remote assets, and used native QA; no OCR model, network upload, LibreOffice, or
+GPU was part of the timed pipeline. `Wall` includes CLI process startup and
+report writing. `Pipeline` is the instrumented hybrid job. These observations
+are regression references, not an SLA or a promise that every document will
+finish within the same time.
+
+| Case | Pages | Wall | Pipeline | Scan analysis | Evidence | DOCX | Native QA | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Physics exam 0204 | 1 | 1.881 s | 1.234 s | 0.885 s | 0.113 s | 0.088 s | 0.033 s | 36/36 gates; 51/51 geometry placements |
+| Dan-Ba newspaper | 1 | 1.759 s | 1.177 s | 0.519 s | 0.456 s | 0.051 s | 0.059 s | 36/36 gates; 29/29 geometry placements |
+| ZOOM exam | 4 | 5.749 s | 5.114 s | 3.604 s | 0.341 s | 0.337 s | 0.164 s | 36/36 gates; 146/146 geometry placements |
+
+The same final tree was then checked with explicit LibreOffice rendering. The
+numbers below include a cold isolated Office process and visual v2.1; they are
+the slower verification lane, not the interactive fast-path target.
+
+| Case | Wall | Pipeline | Office render | Visual QA | Result | v2.1 score |
+| --- | ---: | ---: | ---: | ---: | --- | ---: |
+| Physics exam 0204 | 12.076 s | 11.398 s | 9.561 s | 0.642 s | 40/40 gates; 1/1 page | 0.5685 |
+| Dan-Ba newspaper | 7.763 s | 7.140 s | 5.590 s | 0.355 s | 41/41 gates; 1/1 page | 0.4760 |
+| ZOOM exam | 18.792 s | 18.111 s | 8.805 s | 4.301 s | 40/40 gates; 4/4 pages | 0.3168 |
+
+The same development session also compared the indexed evidence matcher with
+its exhaustive implementation while holding thresholds and output ordering
+constant. Every case produced an identical ordered match payload. The indexed
+path uses exact normalized spans and monotonic anchors; when it has fewer than
+two anchors or cannot prove completeness, it deliberately falls back to the
+exhaustive scan.
+
+| Case | Exhaustive | Indexed | Speed-up | Accepted matches |
+| --- | ---: | ---: | ---: | ---: |
+| Physics exam 0204 | 0.1968 s | 0.0981 s | 2.0x | 15 |
+| Dan-Ba newspaper | 2.9235 s | 0.4874 s | 6.0x | 23 |
+| ZOOM exam | 5.5399 s | 0.3627 s | 15.3x | 73 |
+
+End-to-end time is not the matcher time alone. In the four-page example, scan
+analysis remains the largest measured phase. OCR/upload latency, a cold model,
+LibreOffice conversion, more pages, larger images, and an unavailable cache can
+all dominate these local numbers.
+
+## Reproducible reconstruction benchmark
+
+`benchmark-reconstruction` evaluates the production three-authority path. A
+case must include the original PDF/image, reviewed Markdown, and one or more
+positioned JSON sidecars. The runner generates a fresh DOCX and QA report for
+every case; a manifest cannot supply a prebuilt candidate. Paths are resolved
+relative to the manifest.
+
+```json
+{
+  "schema_version": "0.1",
+  "seed": 0,
+  "cases": [
+    {
+      "id": "physics-exam-0204",
+      "original_layout": "cases/physics/source.png",
+      "reviewed_markdown": "cases/physics/reviewed.md",
+      "evidence": [
+        {"path": "cases/physics/paddleocr.json", "provider": "paddleocr"}
+      ],
+      "tags": {
+        "language": "vi",
+        "script": "Latin",
+        "document_type": "exam",
+        "degradation": "photographed",
+        "content_kind": ["text", "formula", "multiple-choice"]
+      }
+    }
+  ]
+}
+```
+
+Run the quick structural benchmark first:
+
+```bash
+docreconstruct benchmark-reconstruction benchmark/reconstruction-benchmark.json \
+  --qa-backend native \
+  --output-dir benchmark/runs/native \
+  --output benchmark/native-report.json
+```
+
+Native mode records fresh-candidate hashes, the complete render-input digest,
+per-phase timing, operational success, validation-gate conformance, acceptance,
+failures, and tag slices. It intentionally reports `quality_score: null` and
+`quality_complete: false`, because native gates do not observe the rendered
+pages.
+
+Use explicit rendered QA for comparable visual fidelity:
+
+```bash
+docreconstruct benchmark-reconstruction benchmark/reconstruction-benchmark.json \
+  --qa-backend libreoffice \
+  --save-render-artifacts \
+  --output-dir benchmark/runs/rendered \
+  --output benchmark/rendered-report.json
+```
+
+A successful rendered case receives a quality profile such as
+`rendered_visual|backend=libreoffice|metric=2.1`. The report publishes a mean
+quality score only when every case has complete quality under one comparable
+profile. A failed rendered case contributes zero rather than disappearing from
+the mean. Native validation-gate conformance remains a separate field and is
+never relabeled as fidelity; operational success is reported independently.
+For a complete job, QA also requires the candidate SHA-256 to equal the bytes
+just written by reconstruction and to remain unchanged throughout validation.
+The digest embedded in DOCX core properties is checked through the package's
+standard core-properties relationship; duplicate package parts or identifiers
+are rejected.
+The current manifest contract is version `0.1`; the generated report schema is
+version `0.2`. Remote Markdown assets remain disabled unless both a case asks
+for them and the operator supplies `--allow-remote-assets`. The manifest
+contract is
+[`schemas/reconstruction-benchmark.schema.json`](../schemas/reconstruction-benchmark.schema.json).
+
+## One prepared plan for rendering and QA
+
+One hybrid job analyzes and fingerprints its authorities once, then prepares
+asset/table matches and the layout plan once. Both DOCX generation and QA use
+that exact prepared object. QA rejects a mutated plan or a candidate whose
+embedded identifier does not match the expected render input.
+
+The canonical SHA-256 digest covers the original content/layout/evidence file
+hashes, normalized Markdown and scan-model hashes, layout plan, asset and table
+matches, remote-asset policy, and the media type, size, and SHA-256 of every
+snapshotted asset byte sequence. The renderer writes it to the DOCX core
+`identifier` property. This is reproducibility and plan-drift evidence, not a
+semantic-correctness certificate.
 
 ## PaddleOCR deployment choices
 

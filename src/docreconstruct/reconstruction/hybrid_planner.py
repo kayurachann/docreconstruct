@@ -7,7 +7,9 @@ import re
 import statistics
 from collections.abc import Sequence
 from functools import cache
+from typing import Any
 
+from PIL import ImageFilter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from docreconstruct.ir import ElementStyle
@@ -23,6 +25,7 @@ from docreconstruct.reconstruction.scan_layout import (
     PixelBox,
     ScanDocumentLayout,
     ScanPageLayout,
+    ScanTextLine,
 )
 from docreconstruct.reconstruction.table_matching import TableMatch
 
@@ -512,6 +515,74 @@ def build_page_vertical_fit_budget(
         native_leading_scale = max(0.0, 1.0 - overflow / native_allowance)
         estimate -= native_allowance * (1.0 - native_leading_scale)
 
+    option_placements = [
+        placement
+        for placement in ordered
+        if (block := block_by_id.get(placement.block_id)) is not None
+        and block.kind is MarkdownBlockKind.OPTION
+    ]
+    editable_placements = [
+        placement
+        for placement in ordered
+        if (block := block_by_id.get(placement.block_id)) is None
+        or block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+    ]
+    source_owned_option_sheet = (
+        geometry_coverage >= 0.98
+        and len(option_placements) >= 8
+        and native_line_count >= 32
+        and len(option_placements) / max(1, len(editable_placements)) >= 0.5
+        and all(
+            placement.source_bbox is not None and placement.source_rows
+            for placement in option_placements
+        )
+        and sum(
+            placement.geometry_source == "scan_inferred_group_option"
+            for placement in option_placements
+        )
+        / len(option_placements)
+        >= 0.75
+    )
+    option_container_line_scale = 1.0
+    if (
+        source_owned_option_sheet
+        and native_leading_scale < 1.0
+        and native_allowance > 0
+        and fixed_ink + leading_gap <= target + 1e-6
+    ):
+        # Dense answer sheets render each physical option row through a native
+        # borderless table.  The source-sized table row already owns the
+        # container/pagination floor; retaining an additional Markdown line
+        # allowance for every A-D paragraph double-counts that height in
+        # Word/LibreOffice.  Once normal gap compression has proved the page
+        # is dense, use the measured scan glyph box as its line-height floor.
+        estimate -= native_allowance * native_leading_scale
+        native_leading_scale = 0.0
+        # Word-compatible renderers keep a question prompt with its following
+        # borderless option table near a page boundary.  Reserve the prompt
+        # plus the tallest observed option grid, then amortize that atomic
+        # container over the mapped native rows.  This adjusts line boxes only;
+        # editable font sizes remain unchanged.
+        rows_by_group: dict[str, set[tuple[int, int]]] = {}
+        for placement in option_placements:
+            block = block_by_id[placement.block_id]
+            group_id = block.group_id or placement.block_id
+            box = placement.source_bbox
+            if box is not None:
+                rows_by_group.setdefault(group_id, set()).add((box.y0, box.y1))
+        tallest_option_grid = max(
+            (len(rows) for rows in rows_by_group.values()),
+            default=1,
+        )
+        pagination_reserve_rows = float(1 + min(4, tallest_option_grid))
+        option_container_line_scale = native_line_count / (
+            native_line_count + pagination_reserve_rows
+        )
+        estimate = max(
+            0.0,
+            estimate - source_glyph_height * pagination_reserve_rows,
+        )
+
     font_size_scale = 1.0
     if estimate > target + 1e-6 and source_glyph_height < font_size_points:
         # The scan's ordinary glyph ink is the only permitted font-size floor.
@@ -527,7 +598,7 @@ def build_page_vertical_fit_budget(
             nominal_line_height - source_glyph_height,
         )
         * native_leading_scale
-    )
+    ) * option_container_line_scale
     line_height_scale = min(1.0, calibrated_line_height / nominal_line_height)
     return VerticalFitBudget(
         calibrated=True,
@@ -1024,6 +1095,211 @@ def _merge_segments_to_columns(
     return merged
 
 
+def _option_region_ink(page: ScanPageLayout) -> Any:
+    """Recreate the analyzer's illumination-normalized ink mask once per page.
+
+    Global scan rows deliberately favor stable page-wide rhythm.  A dense exam
+    page can therefore merge two compact answer baselines when a large heading
+    inflated the global pitch.  Recomputing only the binary mask here is cheap;
+    the coarse provider rectangle still owns the region and no text is read.
+    """
+
+    from docreconstruct.reconstruction.scan_layout import _require_numpy
+
+    np = _require_numpy()
+    gray = page.image.convert("L")
+    grayscale = np.asarray(gray)
+    radius = max(7.0, min(page.image.size) / 42.0)
+    background = np.asarray(gray.filter(ImageFilter.GaussianBlur(radius=radius)))
+    return (grayscale.astype(int) + 17 < background.astype(int)) | (grayscale < 72)
+
+
+def _localized_option_rows(
+    page: ScanPageLayout,
+    region: PixelBox,
+    ink: Any | None,
+) -> list[ScanTextLine]:
+    """Return compact baselines whose left rail is protected from side notes.
+
+    Answer labels normally start in the leading half of a question rectangle,
+    even when a two-column row continues on its right.  Detecting baselines in
+    that rail prevents handwritten working beside a vertical A--D list from
+    masquerading as a second answer column.  Synthetic/no-raster callers retain
+    the supplied scan-line fallback.
+    """
+
+    localized: list[ScanTextLine] = []
+    if ink is not None:
+        from docreconstruct.reconstruction.scan_layout import _detect_text_lines
+
+        rail = PixelBox(
+            x0=region.x0,
+            y0=region.y0,
+            x1=max(region.x0 + 1, min(region.x1, round(region.x0 + region.width * 0.52))),
+            y1=region.y1,
+        )
+        local_pitch = max(18.0, min(26.0, page.line_pitch * 0.62))
+        localized, _refined_pitch = _detect_text_lines(ink, rail, local_pitch)
+        # Provider rectangles often stop a few pixels inside the following
+        # baseline.  The region crop then turns that neighboring text into a
+        # very short terminal "row".  It cannot carry reliable option
+        # geometry and, because option grids are selected from the trailing
+        # rows, would otherwise displace the real A--D row immediately above.
+        minimum_edge_height = max(4.0, local_pitch * 0.32)
+        localized = [
+            line
+            for line in localized
+            if not (
+                (line.bbox.y0 <= region.y0 + 1 or line.bbox.y1 >= region.y1 - 1)
+                and line.bbox.height < minimum_edge_height
+            )
+        ]
+    if localized:
+        return localized
+    return [
+        line
+        for line in page.text_lines
+        if region.y0 <= (line.bbox.y0 + line.bbox.y1) / 2 <= region.y1
+    ]
+
+
+def _expand_option_rows(
+    rows: Sequence[ScanTextLine],
+    region: PixelBox,
+    page: ScanPageLayout,
+    ink: Any | None,
+) -> list[tuple[PixelBox, list[PixelBox]]]:
+    """Expand left-rail baselines to full-width row fragments.
+
+    Midpoint boundaries keep neighboring glyph bands disjoint.  Returning the
+    complete row box separately from its fragments lets every sibling on a
+    horizontal answer row share one vertical-fit row while retaining its own
+    source slot.
+    """
+
+    if not rows:
+        return []
+    ordered = sorted(rows, key=lambda line: (line.bbox.y0, line.bbox.x0))
+    centers = [(line.bbox.y0 + line.bbox.y1) / 2.0 for line in ordered]
+    expanded: list[tuple[PixelBox, list[PixelBox]]] = []
+    if ink is not None and not bool(ink[region.y0 : region.y1, region.x0 : region.x1].any()):
+        ink = None
+    if ink is None:
+        for line in ordered:
+            segments = [
+                segment
+                for segment in (line.segments or [line.bbox])
+                if segment.width >= max(3, page.line_pitch * 0.20)
+            ]
+            if segments:
+                expanded.append((line.bbox, segments))
+        return expanded
+
+    from docreconstruct.reconstruction.scan_layout import _merge_runs, _require_numpy, _runs
+
+    np = _require_numpy()
+    for index, center in enumerate(centers):
+        top = region.y0 if index == 0 else round((centers[index - 1] + center) / 2.0)
+        bottom = (
+            region.y1 if index + 1 == len(centers) else round((center + centers[index + 1]) / 2.0)
+        )
+        if bottom <= top:
+            continue
+        band = ink[top:bottom, region.x0 : region.x1]
+        column_counts = np.count_nonzero(band, axis=0)
+        threshold = max(1, round((bottom - top) * 0.055))
+        raw_runs = _merge_runs(
+            _runs(column_counts >= threshold),
+            gap=max(3, round(region.width * 0.008)),
+        )
+        segments = [
+            PixelBox(x0=region.x0 + start, y0=top, x1=region.x0 + end, y1=bottom)
+            for start, end in raw_runs
+            if end - start >= 3
+        ]
+        if not segments:
+            continue
+        row = PixelBox(
+            x0=min(segment.x0 for segment in segments),
+            y0=top,
+            x1=max(segment.x1 for segment in segments),
+            y1=bottom,
+        )
+        expanded.append((row, segments))
+    return expanded
+
+
+def _option_grid_slots(
+    rows: Sequence[tuple[PixelBox, list[PixelBox]]],
+    option_count: int,
+    page: ScanPageLayout,
+    region: PixelBox,
+) -> tuple[list[PixelBox], list[PixelBox]] | None:
+    """Choose the strongest physical A--D topology and return row-major slots.
+
+    Four-across and two-column candidates must be demonstrated by substantial,
+    separated ink in every trailing row.  A one-column list is the conservative
+    fallback.  This makes right-margin handwriting insufficient evidence for a
+    grid while preserving genuine 1x4 and 2x2 answer arrangements.
+    """
+
+    if option_count < 1:
+        return None
+    choices = [columns for columns in (4, 2, 1) if option_count % columns == 0]
+    for columns in choices:
+        rows_needed = option_count // columns
+        if len(rows) <= rows_needed:
+            continue
+        selected = list(rows[-rows_needed:])
+        slot_rows: list[list[PixelBox]] = []
+        valid = True
+        for _row, fragments in selected:
+            merged = _merge_segments_to_columns(fragments, columns)
+            if len(merged) != columns:
+                valid = False
+                break
+            if columns > 1:
+                # Short numeric choices can legitimately occupy only a small
+                # fraction of a wide provider envelope.  The pitch floor plus
+                # a 5.5% envelope share still rejects isolated handwriting
+                # strokes while retaining compact one-line A--D grids.
+                minimum_width = max(page.line_pitch * 1.10, region.width * 0.055)
+                minimum_gutter = max(page.line_pitch * 0.45, region.width * 0.04)
+                if (
+                    min(slot.width for slot in merged) < minimum_width
+                    or min(
+                        right.x0 - left.x1 for left, right in zip(merged, merged[1:], strict=False)
+                    )
+                    < minimum_gutter
+                ):
+                    valid = False
+                    break
+            slot_rows.append(merged)
+        if not valid:
+            continue
+        if columns > 1 and len(slot_rows) > 1:
+            for column in range(columns):
+                starts = [row[column].x0 for row in slot_rows]
+                if max(starts) - min(starts) > region.width * 0.14:
+                    valid = False
+                    break
+        if not valid:
+            continue
+        physical_rows = [
+            PixelBox(
+                x0=min(slot.x0 for slot in slots),
+                y0=source_row.y0,
+                x1=max(slot.x1 for slot in slots),
+                y1=source_row.y1,
+            )
+            for (source_row, _fragments), slots in zip(selected, slot_rows, strict=True)
+        ]
+        slots = [slot for row in slot_rows for slot in row]
+        if len(slots) == option_count:
+            return slots, physical_rows
+    return None
+
+
 def _assign_group_option_geometry(
     blocks: list[MarkdownBlock],
     placements: list[HybridBlockPlacement],
@@ -1054,6 +1330,7 @@ def _assign_group_option_geometry(
         if block.group_id:
             groups.setdefault(block.group_id, []).append(block)
 
+    ink = _option_region_ink(page) if groups else None
     assigned: dict[str, HybridBlockPlacement] = {}
     for group_blocks in groups.values():
         options = [block for block in group_blocks if block.kind is MarkdownBlockKind.OPTION]
@@ -1082,89 +1359,71 @@ def _assign_group_option_geometry(
         ):
             continue
 
-        # The provider owner rectangle can contain the prompt and its complete
-        # answer grid even when row snapping retained only the prompt rows.
-        # Inspect every scan line centered inside that authoritative envelope;
-        # restricting candidates to ``source_rows`` makes the child options
-        # impossible to recover. Visual anchors remain hard exclusions below.
-        source_lines = [
-            line
-            for line in page.text_lines
-            if owner_placement.source_bbox.y0
-            <= (line.bbox.y0 + line.bbox.y1) / 2
-            <= owner_placement.source_bbox.y1
-            and not _line_is_excluded(line.bbox, visual_anchors)
-        ]
-        preferred_columns = _option_column_count(options)
-        column_choices = list(
-            dict.fromkeys(
-                [
-                    preferred_columns,
-                    *(columns for columns in (4, 2, 1) if len(options) % columns == 0),
-                ]
-            )
+        # Prefer the analyzer's stable page-wide baselines when they already
+        # demonstrate a complete, well-separated option grid.  Besides being
+        # cheaper, these exact source rows remain consistent with QA geometry.
+        # Dense pages whose global pitch merged compact answers fail the grid
+        # checks and fall through to localized left-rail detection below.
+        global_rows: list[tuple[PixelBox, list[PixelBox]]] = []
+        for line in page.text_lines:
+            center = (line.bbox.y0 + line.bbox.y1) / 2.0
+            if not (
+                owner_placement.source_bbox.y0 <= center <= owner_placement.source_bbox.y1
+            ) or _line_is_excluded(line.bbox, visual_anchors):
+                continue
+            fragments = [
+                segment
+                for segment in (line.segments or [line.bbox])
+                if segment.width >= max(3, page.line_pitch * 0.20)
+            ]
+            if fragments:
+                global_rows.append((line.bbox, fragments))
+        candidate_rows = global_rows
+        grid = _option_grid_slots(
+            candidate_rows,
+            len(options),
+            page,
+            owner_placement.source_bbox,
         )
-        selected: list[tuple[PixelBox, list[PixelBox]]] = []
-        for columns in column_choices:
-            rows_needed = math.ceil(len(options) / columns)
-            candidates: list[tuple[PixelBox, list[PixelBox]]] = []
-            for line in source_lines:
-                raw_segments = [
-                    segment
-                    for segment in (line.segments or [line.bbox])
-                    if segment.width >= page.line_pitch * 0.20
-                ]
-                segments = _merge_segments_to_columns(raw_segments, columns)
-                if len(segments) != columns:
-                    continue
-                if min(segment.width for segment in segments) < page.line_pitch * 0.45:
-                    continue
-                if (
-                    columns > 1
-                    and min(
-                        max(0, right.x0 - left.x1)
-                        for left, right in zip(segments, segments[1:], strict=False)
-                    )
-                    < page.line_pitch * 0.45
-                ):
-                    continue
-                candidates.append((line.bbox, segments))
-            if len(candidates) >= rows_needed:
-                selected = candidates[-rows_needed:]
-                break
-        if not selected:
+        if grid is None:
+            localized = [
+                line
+                for line in _localized_option_rows(page, owner_placement.source_bbox, ink)
+                if not _line_is_excluded(line.bbox, visual_anchors)
+            ]
+            candidate_rows = _expand_option_rows(
+                localized,
+                owner_placement.source_bbox,
+                page,
+                ink,
+            )
+            grid = _option_grid_slots(
+                candidate_rows,
+                len(options),
+                page,
+                owner_placement.source_bbox,
+            )
+        if grid is None:
             continue
-        first_option_top = selected[0][0].y0
-        prompt_rows = [
-            line.bbox
-            for line in source_lines
-            if line.bbox.y0 < first_option_top
-            and all(line.bbox != selected_line for selected_line, _segments in selected)
-        ]
+        slots, option_rows = grid
+        prompt_rows = [row for row, _fragments in candidate_rows[: -len(option_rows)]]
         if not prompt_rows:
             continue
 
         assigned[owner.id] = owner_placement.model_copy(update={"source_rows": prompt_rows})
-        option_index = 0
-        for _line, segments in selected:
-            for segment in segments:
-                if option_index >= len(options):
-                    break
-                option = options[option_index]
-                placement = placement_by_id[option.id]
-                assigned[option.id] = placement.model_copy(
-                    update={
-                        "source_bbox": segment,
-                        "source_rows": [segment],
-                        "match_score": 1.0,
-                        "geometry_source": "scan_inferred_group_option",
-                    }
-                )
-                option_index += 1
-        if option_index != len(options):
-            for option in options:
-                assigned.pop(option.id, None)
-            assigned.pop(owner.id, None)
+        columns = len(slots) // len(option_rows)
+        for option_index, (option, slot) in enumerate(zip(options, slots, strict=True)):
+            placement = placement_by_id[option.id]
+            assigned[option.id] = placement.model_copy(
+                update={
+                    "source_bbox": slot,
+                    # Horizontal siblings share one physical source row.  The
+                    # vertical-fit budget consequently charges that row once.
+                    "source_rows": [option_rows[option_index // columns]],
+                    "match_score": 1.0,
+                    "geometry_source": "scan_inferred_group_option",
+                }
+            )
 
     return [assigned.get(placement.block_id, placement) for placement in placements]
 

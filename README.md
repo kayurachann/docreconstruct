@@ -66,6 +66,9 @@ does not imply free hosted compute.
   blank/OCR-omitted pages.
 - Score text, layout, structure, visual evidence, and editability when the
   required reference data is available.
+- Benchmark the complete three-authority reconstruction job, including fresh
+  DOCX generation, native/LibreOffice QA, per-phase timings, failure capture,
+  reproducible fingerprints, and document-family slices.
 - Use the same synchronous pipeline from Python, the CLI, or an optional
   FastAPI upload service.
 - Validate optional VLM/LLM correction proposals against existing object IDs
@@ -139,6 +142,30 @@ coordinate units and preprocessing metadata are retained during normalization
 so geometry can be projected back to the original page rather than treated as
 untyped pixels.
 
+### Deterministic render input and fast evidence matching
+
+The evidence matcher pre-indexes exact normalized spans and monotonic anchors,
+then evaluates bounded candidate windows instead of repeatedly comparing every
+OCR block with every Markdown span. If fewer than two reliable anchors exist,
+or the index cannot prove that its candidate set is complete, it returns to the
+original exhaustive search. Thresholds, ordering, and accepted matches remain
+the same; the index is a performance optimization, not a looser matching mode.
+
+Each hybrid job now prepares its source analysis, asset/table matches, and
+layout plan once. The DOCX renderer and native/LibreOffice QA inspect that same
+prepared plan rather than rebuilding a similar plan later. A canonical SHA-256
+render-input digest covers the source authority hashes, normalized Markdown and
+scan models, canonical page-raster bytes, layout plan, asset/table matches,
+remote-asset policy, and hashes of the exact snapshotted asset bytes. Matching,
+rendering, and QA reuse those snapshots rather than reading a mutable image a
+second time. The renderer stores the digest in the DOCX core `identifier`
+property, and QA checks the in-memory plan, the standard core-properties
+relationship, the identifier embedded in the artifact, and the candidate
+DOCX SHA-256 before and after validation.
+
+This digest makes accidental plan drift and asset changes detectable. It does
+not prove that OCR wording, formulas, or layout interpretation are correct.
+
 ### Multi-page originals
 
 Multi-page PDFs are analyzed and planned one page at a time. Each source page
@@ -207,9 +234,10 @@ integrals, limits, scripts, aligned derivations, and mixed Chinese prose. The
 generic planner maps 10 editable blocks to all 18 source rows; the final DOCX
 renders as one A4 page, keeps 8 native Office Math expressions and 13 display
 rows, and does not expose TeX alignment markers. Project QA passed 34/34 measured
-gates with a foreground-normalized visual score of 92.58%. This score is
-evidence of improvement, not proof that every glyph or mathematical statement
-is semantically correct.
+gates when the showcase artifact was produced. Its archived `92.58%` visual
+figure predates metric v2.1 and must not be compared with current v2.1 scores;
+rerun the current benchmark for a versioned measurement. Automated similarity
+is not proof that every glyph or mathematical statement is semantically correct.
 
 ### Tuyen Quang gifted school - Vietnamese 2nd exam (Source: VNExpress)
 
@@ -373,10 +401,15 @@ docreconstruct hybrid content.md layout.jpg -o output/result.docx \
   --qa-report output/result.qa.json
 
 # Make the same command render through LibreOffice, compare source/candidate
-# pages at identical pixel dimensions, and fail below an explicit score.
+# pages at identical pixel dimensions, and enforce the built-in nonblank floor.
 docreconstruct hybrid content.md layout.jpg -o output/result.docx \
-  --qa-backend libreoffice --min-visual-score 0.80 \
+  --qa-backend libreoffice \
   --qa-render-dir output/render-qa --qa-report output/result.qa.json
+
+# After calibrating v2.1 on your own reviewed corpus, you may raise the floor.
+docreconstruct hybrid content.md layout.jpg -o output/result.docx \
+  --qa-backend libreoffice --min-visual-score 0.25 \
+  --qa-report output/result.qa.json
 
 # Disable HTTPS image reuse and fall back to matched source crops.
 docreconstruct hybrid content.md layout.pdf -o output/result.docx --no-remote-assets
@@ -427,15 +460,27 @@ full-page scan flattening. `--qa-report` persists these gates and fingerprints
 for the Markdown, original layout, every JSON sidecar, and output; the command
 exits nonzero if any measured gate fails.
 
+Native QA is the fast structural path. It does not measure pixels, installed
+font substitution, renderer line wrapping, or the pages that Microsoft Word or
+LibreOffice will actually produce. Its passed-gate fraction is conformance to
+the gates that were measured, not an end-to-end fidelity score.
+
 `--qa-backend libreoffice` enables the optional project-owned render adapter.
 It discovers a system LibreOffice installation (or accepts
 `--qa-renderer-path`), uses an isolated temporary profile, rasterizes the DOCX
-at the source page dimensions, and performs foreground-normalized comparison.
-`--min-visual-score` turns that measurement into a hard gate, while
-`--qa-render-dir` can retain source/candidate/difference PNGs for debugging.
-The default `native` backend never discovers or starts an Office process and
-continues to list pixel similarity, installed-font substitution, actual line
-wrapping, and renderer-confirmed pagination as unmeasured.
+at the source page dimensions, and runs visual metric v2.1. The metric combines
+tolerance-aware foreground precision/recall/F1, multi-radius edge alignment,
+macro-averaged page regions, and explicit page-count/dimension penalties. Its
+adaptive low-contrast path and negative-control tests prevent a blank page from
+passing merely because both canvases are mostly white.
+
+Every successful Office render must clear the built-in `0.05` v2.1 floor;
+`--min-visual-score` may raise but cannot lower it. The default is a failure-
+detection floor for blank or nearly blank renders, not a claim of acceptable
+document fidelity. Calibrate a higher threshold by document family against a
+reviewed corpus. `--qa-render-dir` can retain source/candidate/difference PNGs
+for debugging. The default `native` backend never discovers or starts an Office
+process and continues to list all rendered measurements as unmeasured.
 
 LibreOffice itself remains a separately installed application. The project
 integrates it through a bounded argv-only render helper instead of copying the
@@ -468,11 +513,29 @@ docreconstruct formats
 docreconstruct schema --output schemas/generated-document-ir.schema.json
 docreconstruct compare reference.json candidate.json
 docreconstruct benchmark ./benchmark-dataset
+docreconstruct benchmark-reconstruction benchmark/reconstruction-benchmark.json \
+  --output benchmark/reconstruction-report.json
 ```
 
 `compare` accepts canonical JSON, raster images, text/Markdown, HTML, DOCX,
 and—with the `pdf` extra—PDF. A benchmark directory must follow the evaluator's
 manifest format; neither command downloads ground truth or external models.
+
+`benchmark-reconstruction` is the end-to-end benchmark for the best-evidence
+path. Every case must name an original PDF/image, reviewed Markdown, and at
+least one positioned JSON sidecar; the runner always generates a fresh DOCX,
+so a prebuilt candidate cannot bypass reconstruction. It records fingerprints,
+per-phase timing, operational success, native validation-gate conformance, and
+slices such as language, script, document type, degradation, and content kind.
+
+With native QA, visual quality is deliberately reported as **incomplete**:
+native validation-gate conformance is not relabeled as fidelity. Run with
+`--qa-backend libreoffice` to obtain v2.1 rendered-fidelity scores. A report
+publishes a mean quality score only when every case has complete, comparable
+rendered quality under one metric profile; operational failures remain visible
+and are never silently excluded. See
+[Performance and public deployment](docs/PERFORMANCE.md#reproducible-reconstruction-benchmark)
+for a manifest example and interpretation guidance.
 
 ## Canonical document IR
 

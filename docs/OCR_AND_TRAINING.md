@@ -220,7 +220,7 @@ docreconstruct hybrid reviewed-content.md original-photo.jpg `
   --online-ocr --allow-cloud --ocr-provider mistral_ocr `
   --ocr-handwriting --ocr-distorted-photo --ocr-dewarping `
   --ocr-artifacts-dir output/job.ocr `
-  --qa-backend libreoffice --min-visual-score 0.80 `
+  --qa-backend libreoffice `
   --qa-render-dir output/job.render `
   --qa-report output/job.qa.json --output output/job.docx
 ```
@@ -231,7 +231,10 @@ semantic type, style, confidence, and provenance. `output/job.ocr` contains the
 audit Markdown, independent canonical JSON sidecars, a sanitized extraction
 manifest, and an optional SHA-verified cache. Disable the cache with
 `--no-ocr-cache`. LibreOffice is never discovered or launched unless the
-render backend is explicitly selected.
+render backend is explicitly selected. Rendered QA always applies the visual
+metric v2.1 `0.05` blank-render safety floor. That floor is not a document-
+quality target; after measuring a reviewed corpus, an operator may raise it
+with `--min-visual-score`.
 
 For a saved Textract response:
 

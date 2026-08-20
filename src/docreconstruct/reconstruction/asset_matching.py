@@ -340,9 +340,8 @@ def resolve_markdown_asset(
             ) from exc
         if not candidate.is_file():
             return None
-        if candidate.stat().st_size > maximum_bytes:
-            raise ValueError(f"image asset exceeds the {maximum_bytes}-byte safety limit")
-        data = candidate.read_bytes()
+        with candidate.open("rb") as stream:
+            data = _read_limited(stream, maximum_bytes)
         media_type = mimetypes.guess_type(candidate.name)[0] or media_type
     try:
         opened = Image.open(io.BytesIO(data))
@@ -518,8 +517,16 @@ def match_markdown_assets(
     *,
     allow_remote: bool = True,
     minimum_score: float = 0.42,
+    resolved_assets: dict[str, ResolvedAsset] | None = None,
 ) -> list[AssetMatch]:
-    """Locate Markdown images monotonically in the original PDF page rasters."""
+    """Locate Markdown images monotonically in the original PDF page rasters.
+
+    ``resolved_assets`` is an optional in-process snapshot sink.  Hybrid jobs
+    use it to pass the exact validated bytes used during matching to the DOCX
+    renderer, avoiding a second filesystem/network read and the resulting
+    time-of-check/time-of-use gap.  The ordinary public return value and call
+    pattern remain unchanged.
+    """
 
     directory = Path(content.source).parent
     matches: list[AssetMatch] = []
@@ -561,6 +568,8 @@ def match_markdown_assets(
                 resolved=resolved,
             )
         )
+        if resolved_assets is not None and asset is not None and resolved:
+            resolved_assets[block.id] = asset
         first_page = page_number
     return matches
 

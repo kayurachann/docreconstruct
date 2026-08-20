@@ -7,7 +7,7 @@ import math
 import re
 import statistics
 import textwrap
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -940,6 +940,73 @@ def _trim_embedded_figure_tail(text: str) -> str:
     return text
 
 
+def _source_option_grid(
+    blocks: Sequence[MarkdownBlock],
+    placements: dict[str, HybridBlockPlacement],
+    layout: ScanDocumentLayout,
+) -> tuple[int, float] | None:
+    """Recover a row-major option grid from distinct source slot boxes."""
+
+    option_placements = [placements.get(block.id) for block in blocks]
+    if not option_placements or any(
+        placement is None or placement.source_bbox is None for placement in option_placements
+    ):
+        return None
+    resolved = [cast(HybridBlockPlacement, placement) for placement in option_placements]
+    if len({placement.page_number for placement in resolved}) != 1:
+        return None
+    coordinates = {
+        (
+            cast(PixelBox, placement.source_bbox).x0,
+            cast(PixelBox, placement.source_bbox).y0,
+            cast(PixelBox, placement.source_bbox).x1,
+            cast(PixelBox, placement.source_bbox).y1,
+        )
+        for placement in resolved
+    }
+    # A shared coarse bbox plus several source rows does not identify which
+    # option owns which column. Preserve the established content fallback.
+    if len(coordinates) != len(resolved):
+        return None
+
+    row_groups: list[list[HybridBlockPlacement]] = []
+    for placement in resolved:
+        box = cast(PixelBox, placement.source_bbox)
+        if not row_groups:
+            row_groups.append([placement])
+            continue
+        previous_boxes = [cast(PixelBox, item.source_bbox) for item in row_groups[-1]]
+        overlap = max(
+            max(0, min(box.y1, previous.y1) - max(box.y0, previous.y0))
+            / max(1, min(box.height, previous.height))
+            for previous in previous_boxes
+        )
+        if overlap >= 0.55:
+            row_groups[-1].append(placement)
+        else:
+            row_groups.append([placement])
+    columns = len(row_groups[0])
+    if columns < 1 or any(len(row) != columns for row in row_groups):
+        return None
+    if columns > 1 and any(
+        any(
+            cast(PixelBox, left.source_bbox).x0 >= cast(PixelBox, right.source_bbox).x0
+            for left, right in zip(row, row[1:], strict=False)
+        )
+        for row in row_groups
+    ):
+        return None
+    page = layout.pages[resolved[0].page_number - 1]
+    vertical_scale = (
+        page.pdf_height / page.height
+        if page.metadata.get("source_kind") == "image"
+        else page.pdf_width / page.width
+    )
+    boxes = [cast(PixelBox, placement.source_bbox) for placement in resolved]
+    height = (max(box.y1 for box in boxes) - min(box.y0 for box in boxes)) * vertical_scale
+    return columns, height
+
+
 def _render_options(
     parent: WordDocumentType | _Cell,
     blocks: list[MarkdownBlock],
@@ -961,10 +1028,13 @@ def _render_options(
         layout,
         available_width_points=width * 72.0,
     )
+    source_grid = _source_option_grid(blocks, placements, layout)
     source_row_count = len(source_geometry.row_heights) if source_geometry is not None else 0
     has_nary = any(re.search(r"\\(?:int|oint|sum|prod)\b", block.text) for block in blocks)
     columns = (
-        2
+        source_grid[0]
+        if source_grid is not None
+        else 2
         if len(blocks) == 4 and source_row_count >= 2 and has_nary and maximum_fraction_count == 0
         else 2
         if (
@@ -997,7 +1067,13 @@ def _render_options(
             line_height,
             size * (1.82 if tall_math else 1.18),
         )
-        source_total = source_geometry.height if source_geometry is not None else 0.0
+        source_total = (
+            source_grid[1]
+            if source_grid is not None
+            else source_geometry.height
+            if source_geometry is not None
+            else 0.0
+        )
         row_floor = max(natural_floor, source_total / max(1, rows))
         row_floor = min(row_floor, line_height * (2.35 if tall_math else 1.55))
         source_before = (
@@ -2616,35 +2692,111 @@ def _render_multi_column_page(
     return True
 
 
-def _split_title_for_columns(text: str, left_fraction: float) -> tuple[str, str] | None:
-    """Split a merged reading-order masthead title at a natural word boundary."""
+def _masthead_code_field(text: str) -> bool:
+    """Return whether a short label/value pair is a compact document code.
 
-    candidates = [match.start() for match in re.finditer(r"\s+", text)]
-    if len(candidates) < 3 or len(text) < 44:
+    A code value is deliberately recognized by shape rather than language. It
+    must be one compact token after the only colon, which excludes ordinary
+    fields such as a duration followed by its unit.
+    """
+
+    if text.count(":") != 1:
+        return False
+    value = text.rpartition(":")[2].strip()
+    return bool(re.fullmatch(r"[A-Z0-9][A-Z0-9./_-]{1,15}", value, flags=re.IGNORECASE))
+
+
+def _masthead_emphasis(block: MarkdownBlock) -> bool:
+    """Recognize display masthead text without relying on document wording."""
+
+    if block.kind is MarkdownBlockKind.HEADING:
+        return True
+    display_text = re.sub(r"\s*\([^()]*\)\s*$", "", block.text).strip()
+    letters = [character for character in display_text if character.isalpha()]
+    return bool(
+        len(letters) >= 5
+        and sum(character.isupper() for character in letters) / len(letters) >= 0.86
+    )
+
+
+def _masthead_fallback_side(
+    block: MarkdownBlock,
+    *,
+    index: int,
+    primary_heading_index: int | None,
+) -> str:
+    """Classify geometry-ambiguous furniture by reusable structural shape."""
+
+    text = block.text.strip()
+    role = str(block.metadata.get("role", ""))
+    if primary_heading_index is not None:
+        if index < primary_heading_index:
+            return "left"
+        if index == primary_heading_index:
+            return "right"
+    if role == "form_field" or (
+        block.kind is MarkdownBlockKind.PARAGRAPH and (text.endswith(":") or text.count(":") >= 2)
+    ):
+        return "left"
+    if _masthead_code_field(text):
+        return "right"
+    if block.kind is MarkdownBlockKind.HEADING:
+        return "left" if primary_heading_index is None and index == 0 else "right"
+    if text.startswith("(") and text.endswith(")"):
+        return "left"
+    if ":" in text:
+        return "right"
+    return "left" if _masthead_emphasis(block) or len(text) <= 42 else "right"
+
+
+def _masthead_geometry_side(
+    placement: HybridBlockPlacement | None,
+    *,
+    render_frame: PixelBox,
+    divider: float,
+) -> str | None:
+    """Assign a masthead block when its source box clearly favors one side."""
+
+    if placement is None or placement.source_bbox is None:
         return None
-
-    def visual_weight(value: str) -> float:
-        return sum(
-            0.42 if character.isspace() else 1.08 if character.isupper() else 1.0
-            for character in value
-        )
-
-    total = visual_weight(text)
-    eligible = [
-        position
-        for position in candidates
-        if 0.16 <= visual_weight(text[:position]) / max(1.0, total) <= 0.62
-    ]
-    if not eligible:
+    box = placement.source_bbox
+    left_overlap = max(
+        0.0,
+        min(float(box.x1), divider) - max(float(box.x0), float(render_frame.x0)),
+    )
+    right_overlap = max(
+        0.0,
+        min(float(box.x1), float(render_frame.x1)) - max(float(box.x0), divider),
+    )
+    covered = left_overlap + right_overlap
+    if covered <= 0:
         return None
-    effective_fraction = left_fraction * 0.88
-    split = min(
-        eligible,
-        key=lambda position: abs(
-            visual_weight(text[:position]) / max(1.0, total) - effective_fraction
+    dominance = max(left_overlap, right_overlap) / covered
+    # A nearly page-wide synthetic/estimated box is not column evidence. The
+    # threshold still accepts a form row that modestly crosses the divider.
+    if dominance < 0.62:
+        return None
+    return "left" if left_overlap > right_overlap else "right"
+
+
+def _sort_masthead_entries(
+    entries: list[tuple[MarkdownBlock, str, bool]],
+    placements: dict[str, HybridBlockPlacement],
+) -> list[tuple[MarkdownBlock, str, bool]]:
+    """Keep each source column in physical top-to-bottom order when known."""
+
+    if not entries or any(
+        (placement := placements.get(block.id)) is None or placement.source_bbox is None
+        for block, _text, _emphasis in entries
+    ):
+        return sorted(entries, key=lambda entry: entry[0].index)
+    return sorted(
+        entries,
+        key=lambda entry: (
+            cast(PixelBox, placements[entry[0].id].source_bbox).y0,
+            entry[0].index,
         ),
     )
-    return text[:split].rstrip(), text[split:].lstrip()
 
 
 def _render_masthead_cell(
@@ -2655,6 +2807,9 @@ def _render_masthead_cell(
     width_inches: float,
     size: float,
     line_height: float,
+    placements: dict[str, HybridBlockPlacement],
+    source_x0: float,
+    source_x1: float,
 ) -> None:
     cell.text = ""
     _set_cell_margins(cell, value=18)
@@ -2664,14 +2819,27 @@ def _render_masthead_cell(
         role = str(block.metadata.get("role", ""))
         punctuation_fields = text.count(":") >= 1 and block.kind is MarkdownBlockKind.PARAGRAPH
         form_field = role == "form_field" or (side == "left" and punctuation_fields)
+        placement = placements.get(block.id)
+        box = placement.source_bbox if placement is not None else None
+        source_width = max(1.0, source_x1 - source_x0)
+        clipped_width = (
+            max(
+                0.0,
+                min(source_x1, float(box.x1)) - max(source_x0, float(box.x0)),
+            )
+            if box is not None
+            else source_width
+        )
         code_field = (
             side == "right"
             and punctuation_fields
-            and len(text) <= 32
-            and bool(re.search(r"\d", text))
+            and _masthead_code_field(text)
+            and clipped_width / source_width <= 0.55
         )
         if form_field and text.count(":") >= 2:
             text = re.sub(r"(?<=\.{3})\s+(?=[A-ZÀ-Ỹ])", "\n ", text, count=1)
+        if side == "left" and title_fragment:
+            text = re.sub(r"\s+(?=\([^()]*\)\s*$)", "\n", text, count=1)
         rendered_size = size * 0.86 + (0.25 if title_fragment else 0.0)
         _format_paragraph(
             paragraph,
@@ -2700,6 +2868,31 @@ def _render_masthead_cell(
                 run.bold = True
             if italic:
                 run.italic = True
+        if code_field:
+            if box is not None:
+                clipped_x0 = max(source_x0, min(source_x1, float(box.x0)))
+                clipped_x1 = max(source_x0, min(source_x1, float(box.x1)))
+                if clipped_x1 > clipped_x0:
+                    paragraph.paragraph_format.left_indent = Pt(
+                        width_inches * 72.0 * (clipped_x0 - source_x0) / source_width
+                    )
+                    paragraph.paragraph_format.right_indent = Pt(
+                        width_inches * 72.0 * (source_x1 - clipped_x1) / source_width
+                    )
+            properties = paragraph._p.get_or_add_pPr()
+            borders = properties.find(qn("w:pBdr"))
+            if borders is None:
+                borders = OxmlElement("w:pBdr")
+                properties.append(borders)
+            for edge in ("top", "left", "bottom", "right"):
+                border = borders.find(qn(f"w:{edge}"))
+                if border is None:
+                    border = OxmlElement(f"w:{edge}")
+                    borders.append(border)
+                border.set(qn("w:val"), "single")
+                border.set(qn("w:sz"), "6")
+                border.set(qn("w:space"), "2")
+                border.set(qn("w:color"), "000000")
         if form_field and text.rstrip().endswith(":"):
             tab_position = max(18.0, width_inches * 72.0 - 8.0)
             paragraph.paragraph_format.tab_stops.add_tab_stop(
@@ -2713,7 +2906,10 @@ def _render_masthead_cell(
 
 def _masthead_entries(
     preamble: Sequence[MarkdownBlock],
-    left_fraction: float,
+    placements: dict[str, HybridBlockPlacement],
+    *,
+    render_frame: PixelBox,
+    divider: float,
 ) -> (
     tuple[
         list[tuple[MarkdownBlock, str, bool]],
@@ -2731,49 +2927,50 @@ def _masthead_entries(
 
     if not preamble:
         return None
-    first_split = _split_title_for_columns(preamble[0].text, left_fraction)
-    if first_split is not None:
-        left = [(preamble[0], first_split[0], True)]
-        right = [(preamble[0], first_split[1], True)]
-        for index, block in enumerate(preamble[1:]):
-            (left if index % 2 == 0 else right).append((block, block.text, False))
-        return left, right
-
     headings = [
         (index, block)
         for index, block in enumerate(preamble)
         if block.kind is MarkdownBlockKind.HEADING
     ]
-    if len(headings) < 2:
-        return None
-    primary_index, primary = max(headings, key=lambda item: len(item[1].text))
-    if primary_index == 0 and len(primary.text) <= len(headings[1][1].text) * 1.15:
-        return None
+    primary_index = (
+        max(headings, key=lambda item: len(item[1].text))[0] if len(headings) >= 2 else None
+    )
 
     left_entries: list[tuple[MarkdownBlock, str, bool]] = []
     right_entries: list[tuple[MarkdownBlock, str, bool]] = []
     for index, block in enumerate(preamble):
         text = block.text
-        if index < primary_index:
-            side = "left"
-        elif index == primary_index:
-            side = "right"
-        elif block.kind is MarkdownBlockKind.PARAGRAPH and text.count(":") >= 2:
-            side = "left"
-        elif (
-            block.kind is MarkdownBlockKind.PARAGRAPH
-            and text.count(":") == 1
-            and len(text) <= 32
-            and re.search(r"\d", text)
-        ) or block.kind is MarkdownBlockKind.HEADING:
-            side = "right"
-        else:
-            side = "right" if len(text) >= 36 else "left"
-        entry = (block, text, block.kind is MarkdownBlockKind.HEADING)
+        side = _masthead_geometry_side(
+            placements.get(block.id),
+            render_frame=render_frame,
+            divider=divider,
+        ) or _masthead_fallback_side(
+            block,
+            index=index,
+            primary_heading_index=primary_index,
+        )
+        entry = (block, text, _masthead_emphasis(block))
         (left_entries if side == "left" else right_entries).append(entry)
+
+    # Retain a native two-zone masthead even when every provider box was a
+    # page-wide estimate. Move whole blocks only; never invent text fragments.
+    if not left_entries and len(right_entries) >= 2:
+        left_entries.append(right_entries.pop(0))
+    if not right_entries and len(left_entries) >= 2:
+        candidate = max(
+            range(1, len(left_entries)),
+            key=lambda item: (
+                left_entries[item][0].kind is MarkdownBlockKind.HEADING,
+                len(left_entries[item][1]),
+            ),
+        )
+        right_entries.append(left_entries.pop(candidate))
     if not left_entries or not right_entries:
         return None
-    return left_entries, right_entries
+    return (
+        _sort_masthead_entries(left_entries, placements),
+        _sort_masthead_entries(right_entries, placements),
+    )
 
 
 def _render_split_masthead(
@@ -2807,7 +3004,12 @@ def _render_split_masthead(
     render_frame = _page_render_content_bbox(page)
     left_fraction = (float(divider) - render_frame.x0) / max(1, render_frame.width)
     left_fraction = max(0.25, min(0.55, left_fraction))
-    entries = _masthead_entries(preamble, left_fraction)
+    entries = _masthead_entries(
+        preamble,
+        placements,
+        render_frame=render_frame,
+        divider=float(divider),
+    )
     if entries is None:
         return False, blocks
     left_entries, right_entries = entries
@@ -2832,6 +3034,9 @@ def _render_split_masthead(
             width_inches=widths[column_index],
             size=size,
             line_height=line_height,
+            placements=placements,
+            source_x0=(float(render_frame.x0) if side == "left" else float(divider)),
+            source_x1=(float(divider) if side == "left" else float(render_frame.x1)),
         )
     return True, blocks[section_index:]
 
@@ -2969,6 +3174,9 @@ def render_hybrid_docx(
     layout: ScanDocumentLayout,
     plan: HybridLayoutPlan,
     asset_matches: list[AssetMatch],
+    *,
+    asset_payloads: Mapping[str, bytes] | None = None,
+    render_input_sha256: str | None = None,
 ) -> bytes:
     """Render a hybrid plan as native Word paragraphs/tables plus real figures."""
 
@@ -2979,6 +3187,12 @@ def render_hybrid_docx(
         "Editable reconstruction from Markdown content and scan layout"
     )
     document.core_properties.author = "docreconstruct"
+    if render_input_sha256 is not None:
+        if re.fullmatch(r"[0-9a-f]{64}", render_input_sha256) is None:
+            raise ValueError("render_input_sha256 must be a lowercase SHA-256 digest")
+        document.core_properties.identifier = (
+            f"docreconstruct-render-input-sha256:{render_input_sha256}"
+        )
     document.core_properties.comments = (
         "Paragraphs and tables are native Word objects. "
         "Raster objects are limited to source figures and unmatched non-text source fragments."
@@ -2995,10 +3209,13 @@ def render_hybrid_docx(
         placement.block_id: placement for page in plan.pages for placement in page.placements
     }
     asset_match_by_id = {match.block_id: match for match in asset_matches}
-    asset_bytes: dict[str, bytes] = {}
+    prepared_asset_mode = asset_payloads is not None
+    asset_bytes: dict[str, bytes] = dict(asset_payloads or {})
     duplicate_figure_annotations = _duplicate_figure_annotation_ids(content.blocks)
     markdown_directory = Path(content.source).parent
-    for block in content.image_blocks:
+    for block in () if prepared_asset_mode else content.image_blocks:
+        if block.id in asset_bytes:
+            continue
         match = asset_match_by_id.get(block.id)
         if match is None or not match.resolved:
             continue

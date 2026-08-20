@@ -23,6 +23,7 @@ from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from docreconstruct.evaluation.visual import DEFAULT_RENDERED_VISUAL_MIN_SCORE
 from docreconstruct.evidence import (
     ProviderHints,
     SidecarEvidenceBundle,
@@ -35,8 +36,11 @@ from docreconstruct.reconstruction.evidence_matching import (
     match_sidecar_evidence,
 )
 from docreconstruct.reconstruction.hybrid import (
+    HybridPreparedRenderPlan,
     HybridPreparedSources,
+    assert_prepared_hybrid_render_plan,
     assert_prepared_hybrid_sources,
+    materialize_prepared_scan,
 )
 from docreconstruct.reconstruction.hybrid_planner import (
     HybridLayoutPlan,
@@ -71,6 +75,13 @@ _WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 _MATH = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
 _DRAWING = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 _RELATIONSHIPS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_CORE_PROPERTIES_RELATIONSHIP = (
+    "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"
+)
+_CORE_IDENTIFIER = "{http://purl.org/dc/elements/1.1/}identifier"
+_RENDER_INPUT_IDENTIFIER = re.compile(
+    r"^docreconstruct-render-input-sha256:(?P<sha256>[0-9a-f]{64})$"
+)
 _CJK_PATTERN = re.compile(
     r"[\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u3400-\u4dbf"
     r"\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]"
@@ -1473,6 +1484,9 @@ def validate_hybrid(
     minimum_visual_score: float | None = None,
     render_output_dir: str | Path | None = None,
     _prepared_sources: HybridPreparedSources | None = None,
+    _prepared_render_plan: HybridPreparedRenderPlan | None = None,
+    _expected_render_plan_sha256: str | None = None,
+    _expected_candidate_sha256: str | None = None,
     _phase_seconds: dict[str, float] | None = None,
 ) -> HybridValidationReport:
     """Validate hybrid OOXML and optionally render it through a project backend."""
@@ -1519,20 +1533,37 @@ def validate_hybrid(
                 strict=strict_evidence,
             )
             evidence_matches = match_sidecar_evidence(markdown, scan, evidence_bundle)
-    if evidence_paths:
+    if _prepared_render_plan is not None:
+        if _prepared_sources is None:
+            raise ValueError("prepared render plan requires prepared hybrid sources")
+        assert_prepared_hybrid_render_plan(
+            _prepared_render_plan,
+            _prepared_sources,
+            allow_remote_assets=_prepared_render_plan.allow_remote_assets,
+        )
+        plan = _prepared_render_plan.plan
+        render_plan_sha256 = _prepared_render_plan.sha256
+        scan = materialize_prepared_scan(_prepared_render_plan)
+    elif evidence_paths:
         plan = _validation_plan(markdown, scan, evidence_matches)
+        render_plan_sha256 = None
     else:
         plan = _validation_plan(markdown, scan)
+        render_plan_sha256 = None
     evidence_metrics = _evidence_validation_metrics(
         evidence_paths,
         evidence_bundle,
         evidence_matches,
     )
     plan_geometry = _plan_geometry_metrics(markdown, scan, plan)
+    candidate_sha256_before = _sha256(candidate_path)
     try:
         with zipfile.ZipFile(candidate_path) as package:
             corrupt_member = package.testzip()
-            names = set(package.namelist())
+            member_names = package.namelist()
+            if len(member_names) != len(set(member_names)):
+                raise ValueError(f"DOCX package contains duplicate parts: {candidate_path}")
+            names = set(member_names)
             required = {"[Content_Types].xml", "word/document.xml"}
             if corrupt_member is not None or not required <= names:
                 raise ValueError(f"not a complete DOCX package: {candidate_path}")
@@ -1548,6 +1579,32 @@ def validate_hybrid(
                 else None
             )
             media = sorted(name for name in names if name.startswith("word/media/"))
+            artifact_render_input_sha256: str | None = None
+            if "docProps/core.xml" in names:
+                core_properties = ElementTree.fromstring(package.read("docProps/core.xml"))
+                identifiers = list(core_properties.iter(_CORE_IDENTIFIER))
+                if len(identifiers) > 1:
+                    raise ValueError("DOCX core properties contain multiple identifiers")
+                identifier = identifiers[0] if identifiers else None
+                identifier_match = _RENDER_INPUT_IDENTIFIER.fullmatch(
+                    (identifier.text or "").strip() if identifier is not None else ""
+                )
+                if identifier_match is not None:
+                    artifact_render_input_sha256 = identifier_match.group("sha256")
+            core_relationship_valid = False
+            if "_rels/.rels" in names:
+                package_relationships = ElementTree.fromstring(package.read("_rels/.rels"))
+                core_relationships = [
+                    relationship
+                    for relationship in package_relationships.iter(
+                        f"{{{_RELATIONSHIPS}}}Relationship"
+                    )
+                    if relationship.get("Type") == _CORE_PROPERTIES_RELATIONSHIP
+                ]
+                core_relationship_valid = (
+                    len(core_relationships) == 1
+                    and core_relationships[0].get("Target", "").lstrip("/") == "docProps/core.xml"
+                )
     except (OSError, zipfile.BadZipFile, ElementTree.ParseError, KeyError) as exc:
         raise ValueError(f"not a readable DOCX package: {candidate_path}") from exc
 
@@ -1659,6 +1716,13 @@ def validate_hybrid(
                     artifact["difference"] = str(difference_path)
                 render_artifacts.append(artifact)
         visual_seconds = perf_counter() - visual_started
+
+    effective_visual_minimum = max(
+        DEFAULT_RENDERED_VISUAL_MIN_SCORE,
+        minimum_visual_score
+        if minimum_visual_score is not None
+        else DEFAULT_RENDERED_VISUAL_MIN_SCORE,
+    )
 
     gates = [
         HybridValidationGate(name="valid_ooxml_package", passed=True, expected=True, actual=True),
@@ -1980,6 +2044,64 @@ def validate_hybrid(
                 ),
             )
         )
+    if _expected_render_plan_sha256 is not None:
+        gates.append(
+            HybridValidationGate(
+                name="render_plan_identity",
+                passed=(render_plan_sha256 == _expected_render_plan_sha256),
+                expected=_expected_render_plan_sha256,
+                actual=render_plan_sha256,
+                detail=(
+                    "QA must inspect the exact fingerprinted plan and matches used "
+                    "to generate the candidate DOCX."
+                ),
+            )
+        )
+        gates.append(
+            HybridValidationGate(
+                name="render_input_artifact_identity",
+                passed=(artifact_render_input_sha256 == _expected_render_plan_sha256),
+                expected=_expected_render_plan_sha256,
+                actual=artifact_render_input_sha256,
+                detail=(
+                    "The candidate DOCX must independently carry the full render-input "
+                    "digest embedded by the renderer, including source, normalized "
+                    "layout, plan, matches, policy, and snapshotted asset hashes."
+                ),
+            )
+        )
+        gates.append(
+            HybridValidationGate(
+                name="render_input_core_relationship",
+                passed=core_relationship_valid,
+                expected="one package core-properties relationship to docProps/core.xml",
+                actual=core_relationship_valid,
+                detail=(
+                    "The embedded render-input digest is trusted only when the DOCX "
+                    "package declares exactly one standard core-properties part."
+                ),
+            )
+        )
+    candidate_sha256_after = _sha256(candidate_path)
+    if _expected_candidate_sha256 is not None:
+        gates.extend(
+            (
+                HybridValidationGate(
+                    name="candidate_artifact_identity",
+                    passed=(candidate_sha256_before == _expected_candidate_sha256),
+                    expected=_expected_candidate_sha256,
+                    actual=candidate_sha256_before,
+                    detail="QA must inspect the exact DOCX bytes produced by reconstruction.",
+                ),
+                HybridValidationGate(
+                    name="candidate_artifact_stability",
+                    passed=(candidate_sha256_after == candidate_sha256_before),
+                    expected=candidate_sha256_before,
+                    actual=candidate_sha256_after,
+                    detail="The candidate DOCX must not change while QA is running.",
+                ),
+            )
+        )
     requested_backend = render_backend.strip().casefold()
     if requested_backend == "libreoffice" or minimum_visual_score is not None:
         gates.append(
@@ -2039,16 +2161,24 @@ def validate_hybrid(
                     ),
                 )
             )
-    if minimum_visual_score is not None:
+    # Any successful Office render must clear a conservative visual floor.
+    # Previously this gate existed only when a caller explicitly supplied a
+    # threshold, which let a fully blank render pass an otherwise "verified"
+    # job.  A caller may raise, but never lower, the calibrated default.
+    if render_result.rendered or minimum_visual_score is not None:
         gates.append(
             HybridValidationGate(
                 name="rendered_visual_similarity",
                 passed=(
-                    visual_metrics is not None and visual_metrics.score >= minimum_visual_score
+                    visual_metrics is not None and visual_metrics.score >= effective_visual_minimum
                 ),
-                expected=f">={minimum_visual_score:.6f}",
+                expected=f">={effective_visual_minimum:.6f}",
                 actual=visual_metrics.score if visual_metrics is not None else None,
-                detail="Foreground-normalized DOCX page render compared with source layout pixels.",
+                detail=(
+                    "Visual metric v2 compares foreground-normalized DOCX page renders "
+                    "with source layout pixels. The built-in floor rejects blank or "
+                    "nearly blank render failures; an explicit threshold can raise it."
+                ),
             )
         )
     passed_gates = sum(gate.passed for gate in gates)
@@ -2095,8 +2225,21 @@ def validate_hybrid(
         "render_backend": render_result.provenance(),
         "rendered_page_count": len(render_result.pages) if render_result.rendered else None,
         "rendered_visual": visual_metrics.to_dict() if visual_metrics is not None else None,
+        "rendered_visual_policy": {
+            "metric_version": (
+                visual_metrics.metric_version if visual_metrics is not None else None
+            ),
+            "default_minimum_score": DEFAULT_RENDERED_VISUAL_MIN_SCORE,
+            "requested_minimum_score": minimum_visual_score,
+            "effective_minimum_score": effective_visual_minimum,
+            "enforced": render_result.rendered or minimum_visual_score is not None,
+        },
         "rendered_body_foreground": body_foreground,
         "render_artifacts": render_artifacts,
+        "render_plan_sha256": render_plan_sha256,
+        "render_input_artifact_sha256": artifact_render_input_sha256,
+        "candidate_sha256_before_qa": candidate_sha256_before,
+        "candidate_sha256_after_qa": candidate_sha256_after,
         **evidence_metrics,
         **flow,
         **plan_geometry,
@@ -2107,7 +2250,7 @@ def validate_hybrid(
         candidate=str(candidate_path),
         content_sha256=_sha256(content_path),
         layout_sha256=_sha256(layout_path),
-        candidate_sha256=_sha256(candidate_path),
+        candidate_sha256=candidate_sha256_after,
         passed=passed_gates == len(gates),
         score=passed_gates / len(gates),
         passed_gates=passed_gates,

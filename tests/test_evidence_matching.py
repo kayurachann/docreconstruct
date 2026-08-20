@@ -1289,13 +1289,53 @@ def test_public_evidence_type_hints_resolve_without_import_cycles() -> None:
     assert hints["return"] == list[EvidenceMatch]
 
 
-def test_candidate_pruning_and_memoization_bound_expensive_similarity_work(
+def test_unverified_exact_anchors_retry_with_exhaustive_candidates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    evidence_matching._normalize_text.cache_clear()
-    evidence_matching._cached_text_similarity.cache_clear()
-    evidence_matching._cached_text_similarity_at_least.cache_clear()
+    content = _content(
+        (MarkdownBlockKind.PARAGRAPH, "first exact anchor", None),
+        (MarkdownBlockKind.PARAGRAPH, "second exact anchor", None),
+    )
+    document = _document(
+        "fallback-provider",
+        [
+            _element(
+                "fallback-1",
+                "first exact anchor",
+                (100, 100, 700, 150),
+                provider="fallback-provider",
+            ),
+            _element(
+                "fallback-2",
+                "second exact anchor",
+                (100, 200, 700, 250),
+                provider="fallback-provider",
+            ),
+        ],
+    )
+    alignment_modes: list[bool] = []
+    original_align_source = evidence_matching._align_source
 
+    def counting_align_source(*args: object, **kwargs: object) -> list[object]:
+        alignment_modes.append(bool(kwargs.get("exhaustive", False)))
+        return original_align_source(*args, **kwargs)  # type: ignore[arg-type,return-value]
+
+    monkeypatch.setattr(evidence_matching, "_align_source", counting_align_source)
+    monkeypatch.setattr(
+        evidence_matching._TextCandidateIndex,
+        "alignment_respects_anchors",
+        lambda _self, _aligned: False,
+    )
+
+    matches = match_sidecar_evidence(content, _layout(), document)
+
+    assert [match.block_id for match in matches] == ["md-1", "md-2"]
+    assert alignment_modes == [False, True]
+
+
+def test_indexed_candidates_match_exhaustive_output_and_bound_similarity_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     blocks: list[MarkdownBlock] = []
     elements: list[Element] = []
     authority_index = 0
@@ -1359,22 +1399,19 @@ def test_candidate_pruning_and_memoization_bound_expensive_similarity_work(
     )
     original_sequence_matcher = evidence_matching.difflib.SequenceMatcher
     ratio_calls = 0
-    text_candidate_calls = 0
+    span_candidate_calls = 0
 
     def counting_sequence_matcher(*args: object, **kwargs: object) -> object:
         nonlocal ratio_calls
         ratio_calls += 1
-        return original_sequence_matcher(*args, **kwargs)
+        return original_sequence_matcher(*args, **kwargs)  # type: ignore[call-overload]
 
-    original_text_candidates = evidence_matching._text_block_candidates
+    original_span_candidate = evidence_matching._span_candidate
 
-    def counting_text_candidates(
-        block: MarkdownBlock,
-        units: list[object],
-    ) -> list[object]:
-        nonlocal text_candidate_calls
-        text_candidate_calls += 1
-        return original_text_candidates(block, units)  # type: ignore[arg-type,return-value]
+    def counting_span_candidate(*args: object, **kwargs: object) -> object:
+        nonlocal span_candidate_calls
+        span_candidate_calls += 1
+        return original_span_candidate(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(
         evidence_matching.difflib,
@@ -1383,18 +1420,34 @@ def test_candidate_pruning_and_memoization_bound_expensive_similarity_work(
     )
     monkeypatch.setattr(
         evidence_matching,
-        "_text_block_candidates",
-        counting_text_candidates,
+        "_span_candidate",
+        counting_span_candidate,
     )
 
     matches = match_sidecar_evidence(content, _layout(height=3000), document)
-    first_ratio_calls = ratio_calls
-    first_candidate_calls = text_candidate_calls
-    repeated = match_sidecar_evidence(content, _layout(height=3000), document)
+    indexed_ratio_calls = ratio_calls
+    indexed_span_calls = span_candidate_calls
+
+    # The exhaustive path is retained as a deterministic oracle/fallback.  It
+    # must produce byte-for-byte equivalent public models, while demonstrating
+    # that exact anchors and monotonic windows structurally reduce fuzzy work.
+    monkeypatch.setattr(
+        evidence_matching._TextCandidateIndex,
+        "spans_for",
+        evidence_matching._TextCandidateIndex.exhaustive_spans_for,
+    )
+    exhaustive = match_sidecar_evidence(content, _layout(height=3000), document)
+    exhaustive_ratio_calls = ratio_calls - indexed_ratio_calls
+    exhaustive_span_calls = span_candidate_calls - indexed_span_calls
 
     assert len(matches) == len(blocks)
-    assert matches == repeated
-    assert first_candidate_calls == 12
-    assert text_candidate_calls == 24
-    assert first_ratio_calls < 600
-    assert ratio_calls == first_ratio_calls
+    assert [match.model_dump(mode="json") for match in matches] == [
+        match.model_dump(mode="json") for match in exhaustive
+    ]
+    assert indexed_span_calls < exhaustive_span_calls // 3
+    assert indexed_ratio_calls < exhaustive_ratio_calls
+    assert indexed_ratio_calls < 100
+    # Similarity and normalization caches are job-scoped; raw document text is
+    # not retained by a module-level LRU after this invocation returns.
+    assert not hasattr(evidence_matching._normalize_text, "cache_info")
+    assert not hasattr(evidence_matching._cached_text_similarity, "cache_info")

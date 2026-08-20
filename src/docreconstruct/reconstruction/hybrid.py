@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -76,6 +77,8 @@ class HybridReconstructionResult(BaseModel):
     manifest: HybridSourceManifest
     output: SourceFingerprint
     evidence_summary: HybridEvidenceSummary | None = None
+    render_plan_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    render_input_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +101,106 @@ class HybridPreparedSources:
     evidence_bundle: SidecarEvidenceBundle | None
     evidence_matches: tuple[EvidenceMatch, ...]
     evidence_summary: HybridEvidenceSummary | None
+
+
+@dataclass(frozen=True, slots=True)
+class HybridPreparedRenderPlan:
+    """Exact immutable plan and matches shared by generation and validation.
+
+    The source preparation owns decoded Markdown, scan geometry, and evidence.
+    This second stage adds the remote-asset policy plus every deterministic
+    match consumed by the renderer.  A complete job passes the same object to
+    both DOCX generation and QA so validation cannot silently rebuild a
+    different expectation.
+    """
+
+    sources: HybridPreparedSources
+    allow_remote_assets: bool
+    page_rasters: tuple[PreparedPageRaster, ...]
+    asset_matches: tuple[Any, ...]
+    asset_payloads: tuple[PreparedAssetPayload, ...]
+    table_matches: tuple[Any, ...]
+    plan: Any
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedAssetPayload:
+    """One immutable, validated raster snapshot consumed by the renderer."""
+
+    block_id: str
+    media_type: str
+    size: int
+    sha256: str
+    data: bytes = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPageRaster:
+    """Canonical immutable RGB pixels used by matching, rendering, and QA."""
+
+    page_number: int
+    width: int
+    height: int
+    mode: str
+    size: int
+    sha256: str
+    data: bytes = field(repr=False)
+
+
+def _snapshot_page_rasters(scan: ScanDocumentLayout) -> tuple[PreparedPageRaster, ...]:
+    snapshots: list[PreparedPageRaster] = []
+    for page in scan.pages:
+        image = page.image.convert("RGB")
+        data = image.tobytes()
+        snapshots.append(
+            PreparedPageRaster(
+                page_number=page.number,
+                width=image.width,
+                height=image.height,
+                mode="RGB",
+                size=len(data),
+                sha256=hashlib.sha256(data).hexdigest(),
+                data=data,
+            )
+        )
+    return tuple(snapshots)
+
+
+def materialize_prepared_scan(
+    prepared_render: HybridPreparedRenderPlan,
+) -> ScanDocumentLayout:
+    """Recreate a scan model from the plan's immutable canonical pixels."""
+
+    pages = prepared_render.sources.scan.pages
+    if len(pages) != len(prepared_render.page_rasters):
+        raise ValueError("prepared page-raster count does not match the scan")
+    rendered_pages = []
+    for page, snapshot in zip(pages, prepared_render.page_rasters, strict=True):
+        if (
+            snapshot.page_number != page.number
+            or snapshot.width != page.width
+            or snapshot.height != page.height
+            or snapshot.mode != "RGB"
+            or snapshot.size != len(snapshot.data)
+            or snapshot.sha256 != hashlib.sha256(snapshot.data).hexdigest()
+        ):
+            raise ValueError("prepared page raster changed after it was fingerprinted")
+        expected_size = snapshot.width * snapshot.height * 3
+        if snapshot.size != expected_size:
+            raise ValueError("prepared page raster has an invalid RGB byte length")
+        rendered_pages.append(
+            page.model_copy(
+                update={
+                    "image": Image.frombytes(
+                        snapshot.mode,
+                        (snapshot.width, snapshot.height),
+                        snapshot.data,
+                    )
+                }
+            )
+        )
+    return prepared_render.sources.scan.model_copy(update={"pages": rendered_pages})
 
 
 def _record_phase(
@@ -238,6 +341,7 @@ def finalize_hybrid_reconstruction(
     output: str | Path,
     *,
     evidence_summary: HybridEvidenceSummary | None = None,
+    render_plan_sha256: str | None = None,
 ) -> HybridReconstructionResult:
     """Fingerprint an existing result without modifying it."""
 
@@ -251,7 +355,211 @@ def finalize_hybrid_reconstruction(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ),
         evidence_summary=evidence_summary,
+        render_plan_sha256=render_plan_sha256,
+        render_input_sha256=render_plan_sha256,
     )
+
+
+def _render_plan_sha256(
+    prepared: HybridPreparedSources,
+    page_rasters: Sequence[PreparedPageRaster],
+    plan: Any,
+    asset_matches: Sequence[Any],
+    asset_payloads: Sequence[PreparedAssetPayload],
+    table_matches: Sequence[Any],
+    *,
+    allow_remote_assets: bool,
+) -> str:
+    """Fingerprint the complete renderer input without persisting source text."""
+
+    content_payload = prepared.markdown.model_dump(mode="json", exclude={"source"})
+    scan_payload = prepared.scan.model_dump(mode="json", exclude={"source"})
+    content_digest = hashlib.sha256(
+        json.dumps(
+            content_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    scan_digest = hashlib.sha256(
+        json.dumps(
+            scan_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    payload = {
+        "schema": 2,
+        "renderer_profile": "hybrid-docx-v1",
+        "allow_remote_assets": allow_remote_assets,
+        "authorities": {
+            "content": prepared.manifest.content.sha256,
+            "layout": prepared.manifest.layout.sha256,
+            "evidence": [item.sha256 for item in prepared.manifest.evidence],
+        },
+        "normalized_content_sha256": content_digest,
+        "normalized_scan_sha256": scan_digest,
+        "page_rasters": [
+            {
+                "page_number": page.page_number,
+                "width": page.width,
+                "height": page.height,
+                "mode": page.mode,
+                "size": len(page.data),
+                "sha256": hashlib.sha256(page.data).hexdigest(),
+            }
+            for page in page_rasters
+        ],
+        "plan": plan.model_dump(mode="json"),
+        "asset_matches": [match.model_dump(mode="json") for match in asset_matches],
+        "asset_payloads": [
+            {
+                "block_id": asset.block_id,
+                "media_type": asset.media_type,
+                "size": len(asset.data),
+                "sha256": hashlib.sha256(asset.data).hexdigest(),
+            }
+            for asset in asset_payloads
+        ],
+        "table_matches": [match.model_dump(mode="json") for match in table_matches],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def prepare_hybrid_render_plan(
+    prepared: HybridPreparedSources,
+    *,
+    allow_remote_assets: bool,
+    _phase_seconds: dict[str, float] | None = None,
+) -> HybridPreparedRenderPlan:
+    """Match assets/tables and build exactly one plan for render plus QA."""
+
+    from docreconstruct.reconstruction.asset_matching import match_markdown_assets
+    from docreconstruct.reconstruction.hybrid_planner import build_hybrid_layout_plan
+    from docreconstruct.reconstruction.table_matching import match_markdown_tables
+
+    page_rasters = _snapshot_page_rasters(prepared.scan)
+    render_scan = prepared.scan.model_copy(
+        update={
+            "pages": [
+                page.model_copy(
+                    update={
+                        "image": Image.frombytes(
+                            snapshot.mode,
+                            (snapshot.width, snapshot.height),
+                            snapshot.data,
+                        )
+                    }
+                )
+                for page, snapshot in zip(
+                    prepared.scan.pages,
+                    page_rasters,
+                    strict=True,
+                )
+            ]
+        }
+    )
+    started = perf_counter()
+    resolved_assets: dict[str, Any] = {}
+    asset_matches_list = match_markdown_assets(
+        prepared.markdown,
+        render_scan,
+        allow_remote=allow_remote_assets,
+        resolved_assets=resolved_assets,
+    )
+    asset_matches = tuple(asset_matches_list)
+    asset_payloads = tuple(
+        PreparedAssetPayload(
+            block_id=block_id,
+            media_type=asset.media_type,
+            size=len(asset.data),
+            sha256=hashlib.sha256(asset.data).hexdigest(),
+            data=asset.data,
+        )
+        for block_id, asset in sorted(resolved_assets.items())
+    )
+    _record_phase(_phase_seconds, "reconstruct.asset_match", started)
+
+    started = perf_counter()
+    table_matches_list = match_markdown_tables(
+        prepared.markdown,
+        render_scan,
+        asset_matches_list,
+    )
+    table_matches = tuple(table_matches_list)
+    _record_phase(_phase_seconds, "reconstruct.table_match", started)
+
+    started = perf_counter()
+    plan = build_hybrid_layout_plan(
+        prepared.markdown,
+        render_scan,
+        asset_matches_list,
+        table_matches_list,
+        evidence_matches=prepared.evidence_matches,
+    )
+    _record_phase(_phase_seconds, "reconstruct.layout_plan", started)
+    fingerprint = _render_plan_sha256(
+        prepared,
+        page_rasters,
+        plan,
+        asset_matches,
+        asset_payloads,
+        table_matches,
+        allow_remote_assets=allow_remote_assets,
+    )
+    return HybridPreparedRenderPlan(
+        sources=prepared,
+        allow_remote_assets=allow_remote_assets,
+        page_rasters=page_rasters,
+        asset_matches=asset_matches,
+        asset_payloads=asset_payloads,
+        table_matches=table_matches,
+        plan=plan,
+        sha256=fingerprint,
+    )
+
+
+def assert_prepared_hybrid_render_plan(
+    prepared_render: HybridPreparedRenderPlan,
+    prepared_sources: HybridPreparedSources,
+    *,
+    allow_remote_assets: bool,
+) -> None:
+    """Reject reuse with another source preparation, policy, or mutated plan."""
+
+    if prepared_render.sources is not prepared_sources:
+        raise ValueError("prepared render plan belongs to another hybrid source analysis")
+    if prepared_render.allow_remote_assets != allow_remote_assets:
+        raise ValueError("prepared render plan remote-asset policy does not match this call")
+    current = _render_plan_sha256(
+        prepared_sources,
+        prepared_render.page_rasters,
+        prepared_render.plan,
+        prepared_render.asset_matches,
+        prepared_render.asset_payloads,
+        prepared_render.table_matches,
+        allow_remote_assets=allow_remote_assets,
+    )
+    if current != prepared_render.sha256:
+        raise ValueError("prepared render plan changed after it was fingerprinted")
+    resolved_ids = {
+        match.block_id for match in prepared_render.asset_matches if bool(match.resolved)
+    }
+    payload_ids = [asset.block_id for asset in prepared_render.asset_payloads]
+    if len(payload_ids) != len(set(payload_ids)) or set(payload_ids) != resolved_ids:
+        raise ValueError("prepared asset payloads do not match resolved asset matches")
+    for asset in prepared_render.asset_payloads:
+        if asset.size != len(asset.data) or asset.sha256 != hashlib.sha256(asset.data).hexdigest():
+            raise ValueError("prepared asset payload changed after it was fingerprinted")
+    materialize_prepared_scan(prepared_render)
 
 
 def prepare_hybrid_sources(
@@ -412,6 +720,7 @@ def reconstruct_hybrid(
     output: str | Path | None = None,
     allow_remote_assets: bool = True,
     _prepared_sources: HybridPreparedSources | None = None,
+    _prepared_render_plan: HybridPreparedRenderPlan | None = None,
     _phase_seconds: dict[str, float] | None = None,
 ) -> HybridReconstructionResult:
     """Run the generic Markdown-content/scan-layout reconstruction pipeline.
@@ -425,10 +734,7 @@ def reconstruct_hybrid(
     native objects, while matched source figures remain raster assets.
     """
 
-    from docreconstruct.reconstruction.asset_matching import match_markdown_assets
     from docreconstruct.reconstruction.hybrid_docx import render_hybrid_docx
-    from docreconstruct.reconstruction.hybrid_planner import build_hybrid_layout_plan
-    from docreconstruct.reconstruction.table_matching import match_markdown_tables
 
     evidence_sources = (evidence,) if isinstance(evidence, (str, Path)) else tuple(evidence or ())
     prepared = _prepared_sources
@@ -463,33 +769,32 @@ def reconstruct_hybrid(
             "choose an output ending in .docx."
         )
     markdown = prepared.markdown
-    scan = prepared.scan
-    evidence_matches = prepared.evidence_matches
+    prepared_render = _prepared_render_plan
+    if prepared_render is None:
+        prepared_render = prepare_hybrid_render_plan(
+            prepared,
+            allow_remote_assets=allow_remote_assets,
+            _phase_seconds=_phase_seconds,
+        )
+    else:
+        assert_prepared_hybrid_render_plan(
+            prepared_render,
+            prepared,
+            allow_remote_assets=allow_remote_assets,
+        )
+    scan = materialize_prepared_scan(prepared_render)
+    asset_matches = prepared_render.asset_matches
+    plan = prepared_render.plan
 
     started = perf_counter()
-    asset_matches = match_markdown_assets(
+    payload = render_hybrid_docx(
         markdown,
         scan,
-        allow_remote=allow_remote_assets,
+        plan,
+        list(asset_matches),
+        asset_payloads={asset.block_id: asset.data for asset in prepared_render.asset_payloads},
+        render_input_sha256=prepared_render.sha256,
     )
-    _record_phase(_phase_seconds, "reconstruct.asset_match", started)
-
-    started = perf_counter()
-    table_matches = match_markdown_tables(markdown, scan, asset_matches)
-    _record_phase(_phase_seconds, "reconstruct.table_match", started)
-
-    started = perf_counter()
-    plan = build_hybrid_layout_plan(
-        markdown,
-        scan,
-        asset_matches,
-        table_matches,
-        evidence_matches=evidence_matches,
-    )
-    _record_phase(_phase_seconds, "reconstruct.layout_plan", started)
-
-    started = perf_counter()
-    payload = render_hybrid_docx(markdown, scan, plan, asset_matches)
     _record_phase(_phase_seconds, "reconstruct.docx_render", started)
 
     started = perf_counter()
@@ -502,6 +807,7 @@ def reconstruct_hybrid(
         manifest,
         destination,
         evidence_summary=prepared.evidence_summary,
+        render_plan_sha256=prepared_render.sha256,
     )
     _record_phase(_phase_seconds, "reconstruct.output_fingerprint", started)
     return result
@@ -510,12 +816,18 @@ def reconstruct_hybrid(
 __all__ = [
     "HybridEvidenceSummary",
     "HybridPreparedSources",
+    "HybridPreparedRenderPlan",
+    "PreparedAssetPayload",
+    "PreparedPageRaster",
     "HybridReconstructionResult",
     "HybridSourceManifest",
     "SourceFingerprint",
     "assert_prepared_hybrid_sources",
+    "assert_prepared_hybrid_render_plan",
     "finalize_hybrid_reconstruction",
+    "materialize_prepared_scan",
     "prepare_hybrid_sources",
+    "prepare_hybrid_render_plan",
     "prepare_markdown_layout_sources",
     "prepare_markdown_pdf_sources",
     "reconstruct_hybrid",

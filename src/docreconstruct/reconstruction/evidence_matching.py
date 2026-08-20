@@ -15,7 +15,6 @@ from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Any, Literal, Protocol, TypeAlias
 from urllib.parse import unquote, urlsplit
@@ -60,7 +59,6 @@ EvidenceDocuments: TypeAlias = _SidecarEvidenceBundleLike | Document | Sequence[
 
 _MAX_SPAN = 8
 _MAX_CANDIDATES_PER_BLOCK = 256
-_TEXT_CACHE_SIZE = 65_536
 _GEOMETRY_AGREEMENT = 0.42
 _VISUAL_TYPES = frozenset({ElementType.IMAGE, ElementType.FIGURE, ElementType.CHART})
 _IGNORED_COORDINATE_SYSTEMS = {
@@ -202,6 +200,202 @@ class _State:
     node: _Node | None
 
 
+@dataclass(frozen=True, slots=True)
+class _TextFeatures:
+    characters: Counter[str]
+    tokens: Counter[str]
+    token_count: int
+
+
+@dataclass(slots=True)
+class _MatchWorkspace:
+    """Per-invocation text caches released when one match job completes."""
+
+    normalized: dict[tuple[str, bool], str]
+    features: dict[str, _TextFeatures]
+    similarities: dict[tuple[str, str], float]
+    thresholded_similarities: dict[tuple[str, str, float], float | None]
+
+    @classmethod
+    def create(cls) -> _MatchWorkspace:
+        return cls(normalized={}, features={}, similarities={}, thresholded_similarities={})
+
+    def normalize(self, value: str, *, formula: bool = False) -> str:
+        key = (value, formula)
+        normalized = self.normalized.get(key)
+        if normalized is None:
+            normalized = _normalize_text(value, formula=formula)
+            self.normalized[key] = normalized
+        return normalized
+
+    def text_features(self, value: str) -> _TextFeatures:
+        features = self.features.get(value)
+        if features is None:
+            tokens = Counter(value.split())
+            features = _TextFeatures(
+                characters=Counter(value),
+                tokens=tokens,
+                token_count=sum(tokens.values()),
+            )
+            self.features[value] = features
+        return features
+
+    def similarity(self, left: str, right: str) -> float:
+        pair = _canonical_text_pair(left, right)
+        cached = self.similarities.get(pair)
+        if cached is None:
+            cached = _cached_text_similarity(*pair)
+            self.similarities[pair] = cached
+        return cached
+
+    def similarity_at_least(
+        self,
+        left: str,
+        right: str,
+        minimum: float,
+    ) -> float | None:
+        left, right = _canonical_text_pair(left, right)
+        key = (left, right, minimum)
+        if key in self.thresholded_similarities:
+            return self.thresholded_similarities[key]
+        result = _text_similarity_at_least_uncached(left, right, minimum, self)
+        self.thresholded_similarities[key] = result
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class _TextSpan:
+    start: int
+    end: int
+    page_number: int
+    normalized_text: str
+    units: tuple[_Unit, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ExactAnchor:
+    block_index: int
+    span: _TextSpan
+
+
+class _TextCandidateIndex:
+    """Pre-normalized spans plus conservative exact/monotonic search windows."""
+
+    __slots__ = ("_anchors", "_exact", "_spans_by_start", "_unit_count", "_windows")
+
+    def __init__(
+        self,
+        blocks: Sequence[MarkdownBlock],
+        units: Sequence[_Unit],
+        workspace: _MatchWorkspace,
+    ) -> None:
+        spans_by_start: list[list[_TextSpan]] = [[] for _unit in units]
+        exact: dict[str, list[_TextSpan]] = defaultdict(list)
+        for start, unit in enumerate(units):
+            if unit.element_type in _VISUAL_TYPES:
+                continue
+            span_units: list[_Unit] = []
+            fragments: list[str] = []
+            for end in range(start, min(len(units), start + _MAX_SPAN)):
+                next_unit = units[end]
+                if (
+                    next_unit.page_number != unit.page_number
+                    or next_unit.element_type in _VISUAL_TYPES
+                ):
+                    break
+                span_units.append(next_unit)
+                fragments.append(next_unit.normalized_text)
+                span = _TextSpan(
+                    start=start,
+                    end=end + 1,
+                    page_number=unit.page_number,
+                    normalized_text=" ".join(fragments),
+                    units=tuple(span_units),
+                )
+                spans_by_start[start].append(span)
+                exact[span.normalized_text].append(span)
+                workspace.text_features(span.normalized_text)
+
+        anchors: list[_ExactAnchor] = []
+        last_end = 0
+        for block in blocks:
+            if block.kind is MarkdownBlockKind.IMAGE:
+                continue
+            target = workspace.normalize(
+                _block_text(block),
+                formula=block.kind is MarkdownBlockKind.EQUATION,
+            )
+            matches = [
+                span
+                for span in exact.get(target, ())
+                if span.end - span.start <= _maximum_span(block)
+            ]
+            # Greedy document order is intentional.  A provider can expose a
+            # second column earlier in its element list; accepting a later
+            # longest-subsequence alternative would move the alignment across
+            # that column boundary.  Conflicting exact spans remain fuzzy
+            # fallback territory instead of becoming anchors.
+            if len(matches) == 1 and matches[0].start >= last_end:
+                anchors.append(_ExactAnchor(block_index=block.index, span=matches[0]))
+                last_end = matches[0].end
+
+        windows: dict[str, tuple[int, int]] = {}
+        # One anchor cannot establish a bounded interval, so retain the exact
+        # exhaustive behavior for sparse/ambiguous inputs.
+        active_anchors = anchors if len(anchors) >= 2 else []
+        for block in blocks:
+            previous = next(
+                (anchor for anchor in reversed(active_anchors) if anchor.block_index < block.index),
+                None,
+            )
+            following = next(
+                (anchor for anchor in active_anchors if anchor.block_index > block.index),
+                None,
+            )
+            windows[block.id] = (
+                previous.span.end if previous is not None else 0,
+                following.span.start if following is not None else len(units),
+            )
+
+        self._anchors = tuple(active_anchors)
+        self._exact = {key: tuple(value) for key, value in exact.items()}
+        self._spans_by_start = tuple(tuple(value) for value in spans_by_start)
+        self._unit_count = len(units)
+        self._windows = windows
+
+    @property
+    def anchors(self) -> tuple[_ExactAnchor, ...]:
+        return self._anchors
+
+    def spans_for(self, block: MarkdownBlock) -> list[_TextSpan]:
+        lower, upper = self._windows.get(block.id, (0, self._unit_count))
+        maximum_span = _maximum_span(block)
+        return [
+            span
+            for start in range(lower, min(upper, self._unit_count))
+            for span in self._spans_by_start[start]
+            if span.end <= upper and span.end - span.start <= maximum_span
+        ]
+
+    def exhaustive_spans_for(self, block: MarkdownBlock) -> list[_TextSpan]:
+        maximum_span = _maximum_span(block)
+        return [
+            span
+            for spans in self._spans_by_start
+            for span in spans
+            if span.end - span.start <= maximum_span
+        ]
+
+    def alignment_respects_anchors(self, aligned: Sequence[_Candidate]) -> bool:
+        locations = {
+            (candidate.block.index, candidate.start, candidate.end) for candidate in aligned
+        }
+        return all(
+            (anchor.block_index, anchor.span.start, anchor.span.end) in locations
+            for anchor in self._anchors
+        )
+
+
 def match_sidecar_evidence(
     content: MarkdownContent,
     layout: ScanDocumentLayout,
@@ -218,15 +412,30 @@ def match_sidecar_evidence(
     sources = _document_sources(evidence)
     if not sources or not content.blocks or not layout.pages:
         return []
+    workspace = _MatchWorkspace.create()
     scan_pages = {page.number: page for page in layout.pages}
     contributions: list[_Candidate] = []
     for source in sources:
-        units = _evidence_units(source, scan_pages)
+        units = _evidence_units(source, scan_pages, workspace)
         if units:
-            aligned = _align_source(content.blocks, units)
+            candidate_index = _TextCandidateIndex(content.blocks, units, workspace)
+            aligned = _align_source(content.blocks, units, candidate_index, workspace)
+            if not candidate_index.alignment_respects_anchors(aligned):
+                aligned = _align_source(
+                    content.blocks,
+                    units,
+                    candidate_index,
+                    workspace,
+                    exhaustive=True,
+                )
             contributions.extend(aligned)
             contributions.extend(
-                _shared_consecutive_text_candidates(content.blocks, units, aligned)
+                _shared_consecutive_text_candidates(
+                    content.blocks,
+                    units,
+                    aligned,
+                    workspace,
+                )
             )
             contributions.extend(
                 _unreliable_exact_visual_candidates(content.blocks, units, aligned)
@@ -282,6 +491,7 @@ def _document_sources(evidence: EvidenceDocuments) -> list[_DocumentSource]:
 def _evidence_units(
     source: _DocumentSource,
     scan_pages: Mapping[int, ScanPageLayout],
+    workspace: _MatchWorkspace | None = None,
 ) -> list[_Unit]:
     document_provider = _provider_name(source.document, source.provider_hint)
     if (
@@ -314,7 +524,11 @@ def _evidence_units(
             if coordinate_system in _IGNORED_COORDINATE_SYSTEMS:
                 continue
             text = _element_text(element)
-            normalized = _normalize_text(text, formula=element.type is ElementType.FORMULA)
+            normalized = (
+                workspace.normalize(text, formula=element.type is ElementType.FORMULA)
+                if workspace is not None
+                else _normalize_text(text, formula=element.type is ElementType.FORMULA)
+            )
             is_visual = element.type in _VISUAL_TYPES
             if not normalized and not is_visual:
                 continue
@@ -669,7 +883,6 @@ def _block_text(block: MarkdownBlock) -> str:
     return block.text
 
 
-@lru_cache(maxsize=32_768)
 def _normalize_text(value: str, *, formula: bool = False) -> str:
     value = html.unescape(unicodedata.normalize("NFKC", value)).strip()
     if formula:
@@ -701,7 +914,6 @@ def _canonical_text_pair(left: str, right: str) -> tuple[str, str]:
     return (left, right) if left <= right else (right, left)
 
 
-@lru_cache(maxsize=_TEXT_CACHE_SIZE)
 def _cached_text_similarity(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
@@ -722,13 +934,18 @@ def _cached_text_similarity(left: str, right: str) -> float:
     return min(1.0, max(sequence, 0.68 * sequence + 0.32 * token_f1, containment))
 
 
-def _text_similarity(left: str, right: str) -> float:
-    """Return exact symmetric similarity with bounded cross-call memoization."""
+def _text_similarity(
+    left: str,
+    right: str,
+    workspace: _MatchWorkspace | None = None,
+) -> float:
+    """Return exact symmetric similarity, optionally cached for one match job."""
 
+    if workspace is not None:
+        return workspace.similarity(left, right)
     return _cached_text_similarity(*_canonical_text_pair(left, right))
 
 
-@lru_cache(maxsize=_TEXT_CACHE_SIZE)
 def _cached_text_similarity_at_least(
     left: str,
     right: str,
@@ -743,21 +960,33 @@ def _cached_text_similarity_at_least(
     without changing any accepted candidate or its score.
     """
 
+    return _text_similarity_at_least_uncached(
+        left,
+        right,
+        minimum,
+        _MatchWorkspace.create(),
+    )
+
+
+def _text_similarity_at_least_uncached(
+    left: str,
+    right: str,
+    minimum: float,
+    workspace: _MatchWorkspace,
+) -> float | None:
     if not left or not right:
         return None
     if left == right:
         return 1.0 if minimum <= 1.0 else None
 
-    left_characters = Counter(left)
-    right_characters = Counter(right)
-    character_overlap = sum((left_characters & right_characters).values())
+    left_features = workspace.text_features(left)
+    right_features = workspace.text_features(right)
+    character_overlap = sum((left_features.characters & right_features.characters).values())
     sequence_upper_bound = 2.0 * character_overlap / (len(left) + len(right))
 
-    left_tokens = Counter(left.split())
-    right_tokens = Counter(right.split())
-    token_overlap = sum((left_tokens & right_tokens).values())
+    token_overlap = sum((left_features.tokens & right_features.tokens).values())
     token_f1 = (
-        2.0 * token_overlap / (sum(left_tokens.values()) + sum(right_tokens.values()))
+        2.0 * token_overlap / (left_features.token_count + right_features.token_count)
         if token_overlap
         else 0.0
     )
@@ -776,7 +1005,7 @@ def _cached_text_similarity_at_least(
     )
     if upper_bound < minimum - 1e-12:
         return None
-    similarity = _cached_text_similarity(left, right)
+    similarity = workspace.similarity(left, right)
     return similarity if similarity >= minimum else None
 
 
@@ -784,18 +1013,35 @@ def _text_similarity_at_least(
     left: str,
     right: str,
     minimum: float,
+    workspace: _MatchWorkspace | None = None,
 ) -> float | None:
-    return _cached_text_similarity_at_least(
-        *_canonical_text_pair(left, right),
-        minimum,
-    )
+    if workspace is not None:
+        return workspace.similarity_at_least(left, right, minimum)
+    return _cached_text_similarity_at_least(*_canonical_text_pair(left, right), minimum)
 
 
-def _align_source(blocks: Sequence[MarkdownBlock], units: Sequence[_Unit]) -> list[_Candidate]:
+def _align_source(
+    blocks: Sequence[MarkdownBlock],
+    units: Sequence[_Unit],
+    candidate_index: _TextCandidateIndex | None = None,
+    workspace: _MatchWorkspace | None = None,
+    *,
+    exhaustive: bool = False,
+) -> list[_Candidate]:
+    workspace = workspace or _MatchWorkspace.create()
+    candidate_index = candidate_index or _TextCandidateIndex(blocks, units, workspace)
     states: dict[int, _State] = {0: _State(total_score=0.0, match_count=0, node=None)}
     text_candidate_cache: dict[int, list[_Candidate]] = {}
     for block in blocks:
-        candidates = _block_candidates(block, blocks, units, text_candidate_cache)
+        candidates = _block_candidates(
+            block,
+            blocks,
+            units,
+            text_candidate_cache,
+            candidate_index,
+            workspace,
+            exhaustive=exhaustive,
+        )
         if not candidates:
             continue
         state_ends, prefix_states = _prefix_states(states)
@@ -828,6 +1074,7 @@ def _shared_consecutive_text_candidates(
     blocks: Sequence[MarkdownBlock],
     units: Sequence[_Unit],
     aligned: Sequence[_Candidate],
+    workspace: _MatchWorkspace | None = None,
 ) -> list[_Candidate]:
     """Recover leading Markdown text fused into one provider text unit.
 
@@ -847,10 +1094,11 @@ def _shared_consecutive_text_candidates(
 
     if len(blocks) < 2:
         return []
+    workspace = workspace or _MatchWorkspace.create()
     aligned_by_block = {candidate.block.id: candidate for candidate in aligned}
     ordered_aligned = sorted(aligned, key=lambda candidate: candidate.block.index)
     normalized_blocks = [
-        _normalize_text(
+        workspace.normalize(
             _block_text(block),
             formula=block.kind is MarkdownBlockKind.EQUATION,
         )
@@ -944,6 +1192,7 @@ def _shared_consecutive_text_candidates(
                     combined_text,
                     source_text,
                     minimum_similarity,
+                    workspace,
                 )
                 if similarity is None:
                     continue
@@ -1089,21 +1338,50 @@ def _block_candidates(
     blocks: Sequence[MarkdownBlock],
     units: Sequence[_Unit],
     text_candidate_cache: dict[int, list[_Candidate]],
+    candidate_index: _TextCandidateIndex,
+    workspace: _MatchWorkspace,
+    *,
+    exhaustive: bool,
 ) -> list[_Candidate]:
     if block.kind is MarkdownBlockKind.IMAGE:
-        return _visual_candidates(block, blocks, units, text_candidate_cache)
-    return _cached_text_block_candidates(block, units, text_candidate_cache)
+        return _visual_candidates(
+            block,
+            blocks,
+            units,
+            text_candidate_cache,
+            candidate_index,
+            workspace,
+            exhaustive=exhaustive,
+        )
+    return _cached_text_block_candidates(
+        block,
+        units,
+        text_candidate_cache,
+        candidate_index,
+        workspace,
+        exhaustive=exhaustive,
+    )
 
 
 def _cached_text_block_candidates(
     block: MarkdownBlock,
     units: Sequence[_Unit],
     cache: dict[int, list[_Candidate]],
+    candidate_index: _TextCandidateIndex,
+    workspace: _MatchWorkspace,
+    *,
+    exhaustive: bool,
 ) -> list[_Candidate]:
     key = id(block)
     candidates = cache.get(key)
     if candidates is None:
-        candidates = _text_block_candidates(block, units)
+        candidates = _text_block_candidates(
+            block,
+            units,
+            candidate_index,
+            workspace,
+            exhaustive=exhaustive,
+        )
         cache[key] = candidates
     return candidates
 
@@ -1111,37 +1389,44 @@ def _cached_text_block_candidates(
 def _text_block_candidates(
     block: MarkdownBlock,
     units: Sequence[_Unit],
+    candidate_index: _TextCandidateIndex | None = None,
+    workspace: _MatchWorkspace | None = None,
+    *,
+    exhaustive: bool = False,
 ) -> list[_Candidate]:
-    target = _normalize_text(
+    workspace = workspace or _MatchWorkspace.create()
+    candidate_index = candidate_index or _TextCandidateIndex([block], units, workspace)
+    target = workspace.normalize(
         _block_text(block),
         formula=block.kind is MarkdownBlockKind.EQUATION,
     )
     if not target:
         return []
-    maximum_span = (
-        2
-        if block.kind is MarkdownBlockKind.TABLE
-        else 4
-        if block.kind in {MarkdownBlockKind.HEADING, MarkdownBlockKind.EQUATION}
-        else _MAX_SPAN
-    )
     candidates: list[_Candidate] = []
-    for start, unit in enumerate(units):
-        if unit.element_type in _VISUAL_TYPES:
+    spans = (
+        candidate_index.exhaustive_spans_for(block)
+        if exhaustive
+        else candidate_index.spans_for(block)
+    )
+    for span in spans:
+        if not _plausible_start(
+            target,
+            span.units[0].normalized_text,
+            len(units),
+            workspace,
+        ):
             continue
-        if not _plausible_start(target, unit.normalized_text, len(units)):
-            continue
-        span: list[_Unit] = []
-        for end in range(start, min(len(units), start + maximum_span)):
-            next_unit = units[end]
-            if next_unit.page_number != unit.page_number:
-                break
-            if next_unit.element_type in _VISUAL_TYPES:
-                break
-            span.append(next_unit)
-            candidate = _span_candidate(block, target, start, end + 1, span)
-            if candidate is not None:
-                candidates.append(candidate)
+        candidate = _span_candidate(
+            block,
+            target,
+            span.start,
+            span.end,
+            span.units,
+            workspace,
+            candidate_text=span.normalized_text,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
     candidates.sort(key=lambda item: (-item.match_score, item.start, item.end, item.element_ids))
     return sorted(
         candidates[:_MAX_CANDIDATES_PER_BLOCK],
@@ -1154,6 +1439,10 @@ def _visual_candidates(
     blocks: Sequence[MarkdownBlock],
     units: Sequence[_Unit],
     text_candidate_cache: dict[int, list[_Candidate]],
+    candidate_index: _TextCandidateIndex,
+    workspace: _MatchWorkspace,
+    *,
+    exhaustive: bool,
 ) -> list[_Candidate]:
     visual_units = [unit for unit in units if unit.element_type in _VISUAL_TYPES]
     if not visual_units:
@@ -1164,14 +1453,20 @@ def _visual_candidates(
         blocks,
         units,
         text_candidate_cache,
+        candidate_index,
+        workspace,
         reverse=True,
+        exhaustive=exhaustive,
     )
     following = _nearest_text_anchor(
         block,
         blocks,
         units,
         text_candidate_cache,
+        candidate_index,
+        workspace,
         reverse=False,
+        exhaustive=exhaustive,
     )
     identity_matches = [
         (_visual_identity_strength(block_keys, set(unit.visual_keys)), unit)
@@ -1258,8 +1553,11 @@ def _nearest_text_anchor(
     blocks: Sequence[MarkdownBlock],
     units: Sequence[_Unit],
     text_candidate_cache: dict[int, list[_Candidate]],
+    candidate_index: _TextCandidateIndex,
+    workspace: _MatchWorkspace,
     *,
     reverse: bool,
+    exhaustive: bool,
 ) -> _Candidate | None:
     neighbors = [
         candidate
@@ -1273,6 +1571,9 @@ def _nearest_text_anchor(
             neighbor,
             units,
             text_candidate_cache,
+            candidate_index,
+            workspace,
+            exhaustive=exhaustive,
         )
         if not candidates:
             continue
@@ -1335,7 +1636,22 @@ def _visual_candidate(
     )
 
 
-def _plausible_start(target: str, unit: str, unit_count: int) -> bool:
+def _maximum_span(block: MarkdownBlock) -> int:
+    return (
+        2
+        if block.kind is MarkdownBlockKind.TABLE
+        else 4
+        if block.kind in {MarkdownBlockKind.HEADING, MarkdownBlockKind.EQUATION}
+        else _MAX_SPAN
+    )
+
+
+def _plausible_start(
+    target: str,
+    unit: str,
+    unit_count: int,
+    workspace: _MatchWorkspace | None = None,
+) -> bool:
     if unit_count <= 400:
         return True
     target_tokens = set(target.split())
@@ -1349,6 +1665,7 @@ def _plausible_start(target: str, unit: str, unit_count: int) -> bool:
             target[:prefix],
             unit[:prefix],
             0.55,
+            workspace,
         )
         is not None
     )
@@ -1360,8 +1677,12 @@ def _span_candidate(
     start: int,
     end: int,
     units: Sequence[_Unit],
+    workspace: _MatchWorkspace | None = None,
+    *,
+    candidate_text: str | None = None,
 ) -> _Candidate | None:
-    candidate_text = " ".join(unit.normalized_text for unit in units)
+    if candidate_text is None:
+        candidate_text = " ".join(unit.normalized_text for unit in units)
     threshold = (
         0.56
         if block.kind is MarkdownBlockKind.EQUATION
@@ -1371,7 +1692,12 @@ def _span_candidate(
         if len(target) <= 3
         else 0.62
     )
-    text_score = _text_similarity_at_least(target, candidate_text, threshold)
+    text_score = _text_similarity_at_least(
+        target,
+        candidate_text,
+        threshold,
+        workspace,
+    )
     if text_score is None:
         return None
     type_score = _type_score(block.kind, [unit.element_type for unit in units])

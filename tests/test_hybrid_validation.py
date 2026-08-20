@@ -777,10 +777,56 @@ def test_hybrid_validation_can_enforce_project_rendered_visual_score(
     assert report.metrics["render_backend"]["status"] == "rendered"
     assert report.metrics["rendered_visual"]["dimension_similarity"] == 1.0
     assert report.metrics["rendered_visual"]["score"] == pytest.approx(1.0)
+    assert report.metrics["rendered_visual_policy"] == {
+        "metric_version": report.metrics["rendered_visual"]["metric_version"],
+        "default_minimum_score": 0.05,
+        "requested_minimum_score": 0.99,
+        "effective_minimum_score": 0.99,
+        "enforced": True,
+    }
     assert _gate(report, "render_backend_available").passed
     assert _gate(report, "rendered_page_count").passed
     assert _gate(report, "rendered_visual_similarity").passed
+    assert _gate(report, "rendered_visual_similarity").expected == ">=0.990000"
     assert "rendered_pixel_similarity" not in report.unmeasured
+
+
+def test_any_successful_render_enforces_default_visual_v2_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    markdown, layout = _fixture(tmp_path)
+    output = tmp_path / "blank-render-result.docx"
+    reconstruct_hybrid(markdown, layout, output=output)
+    blank_path = tmp_path / "blank-render.png"
+    Image.new("RGB", (600, 840), "white").save(blank_path)
+
+    def blank_render(*args: object, **kwargs: object) -> DocumentRenderResult:
+        return DocumentRenderResult(
+            requested_backend="auto",
+            used_backend="libreoffice",
+            status="rendered",
+            pages=(blank_path.read_bytes(),),
+            executable="project-test-backend",
+            page_sizes_points=_physical_page_sizes(layout),
+        )
+
+    monkeypatch.setattr(
+        "docreconstruct.evaluation.document_rendering.render_docx_pages",
+        blank_render,
+    )
+
+    report = validate_hybrid(markdown, layout, output, render_backend="auto")
+    visual_gate = _gate(report, "rendered_visual_similarity")
+
+    assert not report.passed
+    assert not visual_gate.passed
+    assert visual_gate.expected == ">=0.050000"
+    assert report.metrics["rendered_visual"]["metric_version"].startswith("2.")
+    assert report.metrics["rendered_visual"]["score"] < 0.02
+    assert report.metrics["rendered_visual_policy"]["requested_minimum_score"] is None
+    assert report.metrics["rendered_visual_policy"]["effective_minimum_score"] == 0.05
+    assert report.metrics["rendered_visual_policy"]["enforced"] is True
 
 
 def test_hybrid_validation_rejects_wrong_physical_pdf_page_box(

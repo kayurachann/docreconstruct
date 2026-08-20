@@ -821,6 +821,121 @@ def benchmark_ocr_command(
         _fail(exc)
 
 
+@cli.command("benchmark-reconstruction")
+def benchmark_reconstruction_command(
+    dataset: Path = typer.Argument(
+        ...,
+        exists=True,
+        readable=True,
+        help=(
+            "Three-source benchmark manifest or directory containing reconstruction-benchmark.json."
+        ),
+    ),
+    output: Path = typer.Option(
+        Path("reconstruction-benchmark-report.json"),
+        "--output",
+        "-o",
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        "--output-dir",
+        help="Directory for fresh per-run DOCX, QA, and optional render artifacts.",
+    ),
+    seed: int | None = typer.Option(None, "--seed"),
+    qa_backend: str = typer.Option(
+        "native",
+        "--qa-backend",
+        "--render-backend",
+        help="QA backend: native (no external process), auto, or libreoffice.",
+    ),
+    qa_renderer_path: Path | None = typer.Option(
+        None,
+        "--qa-renderer-path",
+        "--renderer-path",
+        help="Explicit LibreOffice/soffice executable for rendered benchmark mode.",
+    ),
+    minimum_visual_score: float | None = typer.Option(
+        None,
+        "--min-visual-score",
+        min=0.0,
+        max=1.0,
+    ),
+    save_render_artifacts: bool = typer.Option(
+        False,
+        "--save-render-artifacts",
+        help="Retain source, candidate, and difference PNGs for rendered cases.",
+    ),
+    allow_remote_assets: bool = typer.Option(
+        False,
+        "--allow-remote-assets",
+        help=(
+            "Runtime opt-in for remote Markdown assets. A manifest request is also "
+            "required; manifests cannot enable network access by themselves."
+        ),
+    ),
+    fail_fast: bool = typer.Option(False, "--fail-fast"),
+) -> None:
+    """Generate DOCX candidates from all three authorities and score the full job."""
+
+    normalized_backend = qa_backend.strip().casefold()
+    if normalized_backend not in {"native", "auto", "libreoffice"}:
+        _fail(ValueError("--qa-backend must be native, auto, or libreoffice"))
+        return
+    if qa_renderer_path is not None and normalized_backend == "native":
+        _fail(ValueError("--qa-renderer-path requires --qa-backend auto or libreoffice"))
+        return
+    if qa_renderer_path is not None and not qa_renderer_path.is_file():
+        _fail(ValueError(f"--qa-renderer-path is not a file: {qa_renderer_path}"))
+        return
+    if minimum_visual_score is not None and normalized_backend == "native":
+        _fail(ValueError("--min-visual-score requires --qa-backend auto or libreoffice"))
+        return
+    try:
+        from docreconstruct import evaluation
+
+        report = evaluation.run_reconstruction_benchmark(
+            dataset,
+            output_dir=output_dir,
+            output_path=output,
+            seed=seed,
+            render_backend=normalized_backend,
+            renderer_path=qa_renderer_path,
+            minimum_visual_score=minimum_visual_score,
+            save_render_artifacts=save_render_artifacts,
+            allow_remote_assets=allow_remote_assets,
+            fail_fast=fail_fast,
+        )
+        console.print(f"[green]Wrote[/green] {output.resolve()}")
+        quality = (
+            f"incomplete ({report.quality_complete_cases}/{len(report.results)} cases; "
+            "rendered fidelity required)"
+            if report.mean_quality_score is None
+            else f"{report.mean_quality_score:.6f}"
+        )
+        operational = (
+            "unavailable"
+            if report.operational_success_rate is None
+            else f"{report.operational_success_rate:.6f}"
+        )
+        validation_gates = (
+            "unavailable"
+            if report.mean_validation_gate_score is None
+            else f"{report.mean_validation_gate_score:.6f}"
+        )
+        console.print(
+            f"cases: {report.successful_cases} succeeded, {report.failed_cases} failed, "
+            f"{report.accepted_cases} accepted; quality: {quality}; "
+            f"validation gates: {validation_gates}; "
+            f"operational: {operational}"
+        )
+        if report.failed_cases or report.accepted_cases != len(report.results):
+            raise typer.Exit(code=3)
+    except typer.Exit:
+        raise
+    except (DocReconstructError, ImportError, RuntimeError, ValueError, OSError) as exc:
+        _fail(exc)
+
+
 @cli.command("dataset-validate")
 def dataset_validate_command(
     manifest: Path = typer.Argument(
@@ -930,6 +1045,7 @@ _COMMANDS = {
     "compare",
     "benchmark",
     "benchmark-ocr",
+    "benchmark-reconstruction",
     "dataset-validate",
     "train-plan",
 }

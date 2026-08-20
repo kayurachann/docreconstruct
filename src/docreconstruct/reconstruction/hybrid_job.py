@@ -19,6 +19,7 @@ from docreconstruct.evidence import ProviderHints
 from docreconstruct.extraction import ExtractionMode, ExtractionResult, extract_to_markdown
 from docreconstruct.reconstruction.hybrid import (
     HybridReconstructionResult,
+    prepare_hybrid_render_plan,
     prepare_hybrid_sources,
     reconstruct_hybrid,
 )
@@ -257,6 +258,11 @@ def run_hybrid_job(
         strict_evidence=strict_evidence,
         _phase_seconds=phase_seconds,
     )
+    prepared_render = prepare_hybrid_render_plan(
+        prepared,
+        allow_remote_assets=allow_remote_assets,
+        _phase_seconds=phase_seconds,
+    )
     reconstruction = reconstruct_hybrid(
         content_path,
         layout_path,
@@ -266,6 +272,7 @@ def run_hybrid_job(
         output=output,
         allow_remote_assets=allow_remote_assets,
         _prepared_sources=prepared,
+        _prepared_render_plan=prepared_render,
         _phase_seconds=phase_seconds,
     )
     if reconstruction.manifest.content.sha256 != content_before:
@@ -284,6 +291,9 @@ def run_hybrid_job(
         minimum_visual_score=minimum_visual_score,
         render_output_dir=render_output_dir,
         _prepared_sources=prepared,
+        _prepared_render_plan=prepared_render,
+        _expected_render_plan_sha256=reconstruction.render_plan_sha256,
+        _expected_candidate_sha256=reconstruction.output.sha256,
         _phase_seconds=phase_seconds,
     )
     qa_path = None

@@ -2098,6 +2098,132 @@ def test_separate_masthead_blocks_and_bottom_furniture_use_native_zones(
     assert left_alignment.get(f"{word}val") == "left"
 
 
+def test_split_masthead_uses_source_columns_without_splitting_authority_block(
+    tmp_path: Path,
+) -> None:
+    markdown = tmp_path / "positioned-masthead.md"
+    markdown.write_text(
+        "CENTRAL EDUCATION AUTHORITY\nOFFICIAL EXAMINATION\n(04 pages)\n\n"
+        "# NATIONAL COMPLETION EXAMINATION 2026 Subject: PHYSICS Time: 50 minutes\n\n"
+        "Candidate name: ..... Candidate ID: .....\n\n"
+        "Code: 0204\n\n"
+        "## PART I: Choose one answer\n\n"
+        "Question 1. Editable prompt.\n",
+        encoding="utf-8",
+    )
+    content = parse_markdown_content(markdown)
+    source_boxes = [
+        PixelBox(x0=80, y0=35, x1=265, y1=125),
+        PixelBox(x0=320, y0=35, x1=555, y1=115),
+        PixelBox(x0=55, y0=135, x1=345, y1=180),
+        PixelBox(x0=445, y0=140, x1=555, y1=172),
+        PixelBox(x0=55, y0=195, x1=550, y1=225),
+        PixelBox(x0=55, y0=235, x1=550, y1=270),
+    ]
+    page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=800,
+        pdf_width=595,
+        pdf_height=793,
+        content_bbox=PixelBox(x0=40, y0=20, x1=565, y1=780),
+        line_pitch=30,
+        image=Image.new("RGB", (600, 800), "white"),
+        metadata={
+            "source_kind": "image",
+            "column_count": 1,
+            "header_column_count": 2,
+            "header_divider": 285,
+            "render_content_bbox": {"x0": 50, "y0": 20, "x1": 560, "y1": 780},
+        },
+    )
+    scan = ScanDocumentLayout(source=str(tmp_path / "layout.png"), pages=[page])
+    placements = [
+        HybridBlockPlacement(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+            source_bbox=source_boxes[index],
+            source_rows=[source_boxes[index]],
+            source_gap_before=0,
+            match_score=1.0,
+            geometry_source="json_consensus",
+        )
+        for index, block in enumerate(content.blocks)
+    ]
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=scan.source,
+        pages=[
+            HybridPagePlan(
+                number=1,
+                pdf_width=page.pdf_width,
+                pdf_height=page.pdf_height,
+                raster_width=page.width,
+                raster_height=page.height,
+                content_bbox=page.content_bbox,
+                line_pitch=page.line_pitch,
+                placements=placements,
+            )
+        ],
+    )
+
+    payload = render_hybrid_docx(content, scan, plan, [])
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        root = ElementTree.fromstring(package.read("word/document.xml"))
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    masthead = next(
+        table
+        for table in root.iter(f"{word}tbl")
+        if (caption := table.find(f"{word}tblPr/{word}tblCaption")) is not None
+        and caption.get(f"{word}val") == "docreconstruct:split-masthead"
+    )
+    left_cell, right_cell = masthead.findall(f"{word}tr/{word}tc")
+    left_text = " ".join(node.text or "" for node in left_cell.iter(f"{word}t"))
+    right_text = " ".join(node.text or "" for node in right_cell.iter(f"{word}t"))
+
+    authority = "CENTRAL EDUCATION AUTHORITY OFFICIAL EXAMINATION (04 pages)"
+    assert authority in left_text
+    assert "NATIONAL COMPLETION EXAMINATION" not in left_text
+    assert left_text.index(authority) < left_text.index("Candidate name")
+    assert "NATIONAL COMPLETION EXAMINATION" in right_text
+    assert right_text.index("NATIONAL COMPLETION EXAMINATION") < right_text.index("Code: 0204")
+    assert authority not in right_text
+
+    authority_paragraph = next(
+        paragraph
+        for paragraph in left_cell.iter(f"{word}p")
+        if "CENTRAL EDUCATION AUTHORITY"
+        in "".join(node.text or "" for node in paragraph.iter(f"{word}t"))
+    )
+    assert authority_paragraph.find(f".//{word}br") is not None
+
+    title_paragraph = next(
+        paragraph
+        for paragraph in right_cell.iter(f"{word}p")
+        if "NATIONAL COMPLETION EXAMINATION"
+        in "".join(node.text or "" for node in paragraph.iter(f"{word}t"))
+    )
+    title_alignment = title_paragraph.find(f"{word}pPr/{word}jc")
+    assert title_alignment is not None
+    assert title_alignment.get(f"{word}val") == "center"
+
+    code_paragraph = next(
+        paragraph
+        for paragraph in right_cell.iter(f"{word}p")
+        if "Code: 0204" in "".join(node.text or "" for node in paragraph.iter(f"{word}t"))
+    )
+    borders = code_paragraph.find(f"{word}pPr/{word}pBdr")
+    assert borders is not None
+    assert {
+        edge.tag.rsplit("}", 1)[-1] for edge in borders if edge.get(f"{word}val") == "single"
+    } == {"top", "left", "bottom", "right"}
+    code_indent = code_paragraph.find(f"{word}pPr/{word}ind")
+    assert code_indent is not None
+    assert int(code_indent.get(f"{word}left", "0")) > 0
+    assert int(code_indent.get(f"{word}right", "0")) > 0
+
+
 def test_no_source_footer_does_not_materialize_empty_footer_part(tmp_path: Path) -> None:
     block = MarkdownBlock(
         id="page-1-body",

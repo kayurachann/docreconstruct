@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from docreconstruct.reconstruction.asset_matching import AssetMatch
 from docreconstruct.reconstruction.evidence_matching import EvidenceMatch
@@ -560,6 +560,82 @@ def test_vertical_fit_replaces_coarse_merged_prose_row_with_source_glyph_units()
     )
 
 
+def test_vertical_fit_uses_source_glyph_floor_for_dense_geometric_option_sheet() -> None:
+    blocks: list[MarkdownBlock] = []
+    placements: list[HybridBlockPlacement] = []
+    text_lines: list[ScanTextLine] = []
+    block_index = 0
+    for question_index in range(9):
+        group_id = f"question-{question_index}"
+        for label in (None, "A", "B", "C", "D"):
+            y0 = 60 + block_index * 28
+            row = PixelBox(x0=70, y0=y0, x1=930, y1=y0 + 25)
+            text_lines.append(ScanTextLine(bbox=row, segments=[row], ink_density=0.1))
+            is_option = label is not None
+            block = MarkdownBlock(
+                id=f"block-{block_index}",
+                index=block_index,
+                kind=(MarkdownBlockKind.OPTION if is_option else MarkdownBlockKind.PARAGRAPH),
+                text=(
+                    f"{label}. Answer."
+                    if is_option
+                    else f"Question {question_index + 1}. "
+                    + "Dense editable examination wording. " * 8
+                ),
+                group_id=group_id,
+                starts_group=not is_option,
+            )
+            blocks.append(block)
+            placements.append(
+                HybridBlockPlacement(
+                    block_id=block.id,
+                    block_index=block_index,
+                    page_number=1,
+                    source_bbox=row,
+                    source_rows=[row],
+                    source_gap_before=0,
+                    geometry_source=(
+                        "scan_inferred_group_option" if is_option else "json_consensus"
+                    ),
+                )
+            )
+            block_index += 1
+
+    page = ScanPageLayout(
+        number=1,
+        width=1000,
+        height=1500,
+        pdf_width=500,
+        pdf_height=750,
+        content_bbox=PixelBox(x0=50, y0=40, x1=950, y1=1450),
+        line_pitch=28,
+        text_lines=text_lines,
+        image=Image.new("RGB", (1000, 1500), "white"),
+        metadata={"source_kind": "image", "column_count": 1},
+    )
+
+    budget = build_page_vertical_fit_budget(
+        page,
+        placements,
+        blocks=blocks,
+        printable_height_points=720,
+        font_size_points=12,
+        line_height_points=18,
+        headroom_points=8,
+    )
+
+    assert budget.calibrated and budget.fits
+    assert budget.geometry_coverage == 1
+    assert budget.native_leading_scale == 0
+    assert budget.font_size_scale == 1
+    assert budget.line_height_scale == pytest.approx(
+        budget.source_glyph_height
+        / 18
+        * budget.estimated_line_count
+        / (budget.estimated_line_count + 5)
+    )
+
+
 def test_vertical_fit_preserves_coarse_tall_inline_math_ink() -> None:
     page = ScanPageLayout(
         number=1,
@@ -854,6 +930,267 @@ def test_coarse_group_evidence_splits_option_segments_without_crossing_figure() 
     assert by_id["continuation"].source_bbox == continuation
     assert by_id["continuation"].source_bbox.y1 < figure.y0
     assert by_id["figure"].source_bbox == figure
+
+
+@pytest.mark.parametrize("columns", [1, 2])
+def test_coarse_group_evidence_preserves_physical_option_topology(columns: int) -> None:
+    group = "section-1:question-1"
+    blocks = [
+        MarkdownBlock(
+            id="question",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Question 1. Select one answer.",
+            group_id=group,
+            starts_group=True,
+        ),
+        *[
+            MarkdownBlock(
+                id=f"option-{label}",
+                index=index,
+                kind=MarkdownBlockKind.OPTION,
+                text=f"{label}. Answer {index}.",
+                group_id=group,
+            )
+            for index, label in enumerate("ABCD", start=1)
+        ],
+    ]
+    prompt = PixelBox(x0=50, y0=100, x1=760, y1=125)
+    source_rows: list[ScanTextLine] = [
+        ScanTextLine(bbox=prompt, segments=[prompt], ink_density=0.1)
+    ]
+    expected: list[PixelBox] = []
+    for row_index in range(4 // columns):
+        top = 145 + row_index * 34
+        slots = [
+            PixelBox(
+                x0=50 + column * 390,
+                y0=top,
+                x1=330 + column * 390,
+                y1=top + 24,
+            )
+            for column in range(columns)
+        ]
+        expected.extend(slots)
+        source_rows.append(
+            ScanTextLine(
+                bbox=PixelBox(
+                    x0=min(slot.x0 for slot in slots),
+                    y0=top,
+                    x1=max(slot.x1 for slot in slots),
+                    y1=top + 24,
+                ),
+                segments=slots,
+                ink_density=0.1,
+            )
+        )
+    page = ScanPageLayout(
+        number=1,
+        width=840,
+        height=400,
+        pdf_width=595,
+        pdf_height=283,
+        content_bbox=PixelBox(x0=40, y0=40, x1=800, y1=350),
+        line_pitch=30,
+        text_lines=source_rows,
+        image=Image.new("RGB", (840, 400), "white"),
+    )
+    content = MarkdownContent(source="authority.md", blocks=blocks)
+    layout = ScanDocumentLayout(source="layout.png", pages=[page])
+    plan = build_hybrid_layout_plan(
+        content,
+        layout,
+        [],
+        [],
+        evidence_matches=[
+            EvidenceMatch(
+                block_id="question",
+                block_index=0,
+                page_number=1,
+                source_bbox=PixelBox(x0=45, y0=90, x1=790, y1=285),
+                source_rows=[prompt],
+                match_score=0.98,
+                confidence=0.95,
+                providers=("paddleocr",),
+                element_ids=("question-and-options",),
+            )
+        ],
+    )
+    by_id = {placement.block_id: placement for placement in plan.pages[0].placements}
+
+    assert [by_id[f"option-{label}"].source_bbox for label in "ABCD"] == expected
+    for option_index, label in enumerate("ABCD"):
+        expected_row = source_rows[1 + option_index // columns].bbox
+        assert by_id[f"option-{label}"].source_rows == [expected_row]
+
+
+def test_coarse_group_prefers_stable_scan_grid_over_clipped_following_ink() -> None:
+    group = "section-1:question-1"
+    blocks = [
+        MarkdownBlock(
+            id="question",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Question 1. Prompt spanning two source rows.",
+            group_id=group,
+            starts_group=True,
+        ),
+        *[
+            MarkdownBlock(
+                id=f"option-{label}",
+                index=index,
+                kind=MarkdownBlockKind.OPTION,
+                text=f"{label}. Compact answer.",
+                group_id=group,
+            )
+            for index, label in enumerate("ABCD", start=1)
+        ],
+    ]
+    prompt_rows = [
+        PixelBox(x0=55, y0=95, x1=740, y1=119),
+        PixelBox(x0=55, y0=128, x1=620, y1=152),
+    ]
+    option_segments = [PixelBox(x0=x0, y0=164, x1=x0 + 120, y1=190) for x0 in (55, 245, 435, 625)]
+    option_row = PixelBox(x0=55, y0=164, x1=745, y1=190)
+    # The provider rectangle clips just two pixels from a following four-part
+    # baseline. Local trailing-row selection used to mistake it for A--D and
+    # displace the complete, stable scan row immediately above.
+    following_segments = [
+        PixelBox(x0=x0, y0=204, x1=x0 + 120, y1=228) for x0 in (55, 245, 435, 625)
+    ]
+    following_row = PixelBox(x0=55, y0=204, x1=745, y1=228)
+    image = Image.new("RGB", (840, 300), "white")
+    draw = ImageDraw.Draw(image)
+    for box in [*prompt_rows, *option_segments, *following_segments]:
+        draw.rectangle((box.x0, box.y0, box.x1 - 1, box.y1 - 1), fill="black")
+    page = ScanPageLayout(
+        number=1,
+        width=840,
+        height=300,
+        pdf_width=595,
+        pdf_height=212,
+        content_bbox=PixelBox(x0=40, y0=40, x1=800, y1=260),
+        line_pitch=34,
+        text_lines=[
+            *[ScanTextLine(bbox=row, segments=[row], ink_density=0.1) for row in prompt_rows],
+            ScanTextLine(bbox=option_row, segments=option_segments, ink_density=0.1),
+            ScanTextLine(
+                bbox=following_row,
+                segments=following_segments,
+                ink_density=0.1,
+            ),
+        ],
+        image=image,
+    )
+    plan = build_hybrid_layout_plan(
+        MarkdownContent(source="authority.md", blocks=blocks),
+        ScanDocumentLayout(source="layout.png", pages=[page]),
+        [],
+        [],
+        evidence_matches=[
+            EvidenceMatch(
+                block_id="question",
+                block_index=0,
+                page_number=1,
+                source_bbox=PixelBox(x0=45, y0=90, x1=790, y1=206),
+                source_rows=prompt_rows,
+                match_score=0.98,
+                confidence=0.95,
+                providers=("paddleocr",),
+                element_ids=("question-and-options",),
+            )
+        ],
+    )
+    by_id = {placement.block_id: placement for placement in plan.pages[0].placements}
+
+    assert by_id["question"].source_rows == prompt_rows
+    assert [by_id[f"option-{label}"].source_bbox for label in "ABCD"] == option_segments
+    assert all(by_id[f"option-{label}"].source_rows == [option_row] for label in "ABCD")
+
+
+def test_coarse_group_uses_local_raster_rows_when_global_pitch_merged_options() -> None:
+    group = "section-1:question-1"
+    blocks = [
+        MarkdownBlock(
+            id="question",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Question 1. Select one answer.",
+            group_id=group,
+            starts_group=True,
+        ),
+        *[
+            MarkdownBlock(
+                id=f"option-{label}",
+                index=index,
+                kind=MarkdownBlockKind.OPTION,
+                text=f"{label}. Answer {index}.",
+                group_id=group,
+            )
+            for index, label in enumerate("ABCD", start=1)
+        ],
+    ]
+    prompt = PixelBox(x0=60, y0=75, x1=650, y1=99)
+    option_rows = [
+        [
+            PixelBox(x0=80, y0=115 + row * 42, x1=300, y1=139 + row * 42),
+            PixelBox(x0=500, y0=115 + row * 42, x1=720, y1=139 + row * 42),
+        ]
+        for row in range(2)
+    ]
+    image = Image.new("RGB", (840, 260), "white")
+    draw = ImageDraw.Draw(image)
+    for box in [prompt, *(box for row in option_rows for box in row)]:
+        draw.rectangle((box.x0, box.y0, box.x1 - 1, box.y1 - 1), fill="black")
+    page = ScanPageLayout(
+        number=1,
+        width=840,
+        height=260,
+        pdf_width=595,
+        pdf_height=184,
+        content_bbox=PixelBox(x0=40, y0=40, x1=800, y1=220),
+        line_pitch=34,
+        # The global analyzer retained only the prompt; the compact answer
+        # baselines are available solely from the authoritative raster region.
+        text_lines=[ScanTextLine(bbox=prompt, segments=[prompt], ink_density=0.1)],
+        image=image,
+    )
+    plan = build_hybrid_layout_plan(
+        MarkdownContent(source="authority.md", blocks=blocks),
+        ScanDocumentLayout(source="layout.png", pages=[page]),
+        [],
+        [],
+        evidence_matches=[
+            EvidenceMatch(
+                block_id="question",
+                block_index=0,
+                page_number=1,
+                source_bbox=PixelBox(x0=50, y0=68, x1=780, y1=205),
+                source_rows=[prompt],
+                match_score=0.98,
+                confidence=0.95,
+                providers=("paddleocr",),
+                element_ids=("question-and-options",),
+            )
+        ],
+    )
+    by_id = {placement.block_id: placement for placement in plan.pages[0].placements}
+    expected = [box for row in option_rows for box in row]
+    actual = [by_id[f"option-{label}"].source_bbox for label in "ABCD"]
+
+    assert all(box is not None for box in actual)
+    assert [(box.x0, box.x1) for box in actual if box is not None] == [
+        (box.x0, box.x1) for box in expected
+    ]
+    assert all(
+        actual_box is not None
+        and actual_box.y0 <= expected_box.y0
+        and actual_box.y1 >= expected_box.y1
+        for actual_box, expected_box in zip(actual, expected, strict=True)
+    )
+    assert by_id["option-A"].source_rows == by_id["option-B"].source_rows
+    assert by_id["option-C"].source_rows == by_id["option-D"].source_rows
+    assert by_id["option-A"].source_rows != by_id["option-C"].source_rows
 
 
 def test_vertical_fit_counts_overlapping_disjoint_images_as_one_row() -> None:

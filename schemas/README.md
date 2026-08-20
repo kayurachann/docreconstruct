@@ -6,6 +6,8 @@
   multipart `options` field of `POST /v1/reconstruct`.
 - `route-options.schema.json` describes selective provider routing options.
 - `compare-options.schema.json` describes fidelity comparison options.
+- `reconstruction-benchmark.schema.json` describes end-to-end benchmark cases
+  containing original layout, reviewed Markdown, and positioned JSON evidence.
 
 The Pydantic models in `docreconstruct.ir` and `docreconstruct.api.models` are
 the runtime authority. Cross-field constraints such as `bbox.x1 >= bbox.x0`,
