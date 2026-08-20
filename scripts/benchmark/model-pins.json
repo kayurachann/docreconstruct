@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "systems": {
+    "docling": {
+      "package": "docling==2.120.3",
+      "source_revision": "46a1103b8c4adc6bbde1e30ec48fd0f7142d5600",
+      "huggingface_snapshots": [
+        {
+          "repo": "docling-project/docling-layout-heron",
+          "revision": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8"
+        },
+        {
+          "repo": "docling-project/docling-models",
+          "revision": "fc0f2d45e2218ea24bce5045f58a389aed16dc23"
+        }
+      ],
+      "direct_cache_directories": []
+    },
+    "mineru": {
+      "package": "mineru==3.4.5",
+      "source_revision": "fbb1257a555a3fde78ae5aaaa931e3b3f8fb2883",
+      "huggingface_snapshots": [
+        {
+          "repo": "opendatalab/PDF-Extract-Kit-1.0",
+          "revision": "ed6b654c018d742e65a17671e379c5e6ecc87ec9",
+          "files": [
+            {
+              "path": "models/Layout/PP-DocLayoutV2/config.json",
+              "bytes": 3787,
+              "sha256": "18a696b54c64c4fa582afcd3a41407c4b65a99dc7ab187ad2fed8af8e4128ad8"
+            },
+            {
+              "path": "models/Layout/PP-DocLayoutV2/model.safetensors",
+              "bytes": 214798436,
+              "sha256": "e60f3725aeedc88fd319416ef166bda79171a41516a301c27cab9132dc2739d2"
+            },
+            {
+              "path": "models/Layout/PP-DocLayoutV2/preprocessor_config.json",
+              "bytes": 575,
+              "sha256": "56281a70c931a291dcaf653605fb4df713fd823f65e939aecd6005c26346a103"
+            },
+            {
+              "path": "models/MFR/unimernet_hf_small_2503/config.json",
+              "bytes": 5094,
+              "sha256": "64c02e9897410658f7668c6a334a8b306276e4697656cbe06f86d8c4f01fc040"
+            },
+            {
+              "path": "models/MFR/unimernet_hf_small_2503/generation_config.json",
+              "bytes": 191,
+              "sha256": "d56ca9d5c5efa4283a2565ae42771bafd02910b56ef9c53e9b441c9c4c896d09"
+            },
+            {
+              "path": "models/MFR/unimernet_hf_small_2503/model.safetensors",
+              "bytes": 810036696,
+              "sha256": "9244e2565585c0f89bc3a6eeeea080ef3c588375fc0d536074fe88e80b917cda"
+            },
+            {
+              "path": "models/MFR/unimernet_hf_small_2503/README.md",
+              "bytes": 1657,
+              "sha256": "96574f3857e919353024edc423b9165dbf46e902cfe97b5b7ec552283bd744f6"
+            },
+            {
+              "path": "models/MFR/unimernet_hf_small_2503/special_tokens_map.json",
+              "bytes": 552,
+              "sha256": "358c249e2fb29060c6b73157d428853b0c48710deffc8ee670ab1013880946c9"
+            },
+            {
+              "path": "models/MFR/unimernet_hf_small_2503/tokenizer.json",
+              "bytes": 3581950,
+              "sha256": "f8e29e3c3a8017f067b62a3d2d9211bb4cebc08a25afe58d3a6069981e3684d6"
+            },
+            {
+              "path": "models/MFR/unimernet_hf_small_2503/tokenizer_config.json",
+              "bytes": 4522,
+              "sha256": "28b99e33895e06389c26c139b1333b82b7f5d8ed5f4fd14998acfd7c20989338"
+            },
+            {
+              "path": "models/OCR/paddleocr_torch/ch_PP-OCRv6_small_det_infer.safetensors",
+              "bytes": 9938124,
+              "sha256": "89a96a8adc4e9cd0c994098edc76022e496d35844392562b4694c8fbc583f2da"
+            },
+            {
+              "path": "models/OCR/paddleocr_torch/ch_PP-OCRv6_small_rec_infer.safetensors",
+              "bytes": 21204736,
+              "sha256": "f65a332afe5aa663f0b9d5706f4ae8457b5b4058a842d5c1eb22df505c27d642"
+            },
+            {
+              "path": "models/TabCls/paddle_table_cls/PP-LCNet_x1_0_table_cls.onnx",
+              "bytes": 6776877,
+              "sha256": "c84bf1d79c1c74d534b5b12adb14dd12151c42f7ae3e4be4f1042b830f80b949"
+            },
+            {
+              "path": "models/TabRec/SlanetPlus/slanet-plus.onnx",
+              "bytes": 7758305,
+              "sha256": "d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b"
+            },
+            {
+              "path": "models/TabRec/UnetStructure/unet.onnx",
+              "bytes": 8335007,
+              "sha256": "0ea48d3a17e35ef5c2e498a5e799566073234d39b1079ca21d9f4fafe73c6d20"
+            }
+          ]
+        }
+      ],
+      "direct_cache_directories": []
+    },
+    "marker": {
+      "package": "marker-pdf==2.0.0",
+      "source_revision": "947d7688c0739297a7b9eb08b1a463e3a6853981",
+      "mode": "fast-cpu",
+      "llama_cpp": {
+        "release": "b10507",
+        "archive_sha256": "f7035274bb6a50c7eda05e21929ab9dbd5fdc1cc37915a9b510c34951491f3ae"
+      },
+      "huggingface_snapshots": [
+        {
+          "repo": "datalab-to/surya_layout2",
+          "revision": "0aee81d5fd9275c0582e545bf3a56944b1e75679"
+        },
+        {
+          "repo": "datalab-to/surya-ocr-2-gguf",
+          "revision": "6a3a4c30e5e74446d4f8b6afd05b2f2da970f470"
+        }
+      ],
+      "direct_cache_directories": [
+        "ocr_error_detection/2025_02_18"
+      ],
+      "direct_cache_files": [
+        {
+          "path": "ocr_error_detection/2025_02_18/.gitattributes",
+          "bytes": 1519,
+          "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/config.json",
+          "bytes": 647,
+          "sha256": "e11e04c98a43e1ed1eff099b4d6cb6dffbeb24fd226f709365defcb0f9e9ef83"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/manifest.json",
+          "bytes": 161,
+          "sha256": "51408a4e2a69aa6ca91de4e91e953244b619ecf8bc28badfc3c30d653d643505"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/model.safetensors",
+          "bytes": 270664948,
+          "sha256": "42cd5698d62dcdd408628fe6d67c3e1981fc90523ca286f358f1dea8e212de3e"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/README.md",
+          "bytes": 32,
+          "sha256": "a9d7ccd967379ca368a6495f523a63d1d582513406d2da37899f8bf51815db6b"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/special_tokens_map.json",
+          "bytes": 695,
+          "sha256": "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/tokenizer_config.json",
+          "bytes": 1198,
+          "sha256": "228e2c7cc6d20d298f7a3d69b89103f6dcb0b533c0b1146a6e6b6e7bb511ae35"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/tokenizer.json",
+          "bytes": 2919362,
+          "sha256": "bf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088"
+        },
+        {
+          "path": "ocr_error_detection/2025_02_18/vocab.txt",
+          "bytes": 995526,
+          "sha256": "fe0fda7c425b48c516fc8f160d594c8022a0808447475c1a7c6d6479763f310c"
+        }
+      ],
+      "font": {
+        "name": "GoNotoCurrent-Regular.ttf",
+        "bytes": 14700060,
+        "sha256": "882afbab965608c2d2bc627fd8016b962aa5a6be2d358f9de24a7b5967c5632e"
+      }
+    }
+  }
+}

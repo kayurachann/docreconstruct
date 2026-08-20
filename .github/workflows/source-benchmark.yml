@@ -1,0 +1,747 @@
+name: Source-only OmniDocBench benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Run the 296-page hard subset first, or the complete 1,651-page release"
+        type: choice
+        required: true
+        default: hard
+        options:
+          - hard
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-benchmark-${{ github.ref }}-${{ inputs.suite }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  SHARD_COUNT: "20"
+  MODEL_CACHE_PROTOCOL: docling-2.120.3-mineru-3.4.5-marker-2.0.0-v1
+  DATASET_REVISION: aa1ee96d106dbe53d0ae59474d75c6e6d9b53fec
+  DATASET_JSON_SHA256: a45cd84b04ad8b793e775089640e6b681209abea33ead54c1828ddca35fae496
+  EVALUATOR_REVISION: 193627ae9e97d89188468ed1ee3b7a856ff76044
+
+jobs:
+  prepare-sources:
+    name: Prepare shared raw-image shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    steps:
+      - name: Check out the exact benchmark code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore or reserve the immutable source cache key
+        id: source-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/corpus
+          key: source-benchmark-input-${{ runner.os }}-${{ env.DATASET_REVISION }}-raw-v1-${{ hashFiles('scripts/benchmark/omnidocbench-v1.6-source-index.json', 'scripts/benchmark/prepare_sources.py') }}-${{ inputs.suite }}-${{ matrix.shard }}-of-20
+
+      - name: Download and byte-verify this raw source shard once
+        if: steps.source-cache.outputs.cache-hit != 'true'
+        env:
+          SUITE: ${{ inputs.suite }}
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
+          python scripts/benchmark/prepare_sources.py \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --output "$RUNNER_TEMP/corpus" \
+            --subset "$SUITE" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT"
+
+      - name: Verify every restored or downloaded source byte
+        env:
+          SUITE: ${{ inputs.suite }}
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
+          python scripts/benchmark/prepare_sources.py \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --output "$RUNNER_TEMP/corpus" \
+            --subset "$SUITE" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT" \
+            --verify-only
+
+  prepare-models:
+    name: Prepare one model cache / ${{ matrix.system }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        system: [docling, mineru, marker]
+    env:
+      SYSTEM: ${{ matrix.system }}
+      HF_HOME: ${{ github.workspace }}/.benchmark-cache/huggingface
+      XDG_CACHE_HOME: ${{ github.workspace }}/.benchmark-cache/xdg
+      MODEL_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/surya
+      TORCH_HOME: ${{ github.workspace }}/.benchmark-cache/torch
+      FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
+      FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
+      MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    steps:
+      - name: Check out the exact benchmark code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore or reserve the immutable model cache key
+        id: models
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/.benchmark-cache
+          key: source-benchmark-model-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ env.MODEL_CACHE_PROTOCOL }}-${{ matrix.system }}-${{ hashFiles('scripts/benchmark/model-pins.json') }}
+
+      - name: Download one GT-free raw image for model warm-up
+        run: |
+          python scripts/benchmark/prepare_sources.py \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --output "$RUNNER_TEMP/prewarm-corpus" \
+            --subset hard \
+            --shard-index 0 \
+            --shard-count 296
+
+      - name: Install the pinned candidate
+        run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/prewarm-pip-report.json"
+
+      - name: Materialize only declared immutable Hugging Face snapshots
+        run: |
+          args=(
+            --pins scripts/benchmark/model-pins.json
+            --system "$SYSTEM"
+            --hf-home "$HF_HOME"
+            --output "$RUNNER_TEMP/realized-huggingface-models.json"
+          )
+          if [[ "$SYSTEM" == "mineru" ]]; then
+            args+=(--mineru-config "$MINERU_TOOLS_CONFIG_JSON")
+          fi
+          if [[ "${{ steps.models.outputs.cache-hit }}" == "true" ]]; then
+            args+=(--offline)
+          fi
+          python scripts/benchmark/materialize_pinned_models.py "${args[@]}"
+          echo "HF_HUB_OFFLINE=1" >> "$GITHUB_ENV"
+          if [[ "$SYSTEM" == "mineru" ]]; then
+            echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
+          fi
+
+      - name: Inventory a restored cache before repeat warm-up
+        if: steps.models.outputs.cache-hit == 'true'
+        run: |
+          python scripts/benchmark/verify_model_cache.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM" \
+            --hf-home "$HF_HOME" \
+            --direct-cache "$MODEL_CACHE_DIR" \
+            --font-path "$FONT_PATH" \
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON"
+          inventory_args=(
+            --output "$RUNNER_TEMP/model-cache-before-prewarm.json"
+            --cache-root "$HF_HOME"
+            --cache-root "$XDG_CACHE_HOME"
+            --cache-root "$MODEL_CACHE_DIR"
+            --cache-root "$TORCH_HOME"
+            --cache-root "$FONT_DIR"
+          )
+          if [[ "$SYSTEM" == "marker" ]]; then
+            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          fi
+          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
+
+      - name: Materialize models without retaining the warm-up output
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.benchmark-cache"
+          mapfile -d '' sources < <(find "$RUNNER_TEMP/prewarm-corpus/sources" -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print0 | sort -z)
+          if [[ "${#sources[@]}" -eq 0 ]]; then
+            echo "No warm-up image found" >&2
+            exit 1
+          fi
+          python scripts/benchmark/run_candidate.py \
+            --system "$SYSTEM" \
+            --input "${sources[0]}" \
+            --output "$RUNNER_TEMP/prewarm.md" \
+            --work-dir "$RUNNER_TEMP/prewarm-work"
+
+      - name: Reject an incomplete or mutated model cache
+        run: |
+          python scripts/benchmark/verify_model_cache.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM" \
+            --hf-home "$HF_HOME" \
+            --direct-cache "$MODEL_CACHE_DIR" \
+            --font-path "$FONT_PATH" \
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON"
+
+      - name: Hash the exact model cache
+        run: |
+          inventory_args=(
+            --output "$RUNNER_TEMP/model-cache-manifest.json"
+            --pip-report "$RUNNER_TEMP/prewarm-pip-report.json"
+            --cache-root "$HF_HOME"
+            --cache-root "$XDG_CACHE_HOME"
+            --cache-root "$MODEL_CACHE_DIR"
+            --cache-root "$TORCH_HOME"
+            --cache-root "$FONT_DIR"
+          )
+          if [[ "$SYSTEM" == "marker" ]]; then
+            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          fi
+          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
+
+      - name: Prove repeat warm-up did not mutate a restored cache
+        if: steps.models.outputs.cache-hit == 'true'
+        run: |
+          python scripts/benchmark/compare_model_inventories.py \
+            --prepared "$RUNNER_TEMP/model-cache-before-prewarm.json" \
+            --inference "$RUNNER_TEMP/model-cache-manifest.json"
+
+      - name: Upload the small public model inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: model-inventory-${{ matrix.system }}-${{ github.sha }}
+          path: ${{ runner.temp }}/model-cache-manifest.json
+          compression-level: 6
+          retention-days: 30
+          if-no-files-found: error
+
+  inference:
+    name: ${{ matrix.system }} / shard ${{ matrix.shard }}
+    needs: [prepare-sources, prepare-models]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        system: [docreconstruct-tesseract, docling, mineru, marker]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    env:
+      SYSTEM: ${{ matrix.system }}
+      SHARD_INDEX: ${{ matrix.shard }}
+      SUITE: ${{ inputs.suite }}
+      HF_HOME: ${{ github.workspace }}/.benchmark-cache/huggingface
+      XDG_CACHE_HOME: ${{ github.workspace }}/.benchmark-cache/xdg
+      MODEL_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/surya
+      TORCH_HOME: ${{ github.workspace }}/.benchmark-cache/torch
+      FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
+      FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
+      MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    steps:
+      - name: Check out the exact benchmark code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore the shared source shard
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/corpus
+          key: source-benchmark-input-${{ runner.os }}-${{ env.DATASET_REVISION }}-raw-v1-${{ hashFiles('scripts/benchmark/omnidocbench-v1.6-source-index.json', 'scripts/benchmark/prepare_sources.py') }}-${{ inputs.suite }}-${{ matrix.shard }}-of-20
+          fail-on-cache-miss: true
+
+      - name: Reject a corrupt or incomplete restored source shard
+        run: |
+          python scripts/benchmark/prepare_sources.py \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --output "$RUNNER_TEMP/corpus" \
+            --subset "$SUITE" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT" \
+            --verify-only
+
+      - name: Restore the one shared model cache
+        id: restore-models
+        if: matrix.system != 'docreconstruct-tesseract'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/.benchmark-cache
+          key: source-benchmark-model-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ env.MODEL_CACHE_PROTOCOL }}-${{ matrix.system }}-${{ hashFiles('scripts/benchmark/model-pins.json') }}
+          fail-on-cache-miss: true
+
+      - name: Download the prepared model inventory
+        if: matrix.system != 'docreconstruct-tesseract'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: model-inventory-${{ matrix.system }}-${{ github.sha }}
+          path: ${{ runner.temp }}/prepared-model-inventory
+
+      - name: Install the pinned candidate
+        run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/pip-install-report.json"
+
+      - name: Verify the restored model cache
+        if: matrix.system != 'docreconstruct-tesseract'
+        run: |
+          python scripts/benchmark/verify_model_cache.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM" \
+            --hf-home "$HF_HOME" \
+            --direct-cache "$MODEL_CACHE_DIR" \
+            --font-path "$FONT_PATH" \
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON"
+
+      - name: Forbid remote model mutation during measured inference
+        if: matrix.system != 'docreconstruct-tesseract'
+        run: |
+          echo "HF_HUB_OFFLINE=1" >> "$GITHUB_ENV"
+          if [[ "$SYSTEM" == "mineru" ]]; then
+            echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the ground-truth-free harness manifest
+        run: |
+          args=(
+            --root "$RUNNER_TEMP/corpus"
+            --output "$RUNNER_TEMP/run"
+            --destination "$RUNNER_TEMP/source-benchmark.json"
+            --wrapper "$GITHUB_WORKSPACE/scripts/benchmark/run_candidate.py"
+            --checkout "$GITHUB_WORKSPACE"
+            --system "$SYSTEM"
+            --subset "$SUITE"
+            --git-sha "$GITHUB_SHA"
+            --shard-index "$SHARD_INDEX"
+            --shard-count "$SHARD_COUNT"
+            --shard-budget-seconds 18000
+          )
+          if [[ "$SYSTEM" == "docreconstruct-tesseract" ]]; then
+            args+=(--tessdata "$BENCHMARK_TESSDATA")
+          fi
+          python scripts/benchmark/create_manifest.py "${args[@]}"
+
+      - name: Run cold-isolated source inference
+        id: harness
+        run: |
+          set +e
+          python -m docreconstruct.cli benchmark-source \
+            "$RUNNER_TEMP/source-benchmark.json" \
+            --subset "$SUITE" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT" \
+            --no-official-evaluator
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 && "$status" -ne 3 ]]; then
+            echo "Harness infrastructure failed with exit $status" >&2
+            exit "$status"
+          fi
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Inventory the realized runtime and model blobs
+        run: |
+          inventory_args=(
+            --output "$RUNNER_TEMP/environment.json"
+            --pip-report "$RUNNER_TEMP/pip-install-report.json"
+            --cache-root "$HF_HOME"
+            --cache-root "$XDG_CACHE_HOME"
+            --cache-root "$MODEL_CACHE_DIR"
+            --cache-root "$TORCH_HOME"
+            --cache-root "$FONT_DIR"
+          )
+          if [[ "$SYSTEM" == "docreconstruct-tesseract" ]]; then
+            inventory_args+=(
+              --runtime-command "tesseract=$(command -v tesseract)"
+              --runtime-file "tessdata-eng=$BENCHMARK_TESSDATA/eng.traineddata"
+              --runtime-file "tessdata-chi-sim=$BENCHMARK_TESSDATA/chi_sim.traineddata"
+              --runtime-file "tessdata-chi-tra=$BENCHMARK_TESSDATA/chi_tra.traineddata"
+            )
+          elif [[ "$SYSTEM" == "marker" ]]; then
+            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          fi
+          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
+
+      - name: Prove the inference cache matches the prepared cache
+        if: matrix.system != 'docreconstruct-tesseract'
+        run: |
+          python scripts/benchmark/compare_model_inventories.py \
+            --prepared "$RUNNER_TEMP/prepared-model-inventory/model-cache-manifest.json" \
+            --inference "$RUNNER_TEMP/environment.json"
+
+      - name: Stage public evidence only
+        run: |
+          python scripts/benchmark/stage_inference.py \
+            --run "$RUNNER_TEMP/run" \
+            --output "$RUNNER_TEMP/public-artifact" \
+            --system "$SYSTEM" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT" \
+            --corpus-manifest "$RUNNER_TEMP/corpus/corpus-manifest.json" \
+            --source-verification "$RUNNER_TEMP/corpus/source-verification.json" \
+            --environment "$RUNNER_TEMP/environment.json" \
+            --harness-exit-code "${{ steps.harness.outputs.exit_code }}"
+
+      - name: Upload predictions, failures, hashes, and timings
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inference-${{ inputs.suite }}-${{ matrix.system }}-${{ matrix.shard }}-of-20
+          path: ${{ runner.temp }}/public-artifact
+          compression-level: 6
+          retention-days: 14
+          if-no-files-found: error
+
+  prepare-evaluator-runtime:
+    name: Prepare and smoke the pinned native evaluator runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      EVALUATOR_RUNTIME_ROOT: ${{ github.workspace }}/.evaluator-runtime
+      EVALUATOR_NATIVE_PROTOCOL: py3.10-tl2025-minimal-im7.1.1-47-gs9.55.0-v2
+    steps:
+      - name: Check out the exact benchmark code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up the documented evaluator Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.10"
+
+      - name: Restore or reserve the immutable native runtime key
+        id: evaluator-runtime
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/.evaluator-runtime
+          key: source-benchmark-evaluator-${{ runner.os }}-${{ env.EVALUATOR_NATIVE_PROTOCOL }}-${{ env.EVALUATOR_REVISION }}-${{ hashFiles('scripts/benchmark/evaluator-requirements.lock', 'scripts/benchmark/install_evaluator_runtime.sh') }}
+
+      - name: Install the hashed documented native runtime
+        id: install
+        if: steps.evaluator-runtime.outputs.cache-hit != 'true'
+        run: |
+          set +e
+          bash scripts/benchmark/install_evaluator_runtime.sh \
+            "$EVALUATOR_RUNTIME_ROOT" \
+            "$GITHUB_WORKSPACE/scripts/benchmark/evaluator-requirements.lock" \
+            > "$RUNNER_TEMP/native-install.stdout.log" \
+            2> "$RUNNER_TEMP/native-install.stderr.log"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Activate the restored native runtime
+        if: steps.install.outputs.exit_code == '0' || steps.evaluator-runtime.outputs.cache-hit == 'true'
+        run: |
+          tex_bin="$EVALUATOR_RUNTIME_ROOT/tools/texlive/2025/bin/x86_64-linux"
+          {
+            echo "$tex_bin"
+            echo "$EVALUATOR_RUNTIME_ROOT/tools/bin"
+            echo "$EVALUATOR_RUNTIME_ROOT/tools/imagemagick/bin"
+            echo "$EVALUATOR_RUNTIME_ROOT/venv/bin"
+          } >> "$GITHUB_PATH"
+          {
+            echo "CDM_TEXLIVE_BIN=$tex_bin"
+            echo "MAGICK_CONFIGURE_PATH=$EVALUATOR_RUNTIME_ROOT/tools/imagemagick-policy"
+            echo "SOURCE_BENCHMARK_EVALUATOR_PYTHON=$EVALUATOR_RUNTIME_ROOT/venv/bin/python"
+          } >> "$GITHUB_ENV"
+
+      - name: Check out the pinned official evaluator
+        if: steps.install.outputs.exit_code == '0' || steps.evaluator-runtime.outputs.cache-hit == 'true'
+        run: |
+          evaluator="$RUNNER_TEMP/OmniDocBench-evaluator"
+          git init "$evaluator"
+          git -C "$evaluator" remote add origin https://github.com/opendatalab/OmniDocBench.git
+          git -C "$evaluator" fetch --depth 1 origin "$EVALUATOR_REVISION"
+          git -C "$evaluator" checkout --detach FETCH_HEAD
+          test "$(git -C "$evaluator" rev-parse HEAD)" = "$EVALUATOR_REVISION"
+
+      - name: Run official environment, CDM, and serial matcher/TEDS smokes
+        id: smoke
+        if: steps.install.outputs.exit_code == '0' || steps.evaluator-runtime.outputs.cache-hit == 'true'
+        run: |
+          set +e
+          (
+            set -e
+            cd "$RUNNER_TEMP/OmniDocBench-evaluator"
+            PYTHONPATH="$RUNNER_TEMP/OmniDocBench-evaluator" \
+              "$SOURCE_BENCHMARK_EVALUATOR_PYTHON" -m pytest \
+              tools/test_environment_and_smoke.py::TestEnvironmentVersions \
+              tools/test_environment_and_smoke.py::TestCDMCalculation -v -s
+            cd "$GITHUB_WORKSPACE"
+            python scripts/benchmark/smoke_official_evaluator.py \
+              --evaluator "$RUNNER_TEMP/OmniDocBench-evaluator" \
+              --python "$SOURCE_BENCHMARK_EVALUATOR_PYTHON"
+          ) > "$RUNNER_TEMP/native-smoke.stdout.log" 2> "$RUNNER_TEMP/native-smoke.stderr.log"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Inventory the prepared native runtime
+        if: always()
+        run: |
+          evaluator_python="$EVALUATOR_RUNTIME_ROOT/venv/bin/python"
+          if [[ ! -x "$evaluator_python" ]]; then
+            evaluator_python=python
+          fi
+          "$evaluator_python" scripts/benchmark/inventory_evaluator_runtime.py \
+            --evaluator "$RUNNER_TEMP/OmniDocBench-evaluator" \
+            --requirements scripts/benchmark/evaluator-requirements.lock \
+            --runtime-root "$EVALUATOR_RUNTIME_ROOT" \
+            --output "$RUNNER_TEMP/native-runtime.json"
+          printf '%s\n' "${{ steps.install.outputs.exit_code }}" > "$RUNNER_TEMP/native-install-exit-code.txt"
+          printf '%s\n' "${{ steps.smoke.outputs.exit_code }}" > "$RUNNER_TEMP/native-smoke-exit-code.txt"
+
+      - name: Upload the runtime inventory and smoke evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: evaluator-native-runtime-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/native-runtime.json
+            ${{ runner.temp }}/native-install*.log
+            ${{ runner.temp }}/native-install-exit-code.txt
+            ${{ runner.temp }}/native-smoke*.log
+            ${{ runner.temp }}/native-smoke-exit-code.txt
+          compression-level: 6
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Reject an unverified evaluator runtime
+        if: always() && (steps.install.outputs.exit_code != '0' && steps.evaluator-runtime.outputs.cache-hit != 'true' || steps.smoke.outputs.exit_code != '0')
+        run: exit 1
+
+  official-evaluation:
+    name: Official evaluator / ${{ matrix.system }}
+    needs: [inference, prepare-evaluator-runtime]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        system: [docreconstruct-tesseract, docling, mineru, marker]
+    env:
+      SYSTEM: ${{ matrix.system }}
+      SUITE: ${{ inputs.suite }}
+    steps:
+      - name: Check out the exact benchmark code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up the documented evaluator Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.10"
+
+      - name: Restore the verified native evaluator runtime
+        id: runtime
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/.evaluator-runtime
+          key: source-benchmark-evaluator-${{ runner.os }}-py3.10-tl2025-minimal-im7.1.1-47-gs9.55.0-v2-${{ env.EVALUATOR_REVISION }}-${{ hashFiles('scripts/benchmark/evaluator-requirements.lock', 'scripts/benchmark/install_evaluator_runtime.sh') }}
+          fail-on-cache-miss: true
+
+      - name: Activate the verified native evaluator runtime
+        if: steps.runtime.outcome == 'success'
+        run: |
+          runtime="$GITHUB_WORKSPACE/.evaluator-runtime"
+          tex_bin="$runtime/tools/texlive/2025/bin/x86_64-linux"
+          {
+            echo "$tex_bin"
+            echo "$runtime/tools/bin"
+            echo "$runtime/tools/imagemagick/bin"
+            echo "$runtime/venv/bin"
+          } >> "$GITHUB_PATH"
+          {
+            echo "CDM_TEXLIVE_BIN=$tex_bin"
+            echo "MAGICK_CONFIGURE_PATH=$runtime/tools/imagemagick-policy"
+            echo "SOURCE_BENCHMARK_EVALUATOR_PYTHON=$runtime/venv/bin/python"
+          } >> "$GITHUB_ENV"
+
+      - name: Download the prepared evaluator byte inventory
+        if: steps.runtime.outcome == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: evaluator-native-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/prepared-evaluator-runtime
+
+      - name: Merge all inference shards for this system
+        id: inference-download
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: inference-${{ inputs.suite }}-${{ matrix.system }}-*-of-20
+          path: ${{ runner.temp }}/merged
+          merge-multiple: true
+
+      - name: Prove the failure-inclusive prediction set is complete
+        id: validation
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/official-$SYSTEM"
+          set +e
+          python scripts/benchmark/validate_predictions.py \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --root "$RUNNER_TEMP/merged" \
+            --system "$SYSTEM" \
+            --subset "$SUITE" \
+            --shard-count "$SHARD_COUNT" \
+            --output "$RUNNER_TEMP/official-$SYSTEM/prediction-manifest.json" \
+            > "$RUNNER_TEMP/official-$SYSTEM/prediction-validation.stdout.log" \
+            2> "$RUNNER_TEMP/official-$SYSTEM/prediction-validation.stderr.log"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch ground truth only after inference has finished
+        id: ground-truth
+        if: steps.runtime.outcome == 'success' && steps.validation.outputs.exit_code == '0'
+        continue-on-error: true
+        run: |
+          url="https://huggingface.co/datasets/opendatalab/OmniDocBench/resolve/$DATASET_REVISION/OmniDocBench.json?download=true"
+          curl --fail --location --retry 5 "$url" -o "$RUNNER_TEMP/OmniDocBench.json"
+          echo "$DATASET_JSON_SHA256  $RUNNER_TEMP/OmniDocBench.json" | sha256sum --check
+          python scripts/benchmark/select_ground_truth.py \
+            --input "$RUNNER_TEMP/OmniDocBench.json" \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --output "$RUNNER_TEMP/OmniDocBench-evaluator.json" \
+            --subset "$SUITE" \
+            --denominators "$RUNNER_TEMP/official-$SYSTEM/expected-denominators.json"
+
+      - name: Check out the pinned official evaluator
+        if: steps.ground-truth.outcome == 'success'
+        run: |
+          evaluator="$RUNNER_TEMP/OmniDocBench-evaluator"
+          git init "$evaluator"
+          git -C "$evaluator" remote add origin https://github.com/opendatalab/OmniDocBench.git
+          git -C "$evaluator" fetch --depth 1 origin "$EVALUATOR_REVISION"
+          git -C "$evaluator" checkout --detach FETCH_HEAD
+          test "$(git -C "$evaluator" rev-parse HEAD)" = "$EVALUATOR_REVISION"
+
+      - name: Re-run environment, CDM, and serial matcher/TEDS smokes before scoring
+        id: smoke
+        if: steps.ground-truth.outcome == 'success'
+        run: |
+          set +e
+          (
+            set -e
+            cd "$RUNNER_TEMP/OmniDocBench-evaluator"
+            PYTHONPATH="$RUNNER_TEMP/OmniDocBench-evaluator" \
+              "$SOURCE_BENCHMARK_EVALUATOR_PYTHON" -m pytest \
+              tools/test_environment_and_smoke.py::TestEnvironmentVersions \
+              tools/test_environment_and_smoke.py::TestCDMCalculation -v -s
+            cd "$GITHUB_WORKSPACE"
+            python scripts/benchmark/smoke_official_evaluator.py \
+              --evaluator "$RUNNER_TEMP/OmniDocBench-evaluator" \
+              --python "$SOURCE_BENCHMARK_EVALUATOR_PYTHON"
+          ) > "$RUNNER_TEMP/official-$SYSTEM/native-smoke.stdout.log" \
+            2> "$RUNNER_TEMP/official-$SYSTEM/native-smoke.stderr.log"
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$RUNNER_TEMP/official-$SYSTEM/native-smoke-exit-code.txt"
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Inventory the exact restored evaluator runtime
+        id: runtime-inventory
+        if: steps.smoke.outputs.exit_code == '0'
+        continue-on-error: true
+        run: |
+          "$SOURCE_BENCHMARK_EVALUATOR_PYTHON" \
+            scripts/benchmark/inventory_evaluator_runtime.py \
+            --evaluator "$RUNNER_TEMP/OmniDocBench-evaluator" \
+            --requirements scripts/benchmark/evaluator-requirements.lock \
+            --runtime-root "$GITHUB_WORKSPACE/.evaluator-runtime" \
+            --output "$RUNNER_TEMP/official-$SYSTEM/native-runtime.json"
+          python scripts/benchmark/compare_evaluator_inventories.py \
+            --prepared "$RUNNER_TEMP/prepared-evaluator-runtime/native-runtime.json" \
+            --restored "$RUNNER_TEMP/official-$SYSTEM/native-runtime.json"
+
+      - name: Run the official end-to-end evaluator
+        id: evaluator
+        if: steps.smoke.outputs.exit_code == '0' && steps.runtime-inventory.outcome == 'success'
+        run: |
+          set +e
+          bash scripts/benchmark/run_official_evaluator.sh \
+            "$RUNNER_TEMP/OmniDocBench-evaluator" \
+            "$RUNNER_TEMP/OmniDocBench-evaluator.json" \
+            "$RUNNER_TEMP/merged/predictions/$SYSTEM" \
+            "$RUNNER_TEMP/official-$SYSTEM" \
+            "$SYSTEM"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Record every preflight and evaluator outcome
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/official-$SYSTEM"
+          printf '%s\n' "${{ steps.runtime.outcome }}" \
+            > "$RUNNER_TEMP/official-$SYSTEM/runtime-restore-outcome.txt"
+          printf '%s\n' "${{ steps.inference-download.outcome }}" \
+            > "$RUNNER_TEMP/official-$SYSTEM/inference-download-outcome.txt"
+          printf '%s\n' "${{ steps.validation.outputs.exit_code }}" \
+            > "$RUNNER_TEMP/official-$SYSTEM/prediction-validation-exit-code.txt"
+          printf '%s\n' "${{ steps.ground-truth.outcome }}" \
+            > "$RUNNER_TEMP/official-$SYSTEM/ground-truth-outcome.txt"
+          printf '%s\n' "${{ steps.runtime-inventory.outcome }}" \
+            > "$RUNNER_TEMP/official-$SYSTEM/runtime-inventory-outcome.txt"
+
+      - name: Stage aggregate evaluator evidence without raw GT samples
+        id: staging
+        if: always()
+        continue-on-error: true
+        run: |
+          python scripts/benchmark/stage_official_evaluator.py \
+            --run "$RUNNER_TEMP/official-$SYSTEM" \
+            --output "$RUNNER_TEMP/official-public-$SYSTEM" \
+            --system "$SYSTEM" \
+            --subset "$SUITE" \
+            --expected-denominators "$RUNNER_TEMP/official-$SYSTEM/expected-denominators.json"
+
+      - name: Upload official results even when evaluation fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: official-${{ inputs.suite }}-${{ matrix.system }}
+          path: ${{ runner.temp }}/official-public-${{ matrix.system }}
+          compression-level: 6
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Fail invalid evaluator runs after preserving evidence
+        if: >-
+          ${{ always() && (
+            steps.runtime.outcome != 'success' ||
+            steps.inference-download.outcome != 'success' ||
+            steps.validation.outputs.exit_code != '0' ||
+            steps.ground-truth.outcome != 'success' ||
+            steps.smoke.outputs.exit_code != '0' ||
+            steps.runtime-inventory.outcome != 'success' ||
+            steps.evaluator.outputs.exit_code != '0' ||
+            steps.staging.outcome != 'success'
+          ) }}
+        run: exit 1
