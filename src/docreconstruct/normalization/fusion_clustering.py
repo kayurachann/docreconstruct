@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from statistics import median
@@ -205,7 +206,7 @@ def observation_sort_key(observation: FusionObservation) -> tuple[object, ...]:
         element.bbox.y1,
         element.bbox.x1,
         element.type.value,
-        _normalized_text(element.text or ""),
+        normalized_text(element.text or ""),
         element.id,
         _canonical_json(element.model_dump(mode="json")),
     )
@@ -430,8 +431,8 @@ def _text_similarity(
         return 1.0
     if left is None or right is None:
         return 0.0 if {left_type, right_type} & _TEXT_TYPES else 1.0
-    normalized_left = _normalized_text(left)
-    normalized_right = _normalized_text(right)
+    normalized_left = normalized_text(left)
+    normalized_right = normalized_text(right)
     if normalized_left == normalized_right:
         return 1.0
     if max(len(normalized_left), len(normalized_right)) > _MAX_SEQUENCE_MATCHER_CHARS:
@@ -441,8 +442,21 @@ def _text_similarity(
     return min(forward, reverse)
 
 
-def _normalized_text(value: str) -> str:
-    return " ".join(value.split()).casefold()
+def normalized_text(value: str) -> str:
+    """Fold a text value into a provider-independent comparison key.
+
+    Engines disagree about Unicode composition.  The same Vietnamese heading
+    arrives precomposed from one provider and decomposed from another — 58
+    code points against 76 for an identical reading — and comparing the raw
+    strings scores them at 0.69, under the 0.75 clustering threshold, so the
+    paragraph is emitted twice instead of corroborated once.  Folding to NFKC
+    first matches what ``evidence_matching`` already does for the same reason.
+
+    The result is only ever a comparison key.  The text that reaches the
+    document is still a provider's own value, unfolded.
+    """
+
+    return " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
 
 
 def _canonical_json(value: Any) -> str:
@@ -457,6 +471,7 @@ __all__ = [
     "cluster_page_elements",
     "cluster_sort_key",
     "logical_provider_set",
+    "normalized_text",
     "observation_sort_key",
     "provider_sort_key",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import unicodedata
 
 import pytest
 
@@ -66,6 +67,15 @@ def _page(engine: str, elements: list[Element]) -> Page:
         height=1000,
         elements=elements,
     )
+
+
+def _document(
+    engine: str,
+    text: str,
+    box: tuple[float, float, float, float],
+) -> Document:
+    element = _observation(engine, f"{engine}-1", text, box, kind=ElementType.PARAGRAPH)
+    return Document(id=f"{engine}-document", pages=[_page(engine, [element])])
 
 
 def test_tied_sort_keys_use_complete_content_and_preserve_all_fields() -> None:
@@ -311,6 +321,39 @@ def test_sequence_similarity_score_is_symmetric_for_order_sensitive_inputs() -> 
     )
 
     assert forward == reverse
+
+
+@pytest.mark.parametrize(
+    ("left_form", "right_form"),
+    list(itertools.product(("NFC", "NFD"), repeat=2)),
+)
+def test_providers_disagreeing_on_unicode_composition_still_corroborate(
+    left_form: str,
+    right_form: str,
+) -> None:
+    """One reading in two composition forms must fuse, not duplicate.
+
+    Providers do not agree on Unicode composition, and Vietnamese carries a
+    diacritic on most syllables, so a decomposed reading is 76 code points
+    where the precomposed one is 58.  Comparing the raw strings scored the
+    identical reading at 0.69 and split it into two elements, which both
+    duplicated the paragraph in the rendered document and destroyed the
+    cross-provider corroboration the fusion stage exists to produce.
+    """
+
+    heading = "Cộng hòa xã hội chủ nghĩa Việt Nam Độc lập Tự do Hạnh phúc"
+    box = (50.0, 50.0, 550.0, 80.0)
+    left = _document("paddleocr", unicodedata.normalize(left_form, heading), box)
+    right = _document("mineru", unicodedata.normalize(right_form, heading), box)
+
+    fused = fuse_documents([left, right])
+
+    (element,) = fused.pages[0].elements
+    assert element.text is not None
+    assert unicodedata.normalize("NFC", element.text) == unicodedata.normalize("NFC", heading)
+    assert element.provenance is not None
+    contributors = sorted(record.engine for record in element.provenance.contributors)
+    assert contributors == ["mineru", "paddleocr"]
 
 
 def test_missing_provenance_identity_uses_document_but_not_page_id() -> None:
