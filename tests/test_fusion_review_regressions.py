@@ -17,6 +17,7 @@ from docreconstruct.ir import (
     Point,
     Provenance,
     Relationship,
+    SourceType,
 )
 from docreconstruct.normalization import (
     fuse_documents,
@@ -700,3 +701,61 @@ def test_all_permutations_of_ambiguous_assignment_are_stable() -> None:
     expected = fuse_pages(pages).model_dump_json()
     for permutation in itertools.permutations(pages):
         assert fuse_pages(permutation).model_dump_json() == expected
+
+
+def test_providers_reporting_different_coordinate_frames_are_reconciled() -> None:
+    """A points page and a pixels page describe the same paper.
+
+    Nothing reconciled their units, so overlap was measured across mismatched
+    frames: two readings of the same paragraph never intersected and were both
+    emitted, and the fused page took the median of the differing dimensions,
+    leaving one box a third of the way outside its own page.
+    """
+
+    def document(engine: str, width: float, height: float, kind: SourceType) -> Document:
+        return Document(
+            id=f"{engine}-document",
+            pages=[
+                Page(
+                    id="page-1",
+                    number=1,
+                    width=width,
+                    height=height,
+                    source_type=kind,
+                    elements=[
+                        _observation(
+                            engine,
+                            f"{engine}-1",
+                            "The same paragraph seen twice.",
+                            (width * 0.1, height * 0.1, width * 0.9, height * 0.9),
+                            kind=ElementType.PARAGRAPH,
+                        )
+                    ],
+                )
+            ],
+        )
+
+    native = document("native_pdf", 612, 792, SourceType.NATIVE)
+    scanned = document("paddleocr", 1700, 2200, SourceType.SCANNED)
+
+    fused = fuse_documents([native, scanned])
+    page = fused.pages[0]
+    (element,) = page.elements
+
+    # The native points frame is authoritative and is adopted whole.
+    assert (page.width, page.height) == (612.0, 792.0)
+    assert element.bbox.x1 <= page.width
+    assert element.bbox.y1 <= page.height
+    assert element.provenance is not None
+    assert sorted(record.engine for record in element.provenance.contributors) == [
+        "native_pdf",
+        "paddleocr",
+    ]
+    reference = page.metadata["fusion"]["reference_frame"]
+    assert (reference["width"], reference["height"]) == (612.0, 792.0)
+    assert len(reference["rescaled"]) == 1
+
+    # The choice must not depend on the order the providers were passed.
+    forward = fuse_documents([native, scanned]).model_dump_json()
+    reverse = fuse_documents([scanned, native]).model_dump_json()
+    assert forward == reverse
