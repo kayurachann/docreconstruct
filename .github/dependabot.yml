@@ -1,0 +1,19 @@
+# The declared dependency floors had drifted years behind their advisories before
+# anything noticed: pypdf's floor carried 37 known issues and Pillow's 17, on the
+# exact code paths that read untrusted uploads. These updates keep that visible.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
