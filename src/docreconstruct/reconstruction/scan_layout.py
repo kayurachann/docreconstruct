@@ -1096,6 +1096,27 @@ def _detect_column_layout(
     }
 
 
+def ink_mask(gray_image: Image.Image) -> Any:
+    """Threshold ink against a locally blurred background.
+
+    Local illumination normalization handles photographed paper shadows while
+    retaining the deterministic fixed-threshold behaviour of clean scans.  The
+    layout planner needs the same mask, so both read this one definition.
+
+    ``background - grayscale`` is bounded by ``[-255, 255]`` for the uint8
+    rasters this receives, so int16 holds it exactly; widening both operands to
+    the platform int instead cost three eight-byte-per-pixel temporaries to
+    decide the same comparison.
+    """
+
+    np = _require_numpy()
+    grayscale = np.asarray(gray_image)
+    radius = max(7.0, min(gray_image.size) / 42.0)
+    background = np.asarray(gray_image.filter(ImageFilter.GaussianBlur(radius=radius)))
+    difference = background.astype(np.int16) - grayscale.astype(np.int16)
+    return (difference > 17) | (grayscale < 72)
+
+
 def _content_bbox(ink: Any) -> PixelBox:
     np = _require_numpy()
     height, width = ink.shape
@@ -1452,15 +1473,9 @@ def analyze_scan_page(
 ) -> ScanPageLayout:
     """Recover layout evidence from a page image without OCR."""
 
-    np = _require_numpy()
     rgb = image.convert("RGB")
     gray_image = rgb.convert("L")
-    grayscale = np.asarray(gray_image)
-    # Local illumination normalization handles photographed paper shadows while
-    # retaining the deterministic fixed-threshold behaviour of clean scans.
-    radius = max(7.0, min(rgb.size) / 42.0)
-    background = np.asarray(gray_image.filter(ImageFilter.GaussianBlur(radius=radius)))
-    ink = (grayscale.astype(int) + 17 < background.astype(int)) | (grayscale < 72)
+    ink = ink_mask(gray_image)
     content = _content_bbox(ink)
     line_pitch, line_bands = _estimate_line_pitch(ink, content)
     text_lines, refined_pitch = _detect_text_lines(ink, content, line_pitch)
