@@ -278,9 +278,7 @@ class ProjectInstallTests(unittest.TestCase):
             Path(__file__).parents[2] / ".github" / "workflows" / "source-benchmark.yml"
         ).read_text(encoding="utf-8")
         self.assertEqual(
-            workflow.count(
-                '--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON"'
-            ),
+            workflow.count('--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON"'),
             3,
         )
 
