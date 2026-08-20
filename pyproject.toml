@@ -65,6 +65,7 @@ api = [
 dev = [
   "build>=1.2,<2",
   "fastapi>=0.111,<1",
+  "hypothesis>=6.112,<7",
   "httpx>=0.27,<1",
   "mypy>=1.10,<2",
   "pytest>=8.2,<9",

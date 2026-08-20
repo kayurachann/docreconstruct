@@ -36,12 +36,15 @@ def _fixture_job(
     score: float = 0.75,
     fidelity: float | None = None,
     bad_reconstruction_sha: bool = False,
+    fail_failed_content: bool = True,
+    visual_metric_versions: dict[str, str] | None = None,
 ) -> Any:
     def run(content: Path, layout: Path, **kwargs: Any) -> Any:
         output = Path(kwargs["output"])
         assert not output.exists(), "every benchmark candidate must start fresh"
         calls.append({"content": content, "layout": layout, **kwargs})
-        if Path(content).stem.startswith("failed"):
+        content_stem = Path(content).stem
+        if fail_failed_content and content_stem.startswith("failed"):
             raise RuntimeError("intentional reconstruction failure")
         output.write_bytes(b"deterministic fixture candidate")
         output_sha = hashlib.sha256(output.read_bytes()).hexdigest()
@@ -64,7 +67,9 @@ def _fixture_job(
                 {
                     "rendered_visual": {
                         "score": fidelity,
-                        "metric_version": VISUAL_METRIC_VERSION,
+                        "metric_version": (visual_metric_versions or {}).get(
+                            content_stem, VISUAL_METRIC_VERSION
+                        ),
                     },
                     "render_backend": {
                         "status": "rendered",
@@ -279,6 +284,46 @@ def test_failed_rendered_cases_contribute_zero_to_comparable_fidelity(
     assert report.mean_quality_score == pytest.approx(0.4)
     assert report.results[1].failure is not None
     assert report.results[1].quality_score == 0.0
+
+
+def test_mixed_visual_metric_versions_are_not_combined_into_primary_aggregate(
+    tmp_path: Path,
+) -> None:
+    manifest = _dataset(tmp_path)
+    cases, _ = load_reconstruction_benchmark_manifest(manifest)
+    renderer = tmp_path / "soffice.exe"
+    renderer.write_bytes(b"fixture renderer")
+    metric_versions = {"passing": "visual-test-v1", "failed": "visual-test-v2"}
+
+    report = ReconstructionBenchmarkRunner(
+        output_dir=tmp_path / "mixed-metric-versions",
+        render_backend="libreoffice",
+        renderer_path=renderer,
+        job_runner=_fixture_job(
+            [],
+            score=1.0,
+            fidelity=0.8,
+            fail_failed_content=False,
+            visual_metric_versions=metric_versions,
+        ),
+    ).run(cases)
+
+    expected_profiles = {
+        f"rendered_visual|backend=libreoffice|metric={version}"
+        for version in metric_versions.values()
+    }
+    assert report.successful_cases == 2
+    assert report.quality_complete_cases == 2
+    assert report.mean_quality_score is None
+    assert set(report.quality_profiles) == expected_profiles
+    assert all(summary.total_cases == 1 for summary in report.quality_profiles.values())
+    assert all(
+        summary.mean_quality_score == pytest.approx(0.8)
+        for summary in report.quality_profiles.values()
+    )
+    serialized = json.loads(report.to_json())
+    assert serialized["summary"]["mean_quality_score"] is None
+    assert set(serialized["summary"]["quality_profiles"]) == expected_profiles
 
 
 def test_reconstruction_benchmark_cli_writes_report_and_returns_three_on_failure(

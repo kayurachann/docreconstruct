@@ -5,6 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from PIL import Image, ImageDraw
 
 from docreconstruct.evaluation import (
@@ -49,6 +51,113 @@ def _document(elements: list[dict[str, object]]) -> dict[str, object]:
             }
         ],
     }
+
+
+@st.composite
+def _layout_elements(
+    draw: st.DrawFn,
+    *,
+    min_size: int = 1,
+    max_size: int = 8,
+) -> list[dict[str, object]]:
+    count = draw(st.integers(min_value=min_size, max_value=max_size))
+    kinds = draw(
+        st.lists(
+            st.sampled_from(("paragraph", "heading", "formula", "table")),
+            min_size=count,
+            max_size=count,
+        )
+    )
+    widths = draw(
+        st.lists(st.integers(min_value=20, max_value=120), min_size=count, max_size=count)
+    )
+    heights = draw(
+        st.lists(st.integers(min_value=10, max_value=60), min_size=count, max_size=count)
+    )
+    return [
+        _element(
+            f"element-{index}",
+            kind=kinds[index],
+            text=f"content {index}",
+            bbox=(
+                float((index % 4) * 140 + 10),
+                float((index // 4) * 100 + 10),
+                float((index % 4) * 140 + 10 + widths[index]),
+                float((index // 4) * 100 + 10 + heights[index]),
+            ),
+            order=index,
+        )
+        for index in range(count)
+    ]
+
+
+@given(elements=_layout_elements(), data=st.data())
+def test_layout_score_is_property_invariant_under_both_permutations(
+    elements: list[dict[str, object]],
+    data: st.DataObject,
+) -> None:
+    candidate_elements = deepcopy(elements)
+    for index, element in enumerate(candidate_elements):
+        element["id"] = f"candidate-{index}"
+    reference_permutation = data.draw(st.permutations(elements), label="reference permutation")
+    candidate_permutation = data.draw(
+        st.permutations(candidate_elements), label="candidate permutation"
+    )
+
+    baseline = evaluate_layout(_document(elements), _document(candidate_elements)).score
+    permuted = evaluate_layout(
+        _document(list(reference_permutation)),
+        _document(list(candidate_permutation)),
+    ).score
+
+    assert permuted == pytest.approx(baseline)
+
+
+@given(elements=_layout_elements())
+def test_exact_layout_score_is_never_lower_than_damaged(
+    elements: list[dict[str, object]],
+) -> None:
+    damaged = deepcopy(elements)
+    damaged_bbox = damaged[0]["bbox"]
+    assert isinstance(damaged_bbox, list)
+    damaged_bbox[0] = float(damaged_bbox[0]) + 175.0
+    damaged_bbox[2] = float(damaged_bbox[2]) + 175.0
+
+    exact_score = evaluate_layout(_document(elements), _document(deepcopy(elements))).score
+    damaged_score = evaluate_layout(_document(elements), _document(damaged)).score
+
+    assert exact_score >= damaged_score
+
+
+@given(
+    editable_count=st.integers(min_value=0, max_value=20),
+    flattened_count=st.integers(min_value=0, max_value=20),
+    empty_count=st.integers(min_value=1, max_value=20),
+)
+def test_adding_empty_objects_never_improves_editability(
+    editable_count: int,
+    flattened_count: int,
+    empty_count: int,
+) -> None:
+    elements = [
+        _element(f"editable-{index}", text=f"editable {index}") for index in range(editable_count)
+    ]
+    elements.extend(
+        _element(
+            f"flattened-{index}",
+            kind="image",
+            text="",
+            metadata={"flattened": True},
+        )
+        for index in range(flattened_count)
+    )
+    padded = deepcopy(elements)
+    padded.extend(_element(f"empty-{index}", text="") for index in range(empty_count))
+
+    assert (
+        evaluate_editability(_document(padded)).score
+        <= evaluate_editability(_document(elements)).score
+    )
 
 
 def test_layout_score_is_candidate_permutation_invariant() -> None:
@@ -198,7 +307,7 @@ def test_missing_reference_table_scores_zero() -> None:
 def test_extra_empty_paragraphs_do_not_improve_editability() -> None:
     base = _document([_element("body", text="editable")])
     padded = deepcopy(base)
-    padded["pages"][0]["elements"].extend(  # type: ignore[index,union-attr]
+    padded["pages"][0]["elements"].extend(  # type: ignore[index]
         _element(f"empty-{index}", text="") for index in range(20)
     )
 
