@@ -309,6 +309,55 @@ def test_saved_document_directly_maps_checkbox_form_field() -> None:
     assert checkbox.metadata["field_value"] == "☒"
 
 
+def test_urls_printed_in_the_document_survive_into_the_body_text() -> None:
+    """URL redaction protects credentials, not the transcribed page.
+
+    Body text was rewritten through the same redactor that guards the raw
+    payload and the source label, so a URL printed on the scanned page was
+    truncated to its origin — its path, query, and fragment silently dropped
+    from the editable output.
+    """
+
+    printed = "See https://example.gov/rules/2024?id=42#sec3 for the filing deadline."
+    payload = {
+        "document": {
+            "text": printed,
+            "pages": [
+                {
+                    "pageNumber": 1,
+                    "dimension": {"width": 1000, "height": 1400, "unit": "pixel"},
+                    "paragraphs": [
+                        {
+                            "layout": {
+                                "textAnchor": {
+                                    "textSegments": [
+                                        {"startIndex": "0", "endIndex": str(len(printed))}
+                                    ]
+                                },
+                                "boundingPoly": {
+                                    "vertices": [
+                                        {"x": 0, "y": 0},
+                                        {"x": 900, "y": 0},
+                                        {"x": 900, "y": 40},
+                                        {"x": 0, "y": 40},
+                                    ]
+                                },
+                            }
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+
+    document = GoogleDocumentAIProvider().parse(payload).document
+
+    assert document.pages[0].elements[0].text == printed
+    assert document.pages[0].metadata["markdown"] == printed
+    # The audit surface stays conservative.
+    assert "?id=42#sec3" not in str(document.metadata["content_text"])
+
+
 def test_capabilities_declare_saved_and_explicit_hosted_document_ai() -> None:
     capabilities = GoogleDocumentAIProvider().capabilities
 
