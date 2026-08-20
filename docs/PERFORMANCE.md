@@ -166,6 +166,11 @@ documents, identical metrics, identical page boundaries, identical confidences.
 | Evidence fusion, 600+600 elements | 1.221 s | 0.868 s | 1.4x |
 | Rejecting a 20-page PDF the fast path cannot use | 0.393 s | 0.006 s | 65x |
 
+Rendered QA also probes the LibreOffice binary's identity once per binary image
+rather than once per document, keyed on the SHA-256 of its bytes so the recorded
+identity stays byte-exact; that removes an extra process launch, about 0.2 s,
+from every verified render.
+
 The element matcher's edit distance is the largest of these. It is evaluated
 once per candidate pair inside an O(n^2) grid, so the row-at-a-time dynamic
 program made a dense page effectively never finish; Myers' bit-vector
