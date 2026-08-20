@@ -105,6 +105,12 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
+      # The runner image ships its own build tooling, and that tooling lands in
+      # the environment the audit sees. Update it first so the job reports on
+      # this project's dependencies rather than on the image's age.
+      - name: Update build tooling
+        run: python -m pip install --upgrade pip setuptools wheel
+
       # Only what actually ships and reads untrusted documents; the development
       # extra is deliberately excluded so a tooling advisory cannot block a fix.
       - name: Install the runtime dependency set
