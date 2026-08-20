@@ -8,6 +8,9 @@
 - `compare-options.schema.json` describes fidelity comparison options.
 - `reconstruction-benchmark.schema.json` describes end-to-end benchmark cases
   containing original layout, reviewed Markdown, and positioned JSON evidence.
+- `source-benchmark.schema.json` describes process-isolated, source-only parser
+  comparisons that preserve timeout, OOM, crash, and invalid-output cases in the
+  official evaluator denominator.
 
 The Pydantic models in `docreconstruct.ir` and `docreconstruct.api.models` are
 the runtime authority. Cross-field constraints such as `bbox.x1 >= bbox.x0`,

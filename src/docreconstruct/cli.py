@@ -821,6 +821,85 @@ def benchmark_ocr_command(
         _fail(exc)
 
 
+@cli.command("benchmark-source")
+def benchmark_source_command(
+    manifest: Path = typer.Argument(
+        ...,
+        exists=True,
+        readable=True,
+        help=("Source-only benchmark manifest or directory containing source-benchmark.json."),
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        "--output-dir",
+        "-o",
+        help="Override the manifest output directory.",
+    ),
+    subset: str | None = typer.Option(
+        None,
+        "--subset",
+        help="Dataset slice: all, hard, or an exact page_attribute.subset value.",
+    ),
+    shard_index: int = typer.Option(0, "--shard-index", min=0),
+    shard_count: int = typer.Option(1, "--shard-count", min=1),
+    system: list[str] = typer.Option(
+        [],
+        "--system",
+        help="Run only this configured system; repeat for more than one.",
+    ),
+    resume: bool = typer.Option(
+        True,
+        "--resume/--no-resume",
+        help="Reuse only checkpoints whose command and exact input fingerprint still match.",
+    ),
+    official_evaluator: bool = typer.Option(
+        True,
+        "--official-evaluator/--no-official-evaluator",
+        help="Run the separately pinned official evaluator after all predictions exist.",
+    ),
+) -> None:
+    """Run isolated parsers on identical source pages and retain every failure."""
+
+    try:
+        from docreconstruct import evaluation
+
+        report = evaluation.run_source_benchmark(
+            manifest,
+            output_dir=output_dir,
+            subset=subset,
+            shard_index=shard_index,
+            shard_count=shard_count,
+            resume=resume,
+            run_official_evaluator=official_evaluator,
+            systems=system or None,
+        )
+        destination = (
+            output_dir.resolve()
+            if output_dir is not None
+            else evaluation.load_source_benchmark_manifest(manifest).output_dir
+        )
+        if shard_count > 1:
+            destination = destination / "shards" / f"{shard_index:05d}-of-{shard_count:05d}"
+        console.print(
+            f"[green]Wrote[/green] {(destination / 'source-benchmark-report.json').resolve()}"
+        )
+        for summary in report.summaries:
+            console.print(
+                f"{summary.system}: {summary.successful_cases}/{summary.total_cases} succeeded; "
+                f"{summary.failed_cases} failures retained in the evaluator denominator"
+            )
+        evaluator_failed = any(
+            result.status is not evaluation.SourceRunStatus.SUCCESS
+            for result in report.evaluator_results
+        )
+        if report.failed_cases or evaluator_failed:
+            raise typer.Exit(code=3)
+    except typer.Exit:
+        raise
+    except (DocReconstructError, ImportError, RuntimeError, ValueError, OSError) as exc:
+        _fail(exc)
+
+
 @cli.command("benchmark-reconstruction")
 def benchmark_reconstruction_command(
     dataset: Path = typer.Argument(
@@ -1045,6 +1124,7 @@ _COMMANDS = {
     "compare",
     "benchmark",
     "benchmark-ocr",
+    "benchmark-source",
     "benchmark-reconstruction",
     "dataset-validate",
     "train-plan",

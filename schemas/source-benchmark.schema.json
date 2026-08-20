@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kayurachann/docreconstruct/schemas/source-benchmark.schema.json",
+  "title": "Source-only parser benchmark manifest",
+  "description": "Runs pinned external document parsers on identical source pages in isolated processes. Candidate commands receive no ground truth; every operational failure becomes an empty Markdown prediction for official evaluation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dataset",
+    "systems"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "0.1"
+    },
+    "dataset": {
+      "$ref": "#/$defs/dataset"
+    },
+    "output_dir": {
+      "$ref": "#/$defs/nonEmptyString",
+      "default": "source-benchmark-output"
+    },
+    "subset": {
+      "$ref": "#/$defs/nonEmptyString",
+      "description": "all, hard, or an exact page_info.page_attribute.subset value.",
+      "default": "all"
+    },
+    "timeout_seconds": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "default": 900
+    },
+    "max_output_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 104857600
+    },
+    "systems": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/system"
+      }
+    },
+    "official_evaluator": {
+      "$ref": "#/$defs/evaluator"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "environment": {
+      "type": "object",
+      "description": "Non-secret environment overrides. Secret-bearing key names are rejected at runtime; credentials must be inherited and are never fingerprinted or written to the report. Accepted non-secret values are hashed for run identity.",
+      "propertyNames": {
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "integer",
+          "boolean"
+        ]
+      }
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "annotations",
+        "images",
+        "revision"
+      ],
+      "properties": {
+        "annotations": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "OmniDocBench-style annotation JSON. This path is never passed to candidate commands."
+        },
+        "images": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_suffix": {
+          "type": "string",
+          "pattern": "^\\.[A-Za-z0-9][A-Za-z0-9._-]{0,31}$",
+          "description": "Optional source replacement suffix, for example '.pdf' when every annotated PNG has a pixel-identical compact PDF. Annotation names and official prediction names remain unchanged."
+        },
+        "revision": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "Pinned dataset release, commit, or immutable revision."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Optional expected SHA-256 of the annotation JSON."
+        }
+      }
+    },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "revision",
+        "command"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"
+        },
+        "version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "revision": {
+          "$ref": "#/$defs/nonEmptyString",
+          "description": "Pinned model/code/container revision; do not use a mutable latest alias."
+        },
+        "command": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/command"
+            },
+            {
+              "contains": {
+                "type": "string",
+                "pattern": "\\{input\\}"
+              }
+            },
+            {
+              "contains": {
+                "type": "string",
+                "pattern": "\\{output\\}"
+              }
+            }
+          ],
+          "description": "Argv without a shell. Available placeholders: {input}, {output}, {case_id}, {input_name}, {source_name}, {work_dir}. Ground-truth placeholders are rejected."
+        },
+        "cwd": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        }
+      }
+    },
+    "evaluator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "revision",
+        "command"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "revision": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "command": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/command"
+            },
+            {
+              "contains": {
+                "type": "string",
+                "pattern": "\\{ground_truth\\}"
+              }
+            },
+            {
+              "contains": {
+                "type": "string",
+                "pattern": "\\{predictions\\}"
+              }
+            },
+            {
+              "contains": {
+                "type": "string",
+                "pattern": "\\{result_dir\\}"
+              }
+            }
+          ],
+          "description": "Pinned official evaluator wrapper argv. Available placeholders: {ground_truth}, {predictions}, {result_dir}, {system}."
+        },
+        "cwd": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 3600
+        },
+        "environment": {
+          "$ref": "#/$defs/environment"
+        }
+      }
+    }
+  }
+}
