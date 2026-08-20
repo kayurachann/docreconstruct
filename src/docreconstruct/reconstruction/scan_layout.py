@@ -461,20 +461,26 @@ def _require_numpy() -> Any:
 
 
 def _runs(values: Any) -> list[tuple[int, int]]:
-    """Return inclusive-exclusive runs of truthy values."""
+    """Return inclusive-exclusive runs of truthy values.
 
-    indices = [int(item) for item in _require_numpy().flatnonzero(values)]
-    if not indices:
+    Scan analysis calls this thousands of times per page on full-width row and
+    column projections, so the boundaries are located with a single vectorized
+    neighbour comparison instead of a Python loop over every truthy index.
+    Sentinel padding makes the first and last run fall out of the same
+    comparison, which keeps the transition indices strictly alternating
+    start/end.
+    """
+
+    np = _require_numpy()
+    mask = np.asarray(values, dtype=bool).ravel()
+    padded = np.empty(mask.size + 2, dtype=bool)
+    padded[0] = False
+    padded[-1] = False
+    padded[1:-1] = mask
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    if edges.size == 0:
         return []
-    result: list[tuple[int, int]] = []
-    start = previous = indices[0]
-    for index in indices[1:]:
-        if index != previous + 1:
-            result.append((start, previous + 1))
-            start = index
-        previous = index
-    result.append((start, previous + 1))
-    return result
+    return list(zip(edges[::2].tolist(), edges[1::2].tolist(), strict=True))
 
 
 def _merge_runs(runs: list[tuple[int, int]], gap: int) -> list[tuple[int, int]]:
@@ -1116,33 +1122,47 @@ def _coarse_components(mask: Any) -> list[tuple[int, int, int, int, int]]:
 
     np = _require_numpy()
     rows, columns = mask.shape
-    visited = np.zeros(mask.shape, dtype=bool)
+    # Scalar element access on a NumPy array costs far more than on a Python
+    # list, and this walks every set cell of a page-sized coarse mask.  One
+    # flat list serves as both the mask and the visited set — a cell is cleared
+    # when it is queued — and `flatnonzero` supplies the same row-major seed
+    # order as the original nested scan while skipping the empty background.
+    remaining: list[bool] = mask.reshape(-1).tolist()
     result: list[tuple[int, int, int, int, int]] = []
-    for row in range(rows):
-        for column in range(columns):
-            if not mask[row, column] or visited[row, column]:
-                continue
-            queue: deque[tuple[int, int]] = deque([(row, column)])
-            visited[row, column] = True
-            min_row = max_row = row
-            min_column = max_column = column
-            count = 0
-            while queue:
-                current_row, current_column = queue.popleft()
-                count += 1
-                min_row = min(min_row, current_row)
-                max_row = max(max_row, current_row)
-                min_column = min(min_column, current_column)
-                max_column = max(max_column, current_column)
-                for delta_row, delta_column in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    next_row = current_row + delta_row
-                    next_column = current_column + delta_column
-                    if not (0 <= next_row < rows and 0 <= next_column < columns):
-                        continue
-                    if mask[next_row, next_column] and not visited[next_row, next_column]:
-                        visited[next_row, next_column] = True
-                        queue.append((next_row, next_column))
-            result.append((min_column, min_row, max_column + 1, max_row + 1, count))
+    for origin in np.flatnonzero(mask).tolist():
+        if not remaining[origin]:
+            continue
+        remaining[origin] = False
+        queue: deque[int] = deque([origin])
+        row, column = divmod(origin, columns)
+        min_row = max_row = row
+        min_column = max_column = column
+        count = 0
+        while queue:
+            index = queue.popleft()
+            count += 1
+            current_row, current_column = divmod(index, columns)
+            if current_row < min_row:
+                min_row = current_row
+            elif current_row > max_row:
+                max_row = current_row
+            if current_column < min_column:
+                min_column = current_column
+            elif current_column > max_column:
+                max_column = current_column
+            if current_row and remaining[index - columns]:
+                remaining[index - columns] = False
+                queue.append(index - columns)
+            if current_row + 1 < rows and remaining[index + columns]:
+                remaining[index + columns] = False
+                queue.append(index + columns)
+            if current_column and remaining[index - 1]:
+                remaining[index - 1] = False
+                queue.append(index - 1)
+            if current_column + 1 < columns and remaining[index + 1]:
+                remaining[index + 1] = False
+                queue.append(index + 1)
+        result.append((min_column, min_row, max_column + 1, max_row + 1, count))
     return result
 
 
@@ -1274,17 +1294,26 @@ def _near_axis_rule_count(
 
     np = _require_numpy()
     primary = ink if horizontal else ink.T
-    span = primary.shape[1]
+    rows, span = primary.shape
     tolerance = max(2, round(line_pitch * 0.35))
     bridge = max(2, round(line_pitch * 0.12))
+    minimum_span = span * 0.52
+    # An accepted run needs both `right - left >= minimum_span` and a fill ratio
+    # of at least 0.70, so a row whose whole dilated projection holds fewer than
+    # `0.70 * minimum_span` pixels can never contain one.  Testing that
+    # necessary condition first skips run extraction on ordinary text rows
+    # without changing which rows are accepted.
+    minimum_fill = 0.70 * minimum_span
     active: list[tuple[int, int]] = []
-    for index in range(primary.shape[0]):
+    for index in range(rows):
         start = max(0, index - tolerance)
-        end = min(primary.shape[0], index + tolerance + 1)
+        end = min(rows, index + tolerance + 1)
         projection = np.any(primary[start:end], axis=0)
+        if float(np.count_nonzero(projection)) < minimum_fill:
+            continue
         runs = _merge_runs(_runs(projection), gap=bridge)
         if any(
-            right - left >= span * 0.52
+            right - left >= minimum_span
             and float(np.count_nonzero(projection[left:right])) / max(1, right - left) >= 0.70
             for left, right in runs
         ):
@@ -1501,12 +1530,17 @@ def _estimate_paper_color(image: Image.Image, ink: Any, frame: PixelBox) -> str:
     """Estimate a flat editable page colour while rejecting ink and shadows."""
 
     np = _require_numpy()
-    pixels = np.asarray(image.convert("RGB"), dtype=np.float32)[
+    # Widen to float32 only for the retained non-ink samples.  Converting the
+    # whole page first allocated four bytes per channel for every pixel,
+    # including the ink and the area outside the frame that is discarded on the
+    # next line; the sample values themselves are unchanged because uint8 is
+    # represented exactly in float32.
+    pixels = np.asarray(image.convert("RGB"))[
         frame.y0 : frame.y1,
         frame.x0 : frame.x1,
     ]
     non_ink = ~ink[frame.y0 : frame.y1, frame.x0 : frame.x1]
-    samples = pixels[non_ink]
+    samples = pixels[non_ink].astype(np.float32, copy=False)
     if len(samples) < 64:
         return "FFFFFF"
     luminance = samples[:, 0] * 0.299 + samples[:, 1] * 0.587 + samples[:, 2] * 0.114
@@ -1767,7 +1801,18 @@ def _extract_with_pymupdf(path: Path, dpi: int) -> list[tuple[Image.Image, float
     with pymupdf.open(path) as pdf:
         for page in pdf:
             pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-            image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+            # An `alpha=False` RGB pixmap is already the exact buffer Pillow
+            # wants, so wrapping it directly avoids compressing every page to
+            # PNG only to decode it again.  Anything else (grayscale, CMYK, a
+            # padded stride) still goes through the general encoder.
+            if pixmap.n == 3 and not pixmap.alpha and pixmap.stride == pixmap.width * 3:
+                image = Image.frombytes(
+                    "RGB",
+                    (pixmap.width, pixmap.height),
+                    pixmap.samples,
+                )
+            else:
+                image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
             pages.append((image, float(page.rect.width), float(page.rect.height)))
     return pages
 
