@@ -1794,6 +1794,17 @@ def _extract_with_pypdf(path: Path) -> list[tuple[Image.Image, float, float]]:
         if page_image is None:
             raise ValueError("PDF page raster could not be decoded")
         image = page_image.convert("RGB")
+        # The MediaBox and the stored raster are both in unrotated page space,
+        # so a sheet-fed scan saved as a portrait page with `/Rotate 90` would
+        # otherwise be analyzed sideways against a portrait page size while the
+        # PyMuPDF fallback reported the same file as landscape.  Bring both into
+        # display space, which is the orientation every downstream consumer and
+        # every rotation-aware provider assumes.
+        rotation = page.rotation % 360
+        if rotation:
+            image = image.rotate(-rotation, expand=True)
+            if rotation % 180:
+                pdf_width, pdf_height = pdf_height, pdf_width
         pages.append((image, pdf_width, pdf_height))
     return pages
 
