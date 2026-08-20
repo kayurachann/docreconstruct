@@ -59,6 +59,51 @@ def test_tesseract_provider_runs_argv_without_shell_and_preserves_line_geometry(
     assert page.elements[1].reading_order == 1
 
 
+def test_quoted_words_do_not_swallow_the_rest_of_the_page(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A double quote in recognized text must not end the TSV parse.
+
+    Tesseract neither quotes nor escapes the text column, so with the csv
+    module's default quoting a word beginning with `"` put the reader into a
+    quoted field and it consumed every remaining tab and newline. The one
+    surviving row still parsed, so nothing raised and the rest of the page was
+    silently dropped.
+    """
+
+    quoted_tsv = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+        "left\ttop\twidth\theight\tconf\ttext\n"
+        '5\t1\t1\t1\t1\t1\t10\t5\t20\t10\t90\t"The\n'
+        "5\t1\t1\t1\t1\t2\t35\t5\t25\t10\t80\tquick\n"
+        "5\t1\t1\t1\t2\t1\t10\t25\t30\t10\t70\tbrown\n"
+        '5\t1\t1\t1\t2\t2\t45\t25\t20\t10\t60\tfox"\n'
+    )
+    source = tmp_path / "scan.png"
+    Image.new("RGB", (100, 50), "white").save(source)
+    executable = tmp_path / "tesseract.exe"
+    executable.write_bytes(b"test")
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        Path(command[2]).with_suffix(".tsv").write_text(quoted_tsv, encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("docreconstruct.providers.tesseract_local.subprocess.run", fake_run)
+    result = TesseractLocalProvider().parse(
+        source,
+        context=ProviderContext(
+            source=str(source),
+            options={"executable": str(executable)},
+            metadata={"languages": ["en"]},
+        ),
+    )
+
+    page = result.document.pages[0]
+    assert [element.text for element in page.elements] == ['"The quick', 'brown fox"']
+    assert page.elements[1].bbox.model_dump() == {"x0": 10.0, "y0": 25.0, "x1": 65.0, "y1": 35.0}
+
+
 def test_tesseract_provider_rejects_missing_traineddata_before_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
