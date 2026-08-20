@@ -28,6 +28,7 @@ from docreconstruct.reconstruction.asset_matching import (
     resolve_markdown_asset,
 )
 from docreconstruct.reconstruction.hybrid_docx import (
+    _add_native_table,
     _balanced_editable_column_streams,
     _dialogue_story_boundary,
     _duplicate_figure_annotation_ids,
@@ -2182,6 +2183,75 @@ def test_column_wrapping_never_breaks_a_protected_inline_span() -> None:
 
     assert "\n" in wrapped_prose.text
     assert wrapped_prose.text.replace("\n", " ") == prose
+
+
+def test_merged_table_cells_become_native_word_merges(tmp_path: Path) -> None:
+    """A spanned source cell must not become a grid of boxed empties.
+
+    The HTML parser resolved `colspan`/`rowspan` into a rectangular text grid
+    and then discarded the spans, so the renderer emitted a fully gridded table:
+    a header meant to span three columns sat in a narrow box beside two empty
+    boxed cells, and a row-spanning label had an empty boxed cell beneath it.
+    """
+
+    markdown = tmp_path / "spans.md"
+    markdown.write_text(
+        "<table><tr><th colspan='3'>Quarterly results</th></tr>"
+        "<tr><td rowspan='2'>North</td><td>Q1</td><td>10</td></tr>"
+        "<tr><td>Q2</td><td>12</td></tr></table>\n",
+        encoding="utf-8",
+    )
+    block = parse_markdown_content(markdown).blocks[0]
+
+    assert block.table_rows == [
+        ["Quarterly results", "", ""],
+        ["North", "Q1", "10"],
+        ["", "Q2", "12"],
+    ]
+    assert block.table_spans == [
+        [(3, 1), (0, 0), (0, 0)],
+        [(1, 2), (1, 1), (1, 1)],
+        [(0, 0), (1, 1), (1, 1)],
+    ]
+
+    document = WordDocument()
+    _add_native_table(document, block, available_width=6.0, size=11.0, line_height=13.0)
+
+    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    table = next(iter(ElementTree.fromstring(document.element.xml).iter(f"{namespace}tbl")))
+    rows = list(table.iter(f"{namespace}tr"))
+
+    # The spanning header is one cell, not three.
+    assert len(list(rows[0].iter(f"{namespace}tc"))) == 1
+    header = next(iter(rows[0].iter(f"{namespace}tc")))
+    grid_span = header.find(f"./{namespace}tcPr/{namespace}gridSpan")
+    assert grid_span is not None
+    assert grid_span.get(f"{namespace}val") == "3"
+
+    # The row-spanning label is a vertical merge, not a label over an empty box.
+    anchor = next(iter(rows[1].iter(f"{namespace}tc")))
+    continuation = next(iter(rows[2].iter(f"{namespace}tc")))
+    assert anchor.find(f"./{namespace}tcPr/{namespace}vMerge") is not None
+    assert anchor.find(f"./{namespace}tcPr/{namespace}vMerge").get(f"{namespace}val") == "restart"
+    assert continuation.find(f"./{namespace}tcPr/{namespace}vMerge") is not None
+
+
+def test_plain_table_without_spans_is_rendered_exactly_as_before(tmp_path: Path) -> None:
+    markdown = tmp_path / "plain.md"
+    markdown.write_text(
+        "<table><tr><th>A</th><th>B</th></tr><tr><td>C</td><td>D</td></tr></table>\n",
+        encoding="utf-8",
+    )
+    block = parse_markdown_content(markdown).blocks[0]
+
+    assert block.table_spans == [[(1, 1), (1, 1)], [(1, 1), (1, 1)]]
+
+    document = WordDocument()
+    _add_native_table(document, block, available_width=6.0, size=11.0, line_height=13.0)
+    xml = document.element.xml
+
+    assert "gridSpan" not in xml
+    assert "vMerge" not in xml
 
 
 def test_image_table_pair_keeps_the_other_visuals_in_its_group() -> None:
