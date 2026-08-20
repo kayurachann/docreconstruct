@@ -17,6 +17,7 @@ from docreconstruct.evaluation import (
     evaluate_structure,
     evaluate_visual,
 )
+from docreconstruct.evaluation.metrics import _dense_distance, _distance
 
 
 def _element(
@@ -394,3 +395,40 @@ def test_metric_report_contains_versions_and_measurement_coverage() -> None:
     assert 0.0 <= payload["measurement_coverage"] <= 1.0
     for name in ("text", "layout", "structure", "editability"):
         assert payload[name]["metric_version"]
+
+
+@given(
+    left=st.text(alphabet="abcABC 12àệ", max_size=45),
+    right=st.text(alphabet="abcABC 12àệ", max_size=45),
+)
+def test_bit_vector_distance_equals_the_dense_dynamic_program(left: str, right: str) -> None:
+    """The fast edit distance must be exact, not an approximation.
+
+    `_distance` runs once per candidate pair inside the O(n^2) element matcher,
+    so it is replaced by Myers' bit-vector formulation — but every layout and
+    structure score is derived from its value, so any disagreement with the
+    dense dynamic program would silently move the metrics.
+    """
+
+    assert _distance(left, right) == _dense_distance(*sorted((left, right), key=len, reverse=True))
+
+
+@given(
+    left=st.lists(st.sampled_from(["alpha", "beta", "gamma", "delta"]), max_size=25),
+    right=st.lists(st.sampled_from(["alpha", "beta", "gamma", "delta"]), max_size=25),
+)
+def test_bit_vector_distance_matches_for_word_sequences(
+    left: list[str],
+    right: list[str],
+) -> None:
+    ordered = sorted((left, right), key=len, reverse=True)
+    assert _distance(left, right) == _dense_distance(ordered[0], ordered[1])
+
+
+def test_distance_falls_back_for_unhashable_items() -> None:
+    """Word and character sequences hash, but the contract must not assume it."""
+
+    left = [["a"], ["b"], ["c"]]
+    right = [["a"], ["x"], ["c"]]
+
+    assert _distance(left, right) == 1
