@@ -20,8 +20,7 @@ from .metrics import (
     StructureMetrics,
     TextMetrics,
     evaluate_editability,
-    evaluate_layout,
-    evaluate_structure,
+    evaluate_layout_and_structure,
     evaluate_text,
 )
 from .visual import VisualMetrics, evaluate_visual
@@ -370,8 +369,10 @@ def evaluate(
         else:
             text_metrics = evaluate_text(ref.value, cand.value)
     if ref.kind == "document" and cand.kind == "document":
-        layout_metrics = evaluate_layout(ref.value, cand.value)
-        structure_metrics = evaluate_structure(ref.value, cand.value)
+        layout_metrics, structure_metrics = evaluate_layout_and_structure(
+            ref.value,
+            cand.value,
+        )
 
     if reference_images is not None or candidate_images is not None:
         if reference_images is None or candidate_images is None:
