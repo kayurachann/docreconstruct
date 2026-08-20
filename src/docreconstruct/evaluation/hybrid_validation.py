@@ -1680,8 +1680,12 @@ def validate_hybrid(
     render_seconds = perf_counter() - render_started
     visual_metrics = None
     body_foreground = None
+    render_diff_localization: dict[str, Any] | None = None
+    render_diff_localization_status = "not_measured"
+    render_diff_localization_error_type: str | None = None
     render_artifacts: list[dict[str, str]] = []
     visual_seconds = 0.0
+    render_diff_seconds = 0.0
     if render_result.rendered:
         visual_started = perf_counter()
         from docreconstruct.evaluation.visual import evaluate_visual, visual_diff
@@ -1716,6 +1720,47 @@ def validate_hybrid(
                     artifact["difference"] = str(difference_path)
                 render_artifacts.append(artifact)
         visual_seconds = perf_counter() - visual_started
+
+        # This report is explanatory only: it does not add an acceptance gate,
+        # alter a threshold, or mutate the renderer/IR authority. Source-plan
+        # placements contribute stable object IDs when their raster geometry
+        # overlaps a connected foreground discrepancy.
+        render_diff_started = perf_counter()
+        from docreconstruct.evaluation.render_diff import (
+            RenderedObjectRegion,
+            RenderPixelBox,
+            localize_render_differences,
+        )
+
+        try:
+            reference_regions = [
+                RenderedObjectRegion(
+                    page_number=page_plan.number,
+                    object_id=placement.block_id,
+                    bbox=RenderPixelBox(
+                        x0=placement.source_bbox.x0,
+                        y0=placement.source_bbox.y0,
+                        x1=placement.source_bbox.x1,
+                        y1=placement.source_bbox.y1,
+                    ),
+                )
+                for page_plan in plan.pages
+                for placement in page_plan.placements
+                if placement.source_bbox is not None
+            ]
+            render_diff_localization = localize_render_differences(
+                [page.image for page in scan.pages],
+                list(render_result.pages),
+                reference_regions=reference_regions,
+                distance_tolerance=(
+                    visual_metrics.distance_tolerance if visual_metrics is not None else 2
+                ),
+            ).to_dict()
+            render_diff_localization_status = "measured"
+        except Exception as exc:  # Diagnostic failure must not change acceptance semantics.
+            render_diff_localization_status = "unavailable"
+            render_diff_localization_error_type = type(exc).__name__
+        render_diff_seconds = perf_counter() - render_diff_started
 
     effective_visual_minimum = max(
         DEFAULT_RENDERED_VISUAL_MIN_SCORE,
@@ -2235,6 +2280,9 @@ def validate_hybrid(
             "enforced": render_result.rendered or minimum_visual_score is not None,
         },
         "rendered_body_foreground": body_foreground,
+        "rendered_diff_localization": render_diff_localization,
+        "rendered_diff_localization_status": render_diff_localization_status,
+        "rendered_diff_localization_error_type": render_diff_localization_error_type,
         "render_artifacts": render_artifacts,
         "render_plan_sha256": render_plan_sha256,
         "render_input_artifact_sha256": artifact_render_input_sha256,
@@ -2277,9 +2325,13 @@ def validate_hybrid(
     )
     if _phase_seconds is not None:
         qa_total = perf_counter() - qa_started
-        _phase_seconds["qa.native"] = max(0.0, qa_total - render_seconds - visual_seconds)
+        _phase_seconds["qa.native"] = max(
+            0.0,
+            qa_total - render_seconds - visual_seconds - render_diff_seconds,
+        )
         _phase_seconds["qa.render"] = render_seconds
         _phase_seconds["qa.visual"] = visual_seconds
+        _phase_seconds["qa.render_diff"] = render_diff_seconds
         _phase_seconds["qa.total"] = qa_total
     return report
 
