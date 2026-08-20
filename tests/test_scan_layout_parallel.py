@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import threading
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -50,6 +51,51 @@ def test_scan_page_worker_count_is_conservative(monkeypatch: pytest.MonkeyPatch)
     for invalid in (0, -1, True, 1.5):
         with pytest.raises(ValueError, match="positive integer"):
             scan_layout._scan_page_worker_count(4, invalid)  # type: ignore[arg-type]
+
+
+def _rotated_scan_pdf(path: Path, rotation: int) -> None:
+    """Write a one-raster scan page carrying ``/Rotate``, as scanners emit."""
+
+    pymupdf = pytest.importorskip("pymupdf")
+    image = Image.new("RGB", (612, 792), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 120, 70), fill="black")
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    document = pymupdf.open()
+    try:
+        page = document.new_page(width=612, height=792)
+        page.insert_image(page.rect, stream=stream.getvalue())
+        if rotation:
+            page.set_rotation(rotation)
+        document.save(path)
+    finally:
+        document.close()
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_page_rotation_is_applied_by_both_pdf_extractors(tmp_path: Path, rotation: int) -> None:
+    """A `/Rotate` page must reach analysis in display orientation.
+
+    The MediaBox and the stored raster are both in unrotated page space. The
+    pypdf extractor is tried first and used to report the raw pair, so a
+    landscape scan saved as a portrait page with `/Rotate 90` was analyzed
+    sideways against a portrait page size, while the PyMuPDF fallback called
+    the same file landscape.
+    """
+
+    path = tmp_path / f"rotate-{rotation}.pdf"
+    _rotated_scan_pdf(path, rotation)
+
+    image, pdf_width, pdf_height = scan_layout._extract_with_pypdf(path)[0]
+    _, fallback_width, fallback_height = scan_layout._extract_with_pymupdf(path, 96)[0]
+
+    # Both backends must describe the same physical page.
+    assert (pdf_width, pdf_height) == (fallback_width, fallback_height)
+    quarter_turn = bool(rotation % 180)
+    assert (pdf_width > pdf_height) is quarter_turn
+    # The raster must be turned with it, not left in stored orientation.
+    assert (image.width > image.height) is quarter_turn
 
 
 def test_page_workers_are_only_used_when_they_repay_their_start_up() -> None:
