@@ -151,11 +151,30 @@ def _parse_options(payload: str | None, model: type[OptionsModel]) -> OptionsMod
         ) from exc
 
 
-async def _stage_upload(upload: UploadFile, directory: Path, fallback_name: str) -> Path:
+async def _stage_upload(
+    upload: UploadFile,
+    directory: Path,
+    fallback_name: str,
+    *,
+    role: str | None = None,
+) -> Path:
+    """Stage one uploaded part, keeping its name but never letting parts collide.
+
+    The client chooses the filename, and every part of a multi-part request used
+    to land in one directory, so two parts named alike silently became one file:
+    a `/v1/hybrid` request whose Markdown content and JSON evidence were both
+    called `a.md` reconstructed from the evidence bytes as if they were the
+    reviewed content. `role` gives each part its own fixed-name subdirectory, so
+    the visible filename is preserved for provenance while a collision is
+    structurally impossible.
+    """
+
     filename = Path(upload.filename or fallback_name).name
     if filename in {"", ".", ".."}:
         filename = fallback_name
-    target = directory / filename
+    target_directory = directory / role if role else directory
+    target_directory.mkdir(parents=True, exist_ok=True)
+    target = target_directory / filename
     size = 0
     limit = _upload_limit()
 
@@ -940,10 +959,10 @@ def create_app() -> FastAPI:
 
         temp_dir = Path(tempfile.mkdtemp(prefix="docreconstruct-hybrid-api-"))
         try:
-            content_path = await _stage_upload(content, temp_dir, "content.md")
-            layout_path = await _stage_upload(layout, temp_dir, "layout.bin")
+            content_path = await _stage_upload(content, temp_dir, "content.md", role="content")
+            layout_path = await _stage_upload(layout, temp_dir, "layout.bin", role="layout")
             evidence_path = (
-                await _stage_upload(evidence, temp_dir, "evidence.json")
+                await _stage_upload(evidence, temp_dir, "evidence.json", role="evidence")
                 if evidence is not None
                 else None
             )
@@ -1070,8 +1089,18 @@ def create_app() -> FastAPI:
         parsed = _parse_options(options, CompareOptions)
         temp_dir = Path(tempfile.mkdtemp(prefix="docreconstruct-compare-"))
         try:
-            reference_path = await _stage_upload(reference, temp_dir, "reference.bin")
-            candidate_path = await _stage_upload(candidate, temp_dir, "candidate.bin")
+            reference_path = await _stage_upload(
+                reference,
+                temp_dir,
+                "reference.bin",
+                role="reference",
+            )
+            candidate_path = await _stage_upload(
+                candidate,
+                temp_dir,
+                "candidate.bin",
+                role="candidate",
+            )
             evaluation = importlib.import_module("docreconstruct.evaluation")
             result = await run_in_threadpool(
                 evaluation.evaluate,

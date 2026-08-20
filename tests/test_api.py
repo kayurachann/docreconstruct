@@ -966,3 +966,46 @@ def test_a_layout_source_over_budget_answers_413_not_500() -> None:
 
     assert raised.value.status_code == 413
     assert "900 pages" in str(raised.value.detail)
+
+
+def test_identically_named_upload_parts_do_not_overwrite_each_other(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client names the parts, so two parts may share a name.
+
+    Staging every part in one directory made the second silently replace the
+    first: a comparison of two files both called `doc.png` scored a file
+    against itself, and a hybrid job whose content and evidence shared a name
+    reconstructed from the evidence bytes as if they were the reviewed content.
+    """
+
+    seen: dict[str, Any] = {}
+
+    def fake_evaluate(reference: Path, candidate: Path, **_kwargs: Any) -> Any:
+        seen["reference"] = (reference, reference.read_bytes())
+        seen["candidate"] = (candidate, candidate.read_bytes())
+        return SimpleNamespace(
+            fidelity=SimpleNamespace(overall=0.5),
+            to_dict=lambda: {"fidelity": {"overall": 0.5}, "components": {}},
+        )
+
+    fake_evaluation = types.ModuleType("docreconstruct.evaluation")
+    fake_evaluation.evaluate = fake_evaluate  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "docreconstruct.evaluation", fake_evaluation)
+
+    response = client.post(
+        "/v1/compare",
+        files={
+            "reference": ("doc.png", b"REFERENCE BYTES", "image/png"),
+            "candidate": ("doc.png", b"CANDIDATE BYTES", "image/png"),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    reference_path, reference_bytes = seen["reference"]
+    candidate_path, candidate_bytes = seen["candidate"]
+    assert reference_path != candidate_path
+    assert reference_bytes == b"REFERENCE BYTES"
+    assert candidate_bytes == b"CANDIDATE BYTES"
+    # The client-visible filename is still preserved for provenance.
+    assert reference_path.name == candidate_path.name == "doc.png"
