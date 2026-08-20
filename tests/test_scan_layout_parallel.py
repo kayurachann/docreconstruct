@@ -52,6 +52,27 @@ def test_scan_page_worker_count_is_conservative(monkeypatch: pytest.MonkeyPatch)
             scan_layout._scan_page_worker_count(4, invalid)  # type: ignore[arg-type]
 
 
+def test_page_workers_are_only_used_when_they_repay_their_start_up() -> None:
+    startup = scan_layout._PAGE_POOL_STARTUP_SECONDS
+
+    # A pool that cannot outrun its own start-up must not be created.
+    assert not scan_layout._page_workers_are_worthwhile(0, 10.0, 4)
+    assert not scan_layout._page_workers_are_worthwhile(3, 0.05, 4)
+    assert not scan_layout._page_workers_are_worthwhile(11, 0.1, 4)
+    # One remaining page can never be spread across workers.
+    assert not scan_layout._page_workers_are_worthwhile(1, 60.0, 4)
+    # Neither can a single worker.
+    assert not scan_layout._page_workers_are_worthwhile(8, 60.0, 1)
+
+    # Genuinely slow pages still get the pool.
+    assert scan_layout._page_workers_are_worthwhile(3, 0.9, 4)
+    assert scan_layout._page_workers_are_worthwhile(11, 0.8, 4)
+
+    # The boundary follows the saving, not the page count.
+    assert not scan_layout._page_workers_are_worthwhile(2, startup, 2)
+    assert scan_layout._page_workers_are_worthwhile(2, startup * 1.01 + 0.01, 2)
+
+
 def test_pdf_page_analysis_is_parallel_but_returns_source_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -64,6 +85,9 @@ def test_pdf_page_analysis_is_parallel_but_returns_source_order(
         lambda _path: [(image, 595.0, 842.0) for image in images],
     )
     monkeypatch.setattr(scan_layout.os, "cpu_count", lambda: 8)
+    # The stub analyzer below is instant, so force the pool the production
+    # heuristic would correctly decline for work this cheap.
+    monkeypatch.setattr(scan_layout, "_PAGE_POOL_STARTUP_SECONDS", -1.0)
 
     class ThreadedExecutor:
         def __init__(self, *, max_workers: int) -> None:
@@ -90,22 +114,26 @@ def test_pdf_page_analysis_is_parallel_but_returns_source_order(
     monkeypatch.setattr(scan_layout, "ProcessPoolExecutor", ThreadedExecutor)
 
     lock = threading.Lock()
-    all_started = threading.Event()
+    pooled_started = threading.Event()
     finished = {number: threading.Event() for number in range(1, 5)}
     started_numbers: list[int] = []
     completion_order: list[int] = []
     thread_ids: set[int] = set()
+    caller = threading.get_ident()
 
     def analyze(work_item: tuple[int, Image.Image, float, float]) -> ScanPageLayout:
         number, image, _pdf_width, _pdf_height = work_item
         with lock:
             started_numbers.append(number)
             thread_ids.add(threading.get_ident())
+            # Page one is the timed probe and runs before the pool exists; the
+            # remaining pages must all be in flight together.
             if len(started_numbers) == 4:
-                all_started.set()
-        assert all_started.wait(timeout=3.0)
-        if number < 4:
-            assert finished[number + 1].wait(timeout=3.0)
+                pooled_started.set()
+        if number > 1:
+            assert pooled_started.wait(timeout=3.0)
+            if number < 4:
+                assert finished[number + 1].wait(timeout=3.0)
         with lock:
             completion_order.append(number)
         finished[number].set()
@@ -115,8 +143,11 @@ def test_pdf_page_analysis_is_parallel_but_returns_source_order(
 
     document = scan_layout.analyze_scan_source(path)
 
+    # The probe page runs on the calling thread and the other three overlap.
+    assert started_numbers[0] == 1
+    assert caller in thread_ids
     assert len(thread_ids) == 4
-    assert completion_order == [4, 3, 2, 1]
+    assert completion_order == [1, 4, 3, 2]
     assert [page.number for page in document.pages] == [1, 2, 3, 4]
 
 
@@ -138,6 +169,9 @@ def test_parallel_and_serial_page_analysis_have_identical_results(
     monkeypatch.setattr(scan_layout.os, "cpu_count", lambda: 8)
 
     serial = scan_layout.analyze_scan_pdf(path, maximum_workers=1)
+    # These pages are far too cheap for the heuristic to fund a pool, so force
+    # one to keep this an actual cross-process comparison.
+    monkeypatch.setattr(scan_layout, "_PAGE_POOL_STARTUP_SECONDS", -1.0)
     parallel = scan_layout.analyze_scan_pdf(path, maximum_workers=4)
 
     assert [page.model_dump() for page in parallel.pages] == [
