@@ -9,7 +9,6 @@ from collections.abc import Sequence
 from functools import cache
 from typing import Any
 
-from PIL import ImageFilter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from docreconstruct.ir import ElementStyle
@@ -1104,14 +1103,9 @@ def _option_region_ink(page: ScanPageLayout) -> Any:
     the coarse provider rectangle still owns the region and no text is read.
     """
 
-    from docreconstruct.reconstruction.scan_layout import _require_numpy
+    from docreconstruct.reconstruction.scan_layout import ink_mask
 
-    np = _require_numpy()
-    gray = page.image.convert("L")
-    grayscale = np.asarray(gray)
-    radius = max(7.0, min(page.image.size) / 42.0)
-    background = np.asarray(gray.filter(ImageFilter.GaussianBlur(radius=radius)))
-    return (grayscale.astype(int) + 17 < background.astype(int)) | (grayscale < 72)
+    return ink_mask(page.image.convert("L"))
 
 
 def _localized_option_rows(
