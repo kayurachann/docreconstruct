@@ -81,11 +81,29 @@ def sanitized_pip_inventory(path: Path | None) -> list[dict[str, object]]:
                 "name": metadata.get("name"),
                 "version": metadata.get("version"),
                 "requested": bool(item.get("requested", False)),
+                "requested_extras": sorted(item.get("requested_extras") or []),
                 "local_editable": bool(directory.get("editable", False)),
                 "archive_hashes": dict(sorted(archive.get("hashes", {}).items())),
             }
         )
     return sorted(records, key=lambda item: (str(item["name"]).casefold(), str(item["version"])))
+
+
+def installation_contract(path: Path | None, system_name: str | None) -> dict[str, object] | None:
+    if (path is None) != (system_name is None):
+        raise ValueError("--model-pins and --system must be provided together")
+    if path is None or system_name is None:
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    system = payload["systems"][system_name]
+    return {
+        "model_pins_sha256": hash_file(path),
+        "system": system_name,
+        "package": system["package"],
+        "install_spec": system.get("install_spec", system["package"]),
+        "compatibility_packages": system.get("compatibility_packages", []),
+        "required_imports": system.get("required_imports", []),
+    }
 
 
 def main(args: argparse.Namespace) -> None:
@@ -111,13 +129,18 @@ def main(args: argparse.Namespace) -> None:
             )
         caches.append({"label": root.name, "files": files})
     pip_inventory = sanitized_pip_inventory(args.pip_report)
-    if args.pip_report is not None and not any(
-        str(item.get("name", "")).casefold() == "docreconstruct"
-        and item.get("requested") is True
-        and item.get("local_editable") is True
-        for item in pip_inventory
-    ):
-        raise RuntimeError("pip report does not cover the requested editable project install")
+    if args.pip_report is not None:
+        projects = [
+            item
+            for item in pip_inventory
+            if str(item.get("name", "")).casefold() == "docreconstruct"
+            and item.get("requested") is True
+            and item.get("local_editable") is True
+        ]
+        if len(projects) != 1:
+            raise RuntimeError("pip report does not cover one requested editable project install")
+        if projects[0].get("requested_extras") != ["hybrid"]:
+            raise RuntimeError("benchmark project install must request exactly the hybrid extra")
     runtime_commands = sorted(
         (runtime_command_record(value) for value in args.runtime_command),
         key=lambda item: str(item["label"]),
@@ -129,6 +152,7 @@ def main(args: argparse.Namespace) -> None:
     labels = [item["label"] for item in [*runtime_commands, *runtime_files]]
     if len(labels) != len(set(labels)):
         raise RuntimeError("runtime inventory labels must be unique")
+    contract = installation_contract(args.model_pins, args.system)
     normalized_environment = {
         "python": {
             "implementation": platform.python_implementation(),
@@ -139,6 +163,7 @@ def main(args: argparse.Namespace) -> None:
         "pip_install_inventory": pip_inventory,
         "runtime_commands": runtime_commands,
         "runtime_files": runtime_files,
+        "installation_contract": contract,
     }
     payload = {
         "schema_version": 1,
@@ -146,6 +171,7 @@ def main(args: argparse.Namespace) -> None:
         "platform": platform.platform(),
         "packages": packages,
         "pip_install_inventory": pip_inventory,
+        "installation_contract": contract,
         "model_caches": caches,
         "normalized_environment": normalized_environment,
     }
@@ -156,6 +182,8 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("--output", type=Path, required=True)
     result.add_argument("--pip-report", type=Path)
+    result.add_argument("--model-pins", type=Path)
+    result.add_argument("--system")
     result.add_argument("--cache-root", type=Path, action="append", default=[])
     result.add_argument("--runtime-command", action="append", default=[])
     result.add_argument("--runtime-file", action="append", default=[])

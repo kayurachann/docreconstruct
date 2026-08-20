@@ -99,6 +99,8 @@ jobs:
       FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
       FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
       MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
+      RAPIDOCR_CACHE_ROOT: ${{ github.workspace }}/.benchmark-cache/rapidocr
+      RAPIDOCR_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/rapidocr/docling
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
     steps:
@@ -131,7 +133,13 @@ jobs:
       - name: Install the pinned candidate
         run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/prewarm-pip-report.json"
 
-      - name: Materialize only declared immutable Hugging Face snapshots
+      - name: Verify the installed candidate contract
+        run: |
+          python scripts/benchmark/verify_install_contract.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM"
+
+      - name: Materialize only declared immutable model assets
         run: |
           args=(
             --pins scripts/benchmark/model-pins.json
@@ -141,6 +149,8 @@ jobs:
           )
           if [[ "$SYSTEM" == "mineru" ]]; then
             args+=(--mineru-config "$MINERU_TOOLS_CONFIG_JSON")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            args+=(--rapidocr-cache "$RAPIDOCR_CACHE_DIR")
           fi
           if [[ "${{ steps.models.outputs.cache-hit }}" == "true" ]]; then
             args+=(--offline)
@@ -151,6 +161,14 @@ jobs:
             echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
           fi
 
+      - name: Install byte-pinned RapidOCR assets into Docling
+        if: matrix.system == 'docling'
+        run: |
+          models_dir=$(python scripts/benchmark/install_rapidocr_assets.py \
+            --pins scripts/benchmark/model-pins.json \
+            --cache "$RAPIDOCR_CACHE_DIR")
+          echo "RAPIDOCR_MODELS_DIR=$models_dir" >> "$GITHUB_ENV"
+
       - name: Inventory a restored cache before repeat warm-up
         if: steps.models.outputs.cache-hit == 'true'
         run: |
@@ -160,9 +178,13 @@ jobs:
             --hf-home "$HF_HOME" \
             --direct-cache "$MODEL_CACHE_DIR" \
             --font-path "$FONT_PATH" \
-            --mineru-config "$MINERU_TOOLS_CONFIG_JSON"
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
+            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
           inventory_args=(
             --output "$RUNNER_TEMP/model-cache-before-prewarm.json"
+            --pip-report "$RUNNER_TEMP/prewarm-pip-report.json"
+            --model-pins scripts/benchmark/model-pins.json
+            --system "$SYSTEM"
             --cache-root "$HF_HOME"
             --cache-root "$XDG_CACHE_HOME"
             --cache-root "$MODEL_CACHE_DIR"
@@ -171,6 +193,16 @@ jobs:
           )
           if [[ "$SYSTEM" == "marker" ]]; then
             inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            inventory_args+=(
+              --cache-root "$RAPIDOCR_CACHE_ROOT"
+              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
+              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
+              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
+              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
+            )
+          elif [[ "$SYSTEM" == "mineru" ]]; then
+            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
           fi
           python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
 
@@ -196,13 +228,23 @@ jobs:
             --hf-home "$HF_HOME" \
             --direct-cache "$MODEL_CACHE_DIR" \
             --font-path "$FONT_PATH" \
-            --mineru-config "$MINERU_TOOLS_CONFIG_JSON"
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
+            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
+          if [[ "$SYSTEM" == "docling" ]]; then
+            python scripts/benchmark/install_rapidocr_assets.py \
+              --pins scripts/benchmark/model-pins.json \
+              --cache "$RAPIDOCR_CACHE_DIR" \
+              --models-dir "$RAPIDOCR_MODELS_DIR" \
+              --verify-only >/dev/null
+          fi
 
       - name: Hash the exact model cache
         run: |
           inventory_args=(
             --output "$RUNNER_TEMP/model-cache-manifest.json"
             --pip-report "$RUNNER_TEMP/prewarm-pip-report.json"
+            --model-pins scripts/benchmark/model-pins.json
+            --system "$SYSTEM"
             --cache-root "$HF_HOME"
             --cache-root "$XDG_CACHE_HOME"
             --cache-root "$MODEL_CACHE_DIR"
@@ -211,6 +253,16 @@ jobs:
           )
           if [[ "$SYSTEM" == "marker" ]]; then
             inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            inventory_args+=(
+              --cache-root "$RAPIDOCR_CACHE_ROOT"
+              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
+              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
+              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
+              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
+            )
+          elif [[ "$SYSTEM" == "mineru" ]]; then
+            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
           fi
           python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
 
@@ -253,6 +305,8 @@ jobs:
       FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
       FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
       MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
+      RAPIDOCR_CACHE_ROOT: ${{ github.workspace }}/.benchmark-cache/rapidocr
+      RAPIDOCR_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/rapidocr/docling
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
     steps:
@@ -302,6 +356,13 @@ jobs:
       - name: Install the pinned candidate
         run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/pip-install-report.json"
 
+      - name: Verify the installed candidate contract
+        if: matrix.system != 'docreconstruct-tesseract'
+        run: |
+          python scripts/benchmark/verify_install_contract.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM"
+
       - name: Verify the restored model cache
         if: matrix.system != 'docreconstruct-tesseract'
         run: |
@@ -311,7 +372,16 @@ jobs:
             --hf-home "$HF_HOME" \
             --direct-cache "$MODEL_CACHE_DIR" \
             --font-path "$FONT_PATH" \
-            --mineru-config "$MINERU_TOOLS_CONFIG_JSON"
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
+            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
+
+      - name: Install byte-pinned RapidOCR assets into Docling
+        if: matrix.system == 'docling'
+        run: |
+          models_dir=$(python scripts/benchmark/install_rapidocr_assets.py \
+            --pins scripts/benchmark/model-pins.json \
+            --cache "$RAPIDOCR_CACHE_DIR")
+          echo "RAPIDOCR_MODELS_DIR=$models_dir" >> "$GITHUB_ENV"
 
       - name: Forbid remote model mutation during measured inference
         if: matrix.system != 'docreconstruct-tesseract'
@@ -376,9 +446,26 @@ jobs:
               --runtime-file "tessdata-eng=$BENCHMARK_TESSDATA/eng.traineddata"
               --runtime-file "tessdata-chi-sim=$BENCHMARK_TESSDATA/chi_sim.traineddata"
               --runtime-file "tessdata-chi-tra=$BENCHMARK_TESSDATA/chi_tra.traineddata"
+              --runtime-file "tessdata-tsv-config=$BENCHMARK_TESSDATA/configs/tsv"
             )
           elif [[ "$SYSTEM" == "marker" ]]; then
             inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            inventory_args+=(
+              --cache-root "$RAPIDOCR_CACHE_ROOT"
+              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
+              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
+              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
+              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
+            )
+          elif [[ "$SYSTEM" == "mineru" ]]; then
+            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
+          fi
+          if [[ "$SYSTEM" != "docreconstruct-tesseract" ]]; then
+            inventory_args+=(
+              --model-pins scripts/benchmark/model-pins.json
+              --system "$SYSTEM"
+            )
           fi
           python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
 

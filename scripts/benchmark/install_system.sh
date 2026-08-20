@@ -22,7 +22,7 @@ case "$system" in
     curl --fail --location --retry 5 "$base/eng.traineddata" -o "$tess_root/eng.traineddata"
     curl --fail --location --retry 5 "$base/chi_sim.traineddata" -o "$tess_root/chi_sim.traineddata"
     curl --fail --location --retry 5 "$base/chi_tra.traineddata" -o "$tess_root/chi_tra.traineddata"
-    curl --fail --location --retry 5 "$base/configs/tsv" -o "$tess_root/configs/tsv"
+    install -m 0644 scripts/benchmark/assets/tessdata-config-tsv "$tess_root/configs/tsv"
     (
       cd "$tess_root"
       sha256sum --check <<'EOF'
@@ -32,17 +32,33 @@ a5fcb6f0db1e1d6d8522f39db4e848f05984669172e584e8d76b6b3141e1f730  chi_sim.traine
 59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04  configs/tsv
 EOF
     )
-    python -m pip install --report "$report" -e ".[pdf]"
+    python -m pip install --report "$report" -e ".[hybrid]"
     echo "BENCHMARK_TESSDATA=$tess_root" >> "$GITHUB_ENV"
     ;;
   docling)
-    python -m pip install --report "$report" -e ".[pdf]" "docling==2.120.3"
+    docling_requirements_output=$(python scripts/benchmark/verify_install_contract.py \
+      --pins scripts/benchmark/model-pins.json \
+      --system docling \
+      --print-requirements)
+    mapfile -t docling_requirements <<< "$docling_requirements_output"
+    python -m pip install --report "$report" -e ".[hybrid]" "${docling_requirements[@]}"
+    python scripts/benchmark/verify_install_contract.py \
+      --pins scripts/benchmark/model-pins.json \
+      --system docling
     ;;
   mineru)
-    python -m pip install --report "$report" -e ".[pdf]" "mineru==3.4.5" "six==1.17.0"
+    mineru_requirements_output=$(python scripts/benchmark/verify_install_contract.py \
+      --pins scripts/benchmark/model-pins.json \
+      --system mineru \
+      --print-requirements)
+    mapfile -t mineru_requirements <<< "$mineru_requirements_output"
+    python -m pip install --report "$report" -e ".[hybrid]" "${mineru_requirements[@]}"
+    python scripts/benchmark/verify_install_contract.py \
+      --pins scripts/benchmark/model-pins.json \
+      --system mineru
     ;;
   marker)
-    python -m pip install --report "$report" -e ".[pdf]" "marker-pdf==2.0.0"
+    python -m pip install --report "$report" -e ".[hybrid]" "marker-pdf==2.0.0"
     llama_archive="$RUNNER_TEMP/llama-b10507-bin-ubuntu-x64.tar.gz"
     llama_root="$RUNNER_TEMP/llama-b10507"
     curl --fail --location --retry 5 \
@@ -66,3 +82,5 @@ EOF
     exit 2
     ;;
 esac
+
+python -m docreconstruct.cli --help >/dev/null

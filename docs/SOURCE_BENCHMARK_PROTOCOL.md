@@ -89,13 +89,33 @@ be uploaded. On a cache hit, inventories taken immediately before and after the
 repeat warm-up must also match; a warm-up that mutates the supposedly immutable
 cache invalidates preparation instead of silently changing the full run.
 
+Hugging Face revision aliases requested by pinned clients are explicit parts of
+the contract. Each declared alias is verified to target the pinned 40-character
+commit, and undeclared refs invalidate the cache. In particular, Docling 2.120.3
+requests `docling-project/docling-models@v2.3.0`; that tag is mapped only to
+`fc0f2d45e2218ea24bce5045f58a389aed16dc23`, while the repository's different
+`main` revision is deliberately absent.
+
+Docling's pinned RapidOCR 3.9.2 dependency normally fetches four PyTorch OCR
+assets from ModelScope on first use. Their exact HTTPS URLs, byte lengths, and
+SHA-256 hashes are declared in `model-pins.json`. Preparation downloads and
+verifies them once into the shared benchmark cache; every job then copies those
+verified bytes into `rapidocr.models` before offline warm-up or inference. Both
+the cache and the four installed package files are inventoried, and missing,
+extra, changed, or undeclared cache bytes invalidate the lane.
+
 The normalized environment fingerprint also gates the exact Python version and
 installed package set, plus sanitized pip archive hashes from the single combined
 project/candidate installation report. Thus two wheels with the same declared
 name/version but different bytes cannot pass the prepared-vs-inference or
-cross-shard gate. For Tesseract it includes the executable bytes/version and
+cross-shard gate. Every lane installs the repository's `hybrid` extra, records
+that exact requested extra, and must pass a CLI import/help smoke before model
+preparation or inference; a PDF-only install is invalid. For Tesseract the
+fingerprint includes the executable bytes/version and
 all three traineddata byte hashes; for Marker it includes the realized
 `llama-server` bytes/version in addition to the pinned release-archive hash.
+The small Tesseract TSV config is a committed 22-byte benchmark asset with its
+own SHA-256 check rather than a request to a nonexistent upstream URL.
 Local paths, environment values, and secrets are absent. All 20 shard fingerprints
 must be identical, and model-backed shards must also match their prepared
 environment fingerprint.
@@ -104,7 +124,10 @@ MinerU is deliberately restricted to the 15 model files that its pinned 3.4.5
 pipeline loaded in an offline smoke run. Those files total 1,082,446,509 bytes;
 each filename, byte length, and SHA-256 is declared and checked. Downloading the
 entire 15.13 GB `PDF-Extract-Kit-1.0` repository would exceed a free hosted
-runner's disk and is not this protocol.
+runner's disk and is not this protocol. The installation contract uses the exact
+`mineru[pipeline]==3.4.5` extra plus `six==1.17.0`; a pre-warm import check must
+load both MinerU and PyTorch. The public runtime inventory records that contract,
+its pin-manifest hash, and the fully resolved package/archive inventory.
 
 | Lane | Pinned candidate | Source mode |
 |---|---|---|

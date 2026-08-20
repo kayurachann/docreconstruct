@@ -1,28 +1,78 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "systems": {
     "docling": {
       "package": "docling==2.120.3",
+      "compatibility_packages": [
+        "rapidocr==3.9.2"
+      ],
+      "required_imports": [
+        "docling",
+        "rapidocr"
+      ],
       "source_revision": "46a1103b8c4adc6bbde1e30ec48fd0f7142d5600",
       "huggingface_snapshots": [
         {
           "repo": "docling-project/docling-layout-heron",
-          "revision": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8"
+          "revision": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
+          "revision_aliases": [
+            "main"
+          ]
         },
         {
           "repo": "docling-project/docling-models",
-          "revision": "fc0f2d45e2218ea24bce5045f58a389aed16dc23"
+          "revision": "fc0f2d45e2218ea24bce5045f58a389aed16dc23",
+          "revision_aliases": [
+            "v2.3.0"
+          ]
+        }
+      ],
+      "rapidocr_assets": [
+        {
+          "path": "PP-OCRv6_det_small.pth",
+          "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/torch/PP-OCRv6/det/PP-OCRv6_det_small.pth",
+          "bytes": 10248727,
+          "sha256": "fbdc74c97ea7b770ab22cbdc1bba01a52bdf1975efcf3442057356d622b05d54"
+        },
+        {
+          "path": "ch_ptocr_mobile_v2.0_cls_mobile.pth",
+          "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/torch/PP-OCRv4/cls/ch_ptocr_mobile_v2.0_cls_mobile.pth",
+          "bytes": 588638,
+          "sha256": "bfe13860824b3365c0c7f7ccfcddc8ff11645c60051739ff18bc9913f60c98e1"
+        },
+        {
+          "path": "PP-OCRv6_rec_small.pth",
+          "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/torch/PP-OCRv6/rec/PP-OCRv6_rec_small.pth",
+          "bytes": 21326017,
+          "sha256": "0107b2ad694ccc9b1db7cf9ed3ffbc93d1795d9e08d9cf823127243a87bce516"
+        },
+        {
+          "path": "ppocrv6_dict.txt",
+          "url": "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/paddle/PP-OCRv6/rec/PP-OCRv6_rec_small/ppocrv6_dict.txt",
+          "bytes": 74947,
+          "sha256": "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d"
         }
       ],
       "direct_cache_directories": []
     },
     "mineru": {
       "package": "mineru==3.4.5",
+      "install_spec": "mineru[pipeline]==3.4.5",
+      "compatibility_packages": [
+        "six==1.17.0"
+      ],
+      "required_imports": [
+        "mineru",
+        "torch"
+      ],
       "source_revision": "fbb1257a555a3fde78ae5aaaa931e3b3f8fb2883",
       "huggingface_snapshots": [
         {
           "repo": "opendatalab/PDF-Extract-Kit-1.0",
           "revision": "ed6b654c018d742e65a17671e379c5e6ecc87ec9",
+          "revision_aliases": [
+            "main"
+          ],
           "files": [
             {
               "path": "models/Layout/PP-DocLayoutV2/config.json",
@@ -115,11 +165,17 @@
       "huggingface_snapshots": [
         {
           "repo": "datalab-to/surya_layout2",
-          "revision": "0aee81d5fd9275c0582e545bf3a56944b1e75679"
+          "revision": "0aee81d5fd9275c0582e545bf3a56944b1e75679",
+          "revision_aliases": [
+            "main"
+          ]
         },
         {
           "repo": "datalab-to/surya-ocr-2-gguf",
-          "revision": "6a3a4c30e5e74446d4f8b6afd05b2f2da970f470"
+          "revision": "6a3a4c30e5e74446d4f8b6afd05b2f2da970f470",
+          "revision_aliases": [
+            "main"
+          ]
         }
       ],
       "direct_cache_directories": [

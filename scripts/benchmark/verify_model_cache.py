@@ -10,7 +10,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from materialize_pinned_models import repository_cache_name, verify_allowlist
+from materialize_pinned_models import (
+    repository_cache_name,
+    verify_allowlist,
+    verify_revision_aliases,
+)
 
 
 def populated(path: Path) -> bool:
@@ -48,24 +52,25 @@ def main(args: argparse.Namespace) -> None:
         )
     missing = []
     for snapshot in system["huggingface_snapshots"]:
-        path = (
-            args.hf_home
-            / "hub"
-            / repository_cache_name(snapshot["repo"])
-            / "snapshots"
-            / snapshot["revision"]
-        )
+        repo_root = args.hf_home / "hub" / repository_cache_name(snapshot["repo"])
+        path = repo_root / "snapshots" / snapshot["revision"]
         if not populated(path):
             missing.append(str(path.relative_to(args.hf_home)))
         records = snapshot.get("files", [])
         if records and populated(path):
-            verify_allowlist(path, records)
+            verify_allowlist(path, records, allow_symlinks=True)
+        verify_revision_aliases(repo_root, snapshot)
     for relative in system["direct_cache_directories"]:
         path = args.direct_cache / relative
         if not populated(path):
             missing.append(f"direct:{relative}")
     if missing:
         raise RuntimeError(f"pinned model cache is incomplete: {missing}")
+    rapidocr_assets = system.get("rapidocr_assets", [])
+    if rapidocr_assets:
+        if args.rapidocr_cache is None:
+            raise RuntimeError("Docling RapidOCR assets require --rapidocr-cache")
+        verify_allowlist(args.rapidocr_cache, rapidocr_assets)
     if args.system == "mineru":
         if args.mineru_config is None or not args.mineru_config.is_file():
             raise RuntimeError("pinned MinerU config is missing")
@@ -105,4 +110,5 @@ if __name__ == "__main__":
     parser.add_argument("--direct-cache", type=Path, required=True)
     parser.add_argument("--font-path", type=Path)
     parser.add_argument("--mineru-config", type=Path)
+    parser.add_argument("--rapidocr-cache", type=Path)
     main(parser.parse_args())
