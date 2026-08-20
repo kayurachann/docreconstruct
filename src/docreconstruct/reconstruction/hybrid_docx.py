@@ -711,12 +711,72 @@ def _set_cell_margins(cell: _Cell, *, value: int = 32) -> None:
         node.set(qn("w:type"), "dxa")
 
 
+# WordprocessingML property containers are `xsd:sequence`, so a property placed
+# after a later-ordered sibling makes the document invalid.  Word's strict
+# parser answers that with "unreadable content" and repairs the file by dropping
+# the offending property, which silently removes rules, borders, and shading;
+# LibreOffice is lenient, so a rendered check does not see it.  python-docx has
+# no accessor for these three elements, so their ECMA-376 successors are named
+# here and the elements are inserted ahead of whichever one is already present.
+_PARAGRAPH_BORDER_SUCCESSORS = (
+    "w:shd",
+    "w:tabs",
+    "w:suppressAutoHyphens",
+    "w:kinsoku",
+    "w:wordWrap",
+    "w:overflowPunct",
+    "w:topLinePunct",
+    "w:autoSpaceDE",
+    "w:autoSpaceDN",
+    "w:bidi",
+    "w:adjustRightInd",
+    "w:snapToGrid",
+    "w:spacing",
+    "w:ind",
+    "w:contextualSpacing",
+    "w:mirrorIndents",
+    "w:suppressOverlap",
+    "w:jc",
+    "w:textDirection",
+    "w:textAlignment",
+    "w:textboxTightWrap",
+    "w:outlineLvl",
+    "w:divId",
+    "w:cnfStyle",
+    "w:rPr",
+    "w:sectPr",
+    "w:pPrChange",
+)
+_CELL_SHADING_SUCCESSORS = (
+    "w:noWrap",
+    "w:tcMar",
+    "w:textDirection",
+    "w:tcFitText",
+    "w:vAlign",
+    "w:hideMark",
+    "w:headers",
+    "w:cellIns",
+    "w:cellDel",
+    "w:cellMerge",
+    "w:tcPrChange",
+)
+_TABLE_BORDER_SUCCESSORS = (
+    "w:shd",
+    "w:tblLayout",
+    "w:tblCellMar",
+    "w:tblLook",
+    "w:tblCaption",
+    "w:tblDescription",
+    "w:tblPrChange",
+)
+
+
 def _set_table_borders(table: Table, *, visible: bool, size: int = 5) -> None:
     properties = table._tbl.tblPr
     borders = properties.first_child_found_in("w:tblBorders")
     if borders is None:
         borders = OxmlElement("w:tblBorders")
-        properties.append(borders)
+        properties.insert_element_before(borders, *_TABLE_BORDER_SUCCESSORS)
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         node = borders.find(qn(f"w:{edge}"))
         if node is None:
@@ -857,8 +917,10 @@ def _add_native_table(
                     run.bold = True
                 properties = cell._tc.get_or_add_tcPr()
                 shading = OxmlElement("w:shd")
+                # `w:val` is required by CT_Shd; "clear" is the plain solid fill.
+                shading.set(qn("w:val"), "clear")
                 shading.set(qn("w:fill"), "F2F2F2")
-                properties.append(shading)
+                properties.insert_element_before(shading, *_CELL_SHADING_SUCCESSORS)
     return table
 
 
@@ -1129,7 +1191,7 @@ def _add_thematic_rule(
     bottom.set(qn("w:space"), "1")
     bottom.set(qn("w:color"), "000000")
     borders.append(bottom)
-    properties.append(borders)
+    properties.insert_element_before(borders, *_PARAGRAPH_BORDER_SUCCESSORS)
 
 
 def _render_linear(
@@ -2903,7 +2965,7 @@ def _render_masthead_cell(
             borders = properties.find(qn("w:pBdr"))
             if borders is None:
                 borders = OxmlElement("w:pBdr")
-                properties.append(borders)
+                properties.insert_element_before(borders, *_PARAGRAPH_BORDER_SUCCESSORS)
             for edge in ("top", "left", "bottom", "right"):
                 border = borders.find(qn(f"w:{edge}"))
                 if border is None:
