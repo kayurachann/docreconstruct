@@ -117,6 +117,42 @@ analysis remains the largest measured phase. OCR/upload latency, a cold model,
 LibreOffice conversion, more pages, larger images, and an unavailable cache can
 all dominate these local numbers.
 
+### Deterministic speed-ups since those runs
+
+The two tables above predate a round of output-preserving optimization, so they
+now understate the fast path. Every change below was checked to leave results
+byte-identical — the committed showcase pages still serialize to the same
+`ScanDocumentLayout` SHA-256, the evaluator emits the same metrics, and asset
+matching returns the same matches.
+
+The figures come from alternating the two source trees within one session, so
+machine drift cancels between them, and they are still one machine's numbers
+rather than a portable claim.
+
+| Stage | Before | After | Speed-up |
+| --- | ---: | ---: | ---: |
+| Page analysis, `docs/showcases/math-exam` | 0.640 s | 0.365 s | 1.75x |
+| Page analysis, `docs/showcases/vietnamese-exam` | 0.905 s | 0.465 s | 1.95x |
+| PDF page rasterization | 161 ms/page | 24 ms/page | 6.7x |
+| `evaluate_text`, 1,500 words | 80.9 s | 38.0 s | 2.13x |
+| `evaluate()`, 2x90 elements | 59.5 s | 31.8 s | 1.87x |
+| Asset matching, 6 figures over 3 pages | 5.85 s | 3.89 s | 1.50x |
+
+Multi-page reconstruction gains most, because a worker pool is no longer started
+for documents whose pages are too cheap to repay roughly a second of interpreter
+start-up:
+
+| Synthetic case | Before | After | Speed-up |
+| --- | ---: | ---: | ---: |
+| 2 pages, 32 blocks | 1.293 s | 0.139 s | 9.3x |
+| 4 pages, 64 blocks | 1.544 s | 0.254 s | 6.1x |
+| 8 pages, 208 blocks | 1.995 s | 0.665 s | 3.0x |
+| 32 pages, 832 blocks | 5.503 s | 3.360 s | 1.6x |
+
+Genuinely expensive pages still get the pool: the decision compares the observed
+per-page cost against the pool's start-up cost after every page, so a long
+high-resolution document reaches it within one or two pages.
+
 ## Reproducible reconstruction benchmark
 
 The first [public unfiltered baseline](../benchmark/omnidocbench-demo/README.md)
