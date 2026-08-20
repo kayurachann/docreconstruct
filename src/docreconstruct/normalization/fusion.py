@@ -251,6 +251,7 @@ def fuse_documents(
         )
         for number in sorted(by_number)
     ]
+    pages = _remap_document_relationships(pages)
     source_values = sorted(document.source for document in sources if document.source)
     source = source_values[0] if source_values and len(set(source_values)) == 1 else None
     document_metadata = merge_preferred_metadata(document.metadata for document in sources)
@@ -267,6 +268,96 @@ def fuse_documents(
         metadata=document_metadata,
         schema_version=Document.CURRENT_SCHEMA_VERSION,
     )
+
+
+def _remap_document_relationships(pages: Sequence[Page]) -> list[Page]:
+    """Resolve relationship targets after every page has received fused IDs.
+
+    Page-local fusion cannot resolve ``continued_from``/``continued_to`` (or
+    other legitimate cross-page references) because the target page has not
+    been assigned its fused IDs yet.  The source-observation audit metadata is
+    sufficient to perform that remap once the whole document is available.
+    """
+
+    source_targets: dict[tuple[str, str], set[str]] = defaultdict(set)
+    fused_ids = {element.id for page in pages for element in page.elements}
+    for page in pages:
+        for element in page.elements:
+            for observation in _source_observations(element):
+                source_targets[
+                    (observation["source_identity"], observation["source_element_id"])
+                ].add(element.id)
+
+    remapped_pages: list[Page] = []
+    for page in pages:
+        remapped_elements: list[Element] = []
+        for element in page.elements:
+            identities = {
+                observation["source_identity"] for observation in _source_observations(element)
+            }
+
+            def targets(
+                value: str | None,
+                source_identities: frozenset[str] = frozenset(identities),
+            ) -> set[str]:
+                if value is None:
+                    return set()
+                if value in fused_ids:
+                    return {value}
+                return {
+                    target
+                    for identity in source_identities
+                    for target in source_targets.get((identity, value), set())
+                }
+
+            def singular(value: str | None) -> str | None:
+                candidates = targets(value)
+                return next(iter(candidates)) if len(candidates) == 1 else value
+
+            def plural(values: Sequence[str]) -> list[str]:
+                resolved: list[str] = []
+                for value in values:
+                    candidates = targets(value)
+                    resolved.extend(sorted(candidates) if candidates else [value])
+                return list(dict.fromkeys(resolved))
+
+            relationships = element.relationships
+            remapped_elements.append(
+                element.model_copy(
+                    update={
+                        "relationships": relationships.model_copy(
+                            update={
+                                "parent": singular(relationships.parent),
+                                "caption_of": singular(relationships.caption_of),
+                                "continued_from": singular(relationships.continued_from),
+                                "continued_to": singular(relationships.continued_to),
+                                "children": plural(relationships.children),
+                                "references": plural(relationships.references),
+                            },
+                            deep=True,
+                        )
+                    },
+                    deep=True,
+                )
+            )
+        remapped_pages.append(page.model_copy(update={"elements": remapped_elements}, deep=True))
+    return remapped_pages
+
+
+def _source_observations(element: Element) -> list[dict[str, str]]:
+    fusion = element.metadata.get("fusion")
+    if not isinstance(fusion, dict):
+        return []
+    observations = fusion.get("source_observations")
+    if not isinstance(observations, list):
+        return []
+    return [
+        observation
+        for observation in observations
+        if isinstance(observation, dict)
+        and isinstance(observation.get("source_identity"), str)
+        and isinstance(observation.get("source_element_id"), str)
+    ]
 
 
 @dataclass(frozen=True, slots=True)

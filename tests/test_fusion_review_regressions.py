@@ -17,7 +17,7 @@ from docreconstruct.ir import (
     Provenance,
     Relationship,
 )
-from docreconstruct.normalization import fuse_element_evidence, fuse_pages
+from docreconstruct.normalization import fuse_documents, fuse_element_evidence, fuse_pages
 from docreconstruct.normalization.fusion_assignment import (
     maximum_cardinality_score_assignment,
     maximum_cardinality_score_sparse_assignment,
@@ -212,6 +212,55 @@ def test_relationship_remap_is_namespaced_by_source_document() -> None:
 
     assert "target" not in child.relationships.references
     assert set(child.relationships.references) == target_ids
+
+
+def test_cross_page_relationships_are_remapped_after_document_fusion() -> None:
+    def document(engine: str) -> Document:
+        return Document(
+            id=f"{engine}-document",
+            pages=[
+                Page(
+                    id=f"{engine}-page-1",
+                    number=1,
+                    width=100,
+                    height=100,
+                    elements=[
+                        _observation(
+                            engine,
+                            "first",
+                            "first block",
+                            (0, 0, 80, 20),
+                            relationships=Relationship(continued_to="second"),
+                        )
+                    ],
+                ),
+                Page(
+                    id=f"{engine}-page-2",
+                    number=2,
+                    width=100,
+                    height=100,
+                    elements=[
+                        _observation(
+                            engine,
+                            "second",
+                            "second block",
+                            (0, 0, 80, 20),
+                            relationships=Relationship(continued_from="first"),
+                        )
+                    ],
+                ),
+            ],
+        )
+
+    fused = fuse_documents([document("provider-a"), document("provider-b")])
+    first = fused.pages[0].elements[0]
+    second = fused.pages[1].elements[0]
+
+    assert first.relationships.continued_to == second.id
+    assert second.relationships.continued_from == first.id
+    assert {first.id, second.id} == {
+        element.id for page in fused.pages for element in page.elements
+    }
 
 
 def test_unknown_missing_text_predicate_is_symmetric_against_text() -> None:
