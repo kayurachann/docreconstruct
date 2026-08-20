@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PIL import Image, ImageDraw
 
 from docreconstruct.ir import BBox
@@ -179,6 +180,45 @@ def test_flat_image_analysis_keeps_existing_raster_and_records_dimensions(
         source_width=420,
         source_height=594,
     ) == PixelBox(x0=42, y0=59, x1=378, y1=535)
+
+
+@pytest.mark.parametrize(
+    ("sheet_width", "sheet_height"),
+    [(1650, 1275), (1275, 1650), (1754, 1240), (1240, 1754)],
+)
+def test_rectified_page_keeps_the_orientation_of_its_sheet(
+    tmp_path: Path,
+    sheet_width: int,
+    sheet_height: int,
+) -> None:
+    """A landscape sheet must not be rectified into a portrait canvas.
+
+    The candidate paper sizes were portrait-only, so the closest match was
+    always portrait: a landscape sheet was mesh-stretched to a portrait canvas,
+    distorting every glyph before line detection and reporting a portrait page
+    size for a document that is physically wider than it is tall.
+    """
+
+    source = tmp_path / f"sheet-{sheet_width}x{sheet_height}.png"
+    margin_x, margin_y = int(sheet_width * 0.15), int(sheet_height * 0.17)
+    image = Image.new("RGB", (sheet_width + margin_x, sheet_height + margin_y), (35, 38, 42))
+    draw = ImageDraw.Draw(image)
+    left, top = margin_x // 2, margin_y // 2
+    draw.rectangle((left, top, left + sheet_width, top + sheet_height), fill=(252, 252, 250))
+    rows = max(8, sheet_height // 60)
+    for index in range(rows):
+        row_top = top + 60 + index * (sheet_height // (rows + 2))
+        draw.rectangle(
+            (left + 70, row_top, left + sheet_width - 70 - (index % 4) * 60, row_top + 18),
+            fill=(20, 20, 20),
+        )
+    image.save(source)
+
+    page = analyze_scan_image(source).pages[0]
+
+    landscape_sheet = sheet_width > sheet_height
+    assert (page.pdf_width > page.pdf_height) is landscape_sheet
+    assert (page.width > page.height) is landscape_sheet
 
 
 def test_photographed_page_records_compact_forward_row_mapping(tmp_path: Path) -> None:
