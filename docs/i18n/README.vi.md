@@ -10,25 +10,29 @@ lập bố cục và trình xuất tệp sẽ quyết định cách tạo DOCX, 
 
 ## Tình trạng đánh giá chuẩn công khai
 
-Kết quả đánh giá công khai đầu tiên, tách biệt với các ví dụ minh họa được tuyển
-chọn, đã chạy **đủ 18 trang** của bộ demo chính thức OmniDocBench. Đây là phép
-thử tái tạo dùng dữ liệu chuẩn làm căn cứ (`oracle_reconstruction`): quy trình
-dùng Markdown và hình học chuẩn để tách riêng chất lượng tái tạo, vì vậy **không
-phải** phép so sánh OCR.
+Phép thử tái tạo bằng dữ liệu chuẩn (`oracle_reconstruction`) đã chạy **đủ 18
+trang** của bộ demo chính thức OmniDocBench. Quy trình dùng Markdown và hình học
+chuẩn để tách riêng chất lượng tái tạo, vì vậy **không phải** phép so sánh OCR.
 
 | Kết quả | Giá trị đo được |
 | --- | ---: |
-| Quy trình chạy thành công | **8/18 (44,44%)** |
-| Đạt toàn bộ tiêu chí đo được | **1/18 (5,56%)** |
-| Thất bại khi căn chỉnh bằng chứng ở chế độ nghiêm ngặt | **10/18** |
-| Điểm tương đồng hình ảnh LibreOffice v2.1, tính cả trường hợp thất bại | **0.104675** |
+| Quy trình chạy thành công sau khi sửa phép chiếu | **18/18 (100%)** |
+| Đạt toàn bộ tiêu chí đo được | **2/18 (11,11%)** |
+| Thất bại khi căn chỉnh bằng chứng ở chế độ nghiêm ngặt | **0/18** |
+| Điểm hình ảnh LibreOffice v2.2, tính đủ 18 trang | **0,214798** |
 
-Các trường hợp thất bại vẫn được giữ trong báo cáo và nhận điểm hình ảnh bằng
-không. Xem [đầy đủ quy trình, kết quả và danh sách thất
-bại](../../benchmark/omnidocbench-demo/README.md). Kết quả này không thể dùng để
-so sánh với Docling, MinerU hoặc Marker; muốn so sánh hợp lệ, dự án còn phải chạy
-một phép thử mà Markdown và JSON được tạo từ chính ảnh đầu vào, không sử dụng dữ
-liệu chuẩn.
+Mười lỗi cũ bắt nguồn từ việc chiều rộng và chiều cao của trang bị đảo khi
+chuyển dữ liệu OmniDocBench sang định dạng nội bộ, chứ không phải do bộ so khớp
+chữ gần đúng. Sau khi sửa đúng phép chiếu mà không hạ tiêu chuẩn nghiêm ngặt,
+cả 18 trang đều tạo được DOCX; tuy vậy chỉ hai trang vượt mọi tiêu chí. Vì thế
+chất lượng của trình lập bố cục và trình dựng tệp vẫn còn yếu. Xem [báo cáo mới
+và lỗi của từng trang](../../benchmark/omnidocbench-demo/projection-0.2-metric-2.2/README.md)
+cùng [mốc cũ được giữ nguyên để đối chiếu](../../benchmark/omnidocbench-demo/README.md).
+Không được so trực tiếp điểm hình ảnh phiên bản 2.1 với 2.2.
+
+Dự án đã có bộ chạy kiểm thử chỉ dùng tài liệu gốc và một lựa chọn Tesseract cục
+bộ, miễn phí. Tuy nhiên phép thử 296 trang khó và toàn bộ 1.651 trang vẫn chưa
+chạy xong, nên chưa có cơ sở tuyên bố tốt hơn Docling, MinerU hoặc Marker.
 
 ## Giao diện web và việc tải tài liệu lên
 

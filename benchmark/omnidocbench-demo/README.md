@@ -1,5 +1,11 @@
 # OmniDocBench demo: oracle-reconstruction baseline
 
+> **Historical result.** Projection contract 0.2 later identified transposed
+> page dimensions as the cause of all ten strict-alignment failures. The
+> versioned follow-up achieves 18/18 operational success but only 2/18 accepted
+> pages. See [projection 0.2 / visual 2.2](projection-0.2-metric-2.2/README.md).
+> This baseline remains unchanged so the original failure evidence is auditable.
+
 This is the first public, unfiltered external-corpus baseline for
 `docreconstruct`. It runs all
 18 pages in the official OmniDocBench demo rather than selecting successful

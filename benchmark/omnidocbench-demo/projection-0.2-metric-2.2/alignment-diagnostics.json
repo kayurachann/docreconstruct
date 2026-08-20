@@ -1,0 +1,994 @@
+[
+  {
+    "case_index": 0,
+    "image": "yanbaopptmerge_SE05.pdf_7.jpg",
+    "raw_annotations": 6,
+    "canonical_elements": 6,
+    "markdown_blocks": 4,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 4,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 5,
+      "textual_elements": 5,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 5,
+      "aligned_candidates": 4,
+      "matched_blocks": 4
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 4,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 5,
+      "textual_elements": 5,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 5,
+      "aligned_candidates": 4,
+      "matched_blocks": 4
+    },
+    "declared_dimensions_before": [
+      2000.0,
+      1500.0
+    ],
+    "canonical_dimensions_after": [
+      2000.0,
+      1500.0
+    ],
+    "raster_dimensions": [
+      1800,
+      2329
+    ]
+  },
+  {
+    "case_index": 1,
+    "image": "yanbaopptmerge_yanbaoPPT_145.jpg",
+    "raw_annotations": 3,
+    "canonical_elements": 3,
+    "markdown_blocks": 2,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 2,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 3,
+      "textual_elements": 3,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 3,
+      "aligned_candidates": 2,
+      "matched_blocks": 2
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 2,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 3,
+      "textual_elements": 3,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 3,
+      "aligned_candidates": 2,
+      "matched_blocks": 2
+    },
+    "declared_dimensions_before": [
+      2667.0,
+      1500.0
+    ],
+    "canonical_dimensions_after": [
+      2667.0,
+      1500.0
+    ],
+    "raster_dimensions": [
+      2667,
+      1500
+    ]
+  },
+  {
+    "case_index": 2,
+    "image": "docstructbench_llm-raw-scihub-o.O-j.chroma.2005.05.085.pdf_4.jpg",
+    "raw_annotations": 19,
+    "canonical_elements": 19,
+    "markdown_blocks": 17,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 17,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 18,
+      "textual_elements": 18,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 18,
+      "aligned_candidates": 16,
+      "matched_blocks": 16
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 17,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 18,
+      "textual_elements": 18,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 18,
+      "aligned_candidates": 16,
+      "matched_blocks": 16
+    },
+    "declared_dimensions_before": [
+      1653.0,
+      2206.0
+    ],
+    "canonical_dimensions_after": [
+      1653.0,
+      2206.0
+    ],
+    "raster_dimensions": [
+      1653,
+      2206
+    ]
+  },
+  {
+    "case_index": 3,
+    "image": "docstructbench_llm-raw-scihub-o.O-j.physletb.2004.06.101.pdf_3.jpg",
+    "raw_annotations": 38,
+    "canonical_elements": 38,
+    "markdown_blocks": 36,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 36,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 38,
+      "textual_elements": 38,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 38,
+      "aligned_candidates": 36,
+      "matched_blocks": 36
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 36,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 38,
+      "textual_elements": 38,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 38,
+      "aligned_candidates": 36,
+      "matched_blocks": 36
+    },
+    "declared_dimensions_before": [
+      1517.0,
+      2059.0
+    ],
+    "canonical_dimensions_after": [
+      1517.0,
+      2059.0
+    ],
+    "raster_dimensions": [
+      1517,
+      2059
+    ]
+  },
+  {
+    "case_index": 4,
+    "image": "docstructbench_dianzishu_zhongwenzaixian-o.O-60599898.pdf_30.jpg",
+    "raw_annotations": 12,
+    "canonical_elements": 12,
+    "markdown_blocks": 6,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 6,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 12,
+      "textual_elements": 12,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 12,
+      "aligned_candidates": 6,
+      "matched_blocks": 6
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 6,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 12,
+      "textual_elements": 12,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 12,
+      "aligned_candidates": 6,
+      "matched_blocks": 6
+    },
+    "declared_dimensions_before": [
+      2756.0,
+      1969.0
+    ],
+    "canonical_dimensions_after": [
+      2756.0,
+      1969.0
+    ],
+    "raster_dimensions": [
+      1800,
+      2329
+    ]
+  },
+  {
+    "case_index": 5,
+    "image": "docstructbench_dianzishu_zhongwenzaixian-o.O-61522235.pdf_170.jpg",
+    "raw_annotations": 11,
+    "canonical_elements": 11,
+    "markdown_blocks": 10,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 10,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 10,
+      "textual_elements": 8,
+      "visual_elements": 2,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 10,
+      "aligned_candidates": 9,
+      "matched_blocks": 9
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 10,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 10,
+      "textual_elements": 8,
+      "visual_elements": 2,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 10,
+      "aligned_candidates": 9,
+      "matched_blocks": 9
+    },
+    "declared_dimensions_before": [
+      1434.0,
+      2070.0
+    ],
+    "canonical_dimensions_after": [
+      1434.0,
+      2070.0
+    ],
+    "raster_dimensions": [
+      1434,
+      2070
+    ]
+  },
+  {
+    "case_index": 6,
+    "image": "docstructbench_dianzishu_zhongwenzaixian-o.O-61520814.pdf_185.jpg",
+    "raw_annotations": 12,
+    "canonical_elements": 12,
+    "markdown_blocks": 9,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 9,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 11,
+      "textual_elements": 10,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 5,
+      "projection_aspect_mismatches": 11,
+      "projection_rejections": 11,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 9,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 11,
+      "textual_elements": 10,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 11,
+      "aligned_candidates": 8,
+      "matched_blocks": 8
+    },
+    "declared_dimensions_before": [
+      2150.0,
+      1551.0
+    ],
+    "canonical_dimensions_after": [
+      1551.0,
+      2150.0
+    ],
+    "raster_dimensions": [
+      1551,
+      2150
+    ]
+  },
+  {
+    "case_index": 7,
+    "image": "docstructbench_dianzishu_zhongwenzaixian-o.O-61569294.pdf_128.jpg",
+    "raw_annotations": 6,
+    "canonical_elements": 6,
+    "markdown_blocks": 5,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 5,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 6,
+      "textual_elements": 5,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 3,
+      "projection_aspect_mismatches": 6,
+      "projection_rejections": 6,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 5,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 6,
+      "textual_elements": 5,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 6,
+      "aligned_candidates": 5,
+      "matched_blocks": 5
+    },
+    "declared_dimensions_before": [
+      1890.0,
+      1339.0
+    ],
+    "canonical_dimensions_after": [
+      1339.0,
+      1890.0
+    ],
+    "raster_dimensions": [
+      1339,
+      1890
+    ]
+  },
+  {
+    "case_index": 8,
+    "image": "jiaocaineedrop_Chapter9.pdf_46.jpg",
+    "raw_annotations": 18,
+    "canonical_elements": 18,
+    "markdown_blocks": 15,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 17,
+      "textual_elements": 15,
+      "visual_elements": 2,
+      "boxes_outside_declared_page": 6,
+      "projection_aspect_mismatches": 17,
+      "projection_rejections": 17,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "projection_rejected",
+        "matched"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 17,
+      "textual_elements": 15,
+      "visual_elements": 2,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 2,
+      "projected_units": 15,
+      "aligned_candidates": 13,
+      "matched_blocks": 13
+    },
+    "declared_dimensions_before": [
+      2178.0,
+      1700.0
+    ],
+    "canonical_dimensions_after": [
+      1700.0,
+      2178.0
+    ],
+    "raster_dimensions": [
+      1699,
+      2199
+    ]
+  },
+  {
+    "case_index": 9,
+    "image": "jiaocaineedrop_Evans_PDE_Solution_Chapter_6_Second-Order_Elliptic_Equations.pdf_5.jpg",
+    "raw_annotations": 16,
+    "canonical_elements": 16,
+    "markdown_blocks": 15,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 16,
+      "textual_elements": 16,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 7,
+      "projection_aspect_mismatches": 16,
+      "projection_rejections": 16,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 16,
+      "textual_elements": 16,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 16,
+      "aligned_candidates": 15,
+      "matched_blocks": 15
+    },
+    "declared_dimensions_before": [
+      2339.0,
+      1654.0
+    ],
+    "canonical_dimensions_after": [
+      1654.0,
+      2339.0
+    ],
+    "raster_dimensions": [
+      1654,
+      2339
+    ]
+  },
+  {
+    "case_index": 10,
+    "image": "jiaocaineedrop_jiaocai_needrop_en_1898.jpg",
+    "raw_annotations": 9,
+    "canonical_elements": 9,
+    "markdown_blocks": 8,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 8,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 8,
+      "textual_elements": 8,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 1,
+      "projection_aspect_mismatches": 8,
+      "projection_rejections": 8,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "projection_rejected",
+        "matched"
+      ],
+      "markdown_blocks": 8,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 8,
+      "textual_elements": 8,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 1,
+      "projected_units": 7,
+      "aligned_candidates": 6,
+      "matched_blocks": 6
+    },
+    "declared_dimensions_before": [
+      2500.0,
+      1806.0
+    ],
+    "canonical_dimensions_after": [
+      1806.0,
+      2500.0
+    ],
+    "raster_dimensions": [
+      1800,
+      2329
+    ]
+  },
+  {
+    "case_index": 11,
+    "image": "jiaocaineedrop_jiaocai_needrop_en_3361.jpg",
+    "raw_annotations": 34,
+    "canonical_elements": 34,
+    "markdown_blocks": 30,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 30,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 33,
+      "textual_elements": 31,
+      "visual_elements": 2,
+      "boxes_outside_declared_page": 10,
+      "projection_aspect_mismatches": 33,
+      "projection_rejections": 33,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 30,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 33,
+      "textual_elements": 31,
+      "visual_elements": 2,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 33,
+      "aligned_candidates": 28,
+      "matched_blocks": 28
+    },
+    "declared_dimensions_before": [
+      864.0,
+      614.0
+    ],
+    "canonical_dimensions_after": [
+      614.0,
+      864.0
+    ],
+    "raster_dimensions": [
+      614,
+      864
+    ]
+  },
+  {
+    "case_index": 12,
+    "image": "notes_1ba14cb325bc448f7201b20502ecf2b5_15.jpg",
+    "raw_annotations": 10,
+    "canonical_elements": 10,
+    "markdown_blocks": 8,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 8,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 9,
+      "textual_elements": 9,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 2,
+      "projection_aspect_mismatches": 9,
+      "projection_rejections": 9,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 8,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 9,
+      "textual_elements": 9,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 9,
+      "aligned_candidates": 7,
+      "matched_blocks": 7
+    },
+    "declared_dimensions_before": [
+      729.0,
+      516.0
+    ],
+    "canonical_dimensions_after": [
+      516.0,
+      729.0
+    ],
+    "raster_dimensions": [
+      516,
+      729
+    ]
+  },
+  {
+    "case_index": 13,
+    "image": "notes_f7f010b78016aeebd76e56d9283eb67f_49.jpg",
+    "raw_annotations": 17,
+    "canonical_elements": 17,
+    "markdown_blocks": 15,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 16,
+      "textual_elements": 16,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 3,
+      "projection_aspect_mismatches": 16,
+      "projection_rejections": 16,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 16,
+      "textual_elements": 16,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 16,
+      "aligned_candidates": 14,
+      "matched_blocks": 14
+    },
+    "declared_dimensions_before": [
+      729.0,
+      516.0
+    ],
+    "canonical_dimensions_after": [
+      516.0,
+      729.0
+    ],
+    "raster_dimensions": [
+      516,
+      729
+    ]
+  },
+  {
+    "case_index": 14,
+    "image": "newspaper_1cddf9d22ca549f3a86cf1512a3110cc_1.jpg",
+    "raw_annotations": 87,
+    "canonical_elements": 87,
+    "markdown_blocks": 76,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 76,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 86,
+      "textual_elements": 85,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 35,
+      "projection_aspect_mismatches": 86,
+      "projection_rejections": 86,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 76,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 86,
+      "textual_elements": 85,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 86,
+      "aligned_candidates": 76,
+      "matched_blocks": 76
+    },
+    "declared_dimensions_before": [
+      1419.0,
+      992.0
+    ],
+    "canonical_dimensions_after": [
+      992.0,
+      1419.0
+    ],
+    "raster_dimensions": [
+      992,
+      1419
+    ]
+  },
+  {
+    "case_index": 15,
+    "image": "newspaper_5e266dfd9c498cab274e12a7b4a75755_4.jpg",
+    "raw_annotations": 25,
+    "canonical_elements": 25,
+    "markdown_blocks": 22,
+    "before": {
+      "reason_codes": [
+        "projection_aspect_mismatch"
+      ],
+      "markdown_blocks": 22,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 25,
+      "textual_elements": 25,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 5,
+      "projection_aspect_mismatches": 25,
+      "projection_rejections": 25,
+      "projected_units": 0,
+      "aligned_candidates": 0,
+      "matched_blocks": 0
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 22,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 25,
+      "textual_elements": 25,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 25,
+      "aligned_candidates": 22,
+      "matched_blocks": 22
+    },
+    "declared_dimensions_before": [
+      792.0,
+      612.0
+    ],
+    "canonical_dimensions_after": [
+      612.0,
+      792.0
+    ],
+    "raster_dimensions": [
+      612,
+      792
+    ]
+  },
+  {
+    "case_index": 16,
+    "image": "eastmoney_62b4149b1612ce28d20f26cd5c5b2e18f80b26fca6e4452e090376a2fe72eae3.pdf_0.jpg",
+    "raw_annotations": 30,
+    "canonical_elements": 30,
+    "markdown_blocks": 22,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 22,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 28,
+      "textual_elements": 27,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 28,
+      "aligned_candidates": 20,
+      "matched_blocks": 20
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 22,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 28,
+      "textual_elements": 27,
+      "visual_elements": 1,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 28,
+      "aligned_candidates": 20,
+      "matched_blocks": 20
+    },
+    "declared_dimensions_before": [
+      1655.0,
+      2340.0
+    ],
+    "canonical_dimensions_after": [
+      1655.0,
+      2340.0
+    ],
+    "raster_dimensions": [
+      1655,
+      2340
+    ]
+  },
+  {
+    "case_index": 17,
+    "image": "yanbaopptmerge_0c79d327060dbf9f1582d03c235dadb039533a19091d2c0d24f2ad95d267f79b.pdf_2.jpg",
+    "raw_annotations": 21,
+    "canonical_elements": 21,
+    "markdown_blocks": 15,
+    "before": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 19,
+      "textual_elements": 19,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 19,
+      "aligned_candidates": 14,
+      "matched_blocks": 14
+    },
+    "after": {
+      "reason_codes": [
+        "matched"
+      ],
+      "markdown_blocks": 15,
+      "evidence_documents": 1,
+      "evidence_pages": 1,
+      "bound_pages": 1,
+      "eligible_elements": 19,
+      "textual_elements": 19,
+      "visual_elements": 0,
+      "boxes_outside_declared_page": 0,
+      "projection_aspect_mismatches": 0,
+      "projection_rejections": 0,
+      "projected_units": 19,
+      "aligned_candidates": 14,
+      "matched_blocks": 14
+    },
+    "declared_dimensions_before": [
+      1654.0,
+      2339.0
+    ],
+    "canonical_dimensions_after": [
+      1654.0,
+      2339.0
+    ],
+    "raster_dimensions": [
+      1654,
+      2339
+    ]
+  }
+]

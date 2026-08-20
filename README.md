@@ -49,21 +49,31 @@ MinerU, or Marker.
 
 ## Public benchmark status
 
-The first non-showcase baseline now runs **all 18 pages** of the official
+The oracle-reconstruction lane now runs **all 18 pages** of the official
 OmniDocBench demo at pinned revision `193627a`. It uses ground-truth Markdown
 and ground-truth geometry to isolate reconstruction behavior; it is not an OCR
 comparison.
 
 | Result | Measured value |
 | --- | ---: |
-| Operational success | **8/18 (44.44%)** |
-| Accepted by every measured gate | **1/18 (5.56%)** |
-| Strict evidence-alignment failures | **10/18** |
-| Failure-inclusive LibreOffice visual v2.1 score | **0.104675** |
+| Operational success after projection fix | **18/18 (100%)** |
+| Accepted by every measured gate | **2/18 (11.11%)** |
+| Strict evidence-alignment failures | **0/18** |
+| Failure-inclusive LibreOffice visual v2.2 score | **0.214798** |
 
-This result is intentionally not flattering. Failed cases remain in the report
-and contribute zero to rendered quality. See the complete
-[protocol, reports, and failure ledger](benchmark/omnidocbench-demo/README.md).
+The former 10/18 failures were traced to transposed page dimensions in the
+OmniDocBench-to-canonical projection, not to fuzzy matching. Correcting that
+conversion without weakening strict mode produces DOCX output for all 18 pages,
+but only two pages pass every measured gate. The renderer/planner result is
+therefore still weak. See the versioned [projection 0.2 reports and per-page
+failure ledger](benchmark/omnidocbench-demo/projection-0.2-metric-2.2/README.md)
+and the preserved [historical baseline](benchmark/omnidocbench-demo/README.md).
+Visual 2.1 and 2.2 scores are not directly comparable.
+
+The repository also contains a failure-inclusive source-only harness and a
+free local Tesseract lane. The 296-page hard and 1,651-page full source-only
+runs have not yet completed, so they are not results and are not evidence of
+superiority.
 Until a provider-realistic lane is run through the official OmniDocBench
 semantic evaluator, this repository must not claim benchmark superiority over
 document parsers or OCR systems.
@@ -74,6 +84,9 @@ document parsers or OCR systems.
   geometry, styles, relationships, confidence, text candidates, and provenance.
 - Inspect raster images and optionally born-digital PDFs without discarding
   source geometry.
+- Run a bounded local Tesseract OCR adapter for a free, private baseline; it is
+  intended for accessibility and benchmarking, not advertised as the best
+  quality lane.
 - Normalize saved PaddleOCR, MinerU, and olmOCR evidence through provider
   adapters, call explicitly authorized hosted specialists, or connect to an
   operator-managed full PaddleOCR-VL server through `paddleocr_vl_server`.

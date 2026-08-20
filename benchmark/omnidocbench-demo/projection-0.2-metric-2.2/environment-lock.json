@@ -1,0 +1,48 @@
+{
+  "schema_version": "0.1",
+  "docreconstruct_revision": "e4ac0ae4f40f55d63713efb0cae645ab378640c5",
+  "dataset_revision": "193627ae9e97d89188468ed1ee3b7a856ff76044",
+  "converter_contract": "omnidocbench-demo-to-canonical-ir/0.2",
+  "visual_metric_profile": "rendered_visual|backend=libreoffice|metric=2.2",
+  "runtime": {
+    "os": "Microsoft Windows 11 IoT Enterprise LTSC 10.0.26100 build 26100",
+    "python": "3.12.0",
+    "libreoffice": "LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb",
+    "libreoffice_binary_sha256": "40ebd75ff8c2d4a228166ffa9ac13b97b947f7ddef67152ae45cf4c98c1ae5e5"
+  },
+  "fonts": {
+    "requested_families": ["Times New Roman", "Cambria Math", "SimSun", "SimHei"],
+    "missing_requested_files": ["simhei.ttf"],
+    "files": [
+      {"name": "times.ttf", "size": 1190736, "sha256": "931c5de5c70401d9324d5014c123802b4fb753000360ceb2f56c589403cd58c5"},
+      {"name": "timesbd.ttf", "size": 1170096, "sha256": "54fbe2c70af7c85a97bed0573227e3ccc4b2486012e3ca2a40c6bc77065846f5"},
+      {"name": "timesi.ttf", "size": 962864, "sha256": "e7f7a88b65188328aea58670f955022e23c712f55679524729da1e4e03c49d88"},
+      {"name": "timesbi.ttf", "size": 904204, "sha256": "3a29d114cb5229e8dbda5bef6c69be4a210a13b7277de4d66e9fc86963226f6c"},
+      {"name": "cambria.ttc", "size": 1792664, "sha256": "84e70ccc1664482f4a960442c7a166c91a1b2cf98ff88c33cb73f79403f66d7b"},
+      {"name": "cambriab.ttf", "size": 841440, "sha256": "6685c657a7e292083e28f19bbf1a1e90509ce3e1130dbc4ed1c62ba3f9140543"},
+      {"name": "cambriai.ttf", "size": 892620, "sha256": "6905f0ac846d1ec4326cd14a46cb7379204940aa293b098ee4c1a69723bbd165"},
+      {"name": "cambriaz.ttf", "size": 856672, "sha256": "fa90f376ad37f308a819b341c8185f788d30a1012829278592eab45a41818d1a"},
+      {"name": "simsun.ttc", "size": 18316748, "sha256": "1526ac24375f51f6eb73bc2d3f8072dbe4a80a3a65217677c9d9a84f67dab2ab"},
+      {"name": "msyh.ttc", "size": 19704352, "sha256": "d79c55e68b1131eea0cc1c47be4f572d964f28c682e143db2ad09c1e4cb07a3f"}
+    ]
+  },
+  "reports": {
+    "native-report.json": {
+      "sha256": "a0d532f90b1e7ea264eba72b45670ded6ce56e28a6e3dcc0d78a7e0b358253d6",
+      "run_fingerprint": "f7cca059b5731cd342d91eb597635367ba53b394496b87e08f5a12c90d896ccf"
+    },
+    "libreoffice-report.json": {
+      "sha256": "08a942d3eaead24bdf40f0d09b63c93fbe92565fba321865a8234115e5e0ee75",
+      "run_fingerprint": "ec164cf5aa5e59423f0344f53e059047f1c4e9fba374370e1d624ea6a9889d43"
+    },
+    "alignment-diagnostics.json": {
+      "sha256": "8b6700f7bc3352684a518367e66cbda944946a3aa68a003fdcb2a811705a997b"
+    }
+  },
+  "limitations": [
+    "SimHei was requested by the reconstruction profile but no simhei.ttf file was installed; LibreOffice may substitute a CJK font.",
+    "The visual 2.2 threshold is a safety floor, not a human-calibrated high-fidelity threshold.",
+    "Oracle inputs use ground-truth Markdown and geometry and cannot be compared with source-only parser scores."
+  ]
+}
+
