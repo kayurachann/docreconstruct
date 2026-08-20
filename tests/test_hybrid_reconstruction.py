@@ -322,6 +322,48 @@ def test_coarse_provider_paragraph_bbox_does_not_inflate_native_line_height(
     assert paragraph.paragraph_format.line_spacing.pt == pytest.approx(18)
 
 
+def test_coarse_tall_inline_math_bbox_retains_source_line_height_floor(
+    tmp_path: Path,
+) -> None:
+    page = ScanPageLayout(
+        number=1,
+        width=1200,
+        height=1697,
+        pdf_width=595,
+        pdf_height=842,
+        content_bbox=PixelBox(x0=80, y0=60, x1=1120, y1=1620),
+        line_pitch=40,
+        image=Image.new("RGB", (1200, 1697), "white"),
+        metadata={"source_kind": "pdf"},
+    )
+    layout = ScanDocumentLayout(source=str(tmp_path / "layout.pdf"), pages=[page])
+    coarse = PixelBox(x0=100, y0=200, x1=1050, y1=420)
+    placement = HybridBlockPlacement(
+        block_id="paragraph",
+        block_index=0,
+        page_number=1,
+        source_bbox=coarse,
+        source_rows=[coarse],
+        source_gap_before=0,
+        geometry_source="json_consensus",
+    )
+    document = WordDocument()
+
+    paragraph = _new_paragraph(
+        document,
+        r"From $\int_0^x e^{t^2}\,dt=\frac{x^3}{3}$ we obtain the limit.",
+        size=12,
+        line_height=18,
+        kind=MarkdownBlockKind.PARAGRAPH,
+        available_width_points=500,
+        placement=placement,
+        layout=layout,
+    )
+
+    assert paragraph.paragraph_format.line_spacing is not None
+    assert paragraph.paragraph_format.line_spacing.pt == pytest.approx(18 * 1.35)
+
+
 def test_markdown_parser_retains_solution_groups_lists_and_display_math(tmp_path: Path) -> None:
     markdown = tmp_path / "math.md"
     markdown.write_text(
@@ -870,6 +912,66 @@ def test_source_rows_choose_two_by_two_nary_options_without_clipping(tmp_path: P
         assert int(height.get(f"{word}val", "0")) >= 300
 
 
+def test_missing_source_rows_still_limit_nary_options_to_two_columns(tmp_path: Path) -> None:
+    markdown = tmp_path / "integral-options-no-geometry.md"
+    markdown.write_text(
+        "Câu 6. Chọn đẳng thức đúng.\n\n"
+        "A. $\\int 7f(x)dx=7+\\int f(x)dx$.\n\n"
+        "B. $\\int 7f(x)dx=7\\int f(x)dx$.\n\n"
+        "C. $\\int 7f(x)dx=7-\\int f(x)dx$.\n\n"
+        "D. $\\int 7f(x)dx=-7\\int f(x)dx$.\n",
+        encoding="utf-8",
+    )
+    content = parse_markdown_content(markdown)
+    content_box = PixelBox(x0=45, y0=25, x1=555, y1=795)
+    page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=820,
+        pdf_width=595,
+        pdf_height=813,
+        content_bbox=content_box,
+        line_pitch=28,
+        image=Image.new("RGB", (600, 820), "white"),
+        metadata={"source_kind": "image", "render_content_bbox": content_box.model_dump()},
+    )
+    scan = ScanDocumentLayout(source=str(tmp_path / "layout.png"), pages=[page])
+    placements = [
+        HybridBlockPlacement(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+        )
+        for block in content.blocks
+    ]
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=scan.source,
+        pages=[
+            HybridPagePlan(
+                number=1,
+                pdf_width=page.pdf_width,
+                pdf_height=page.pdf_height,
+                raster_width=page.width,
+                raster_height=page.height,
+                content_bbox=content_box,
+                line_pitch=page.line_pitch,
+                placements=placements,
+            )
+        ],
+    )
+
+    payload = render_hybrid_docx(content, scan, plan, [])
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        root = ElementTree.fromstring(package.read("word/document.xml"))
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    table = next(root.iter(f"{word}tbl"))
+    rows = table.findall(f"{word}tr")
+
+    assert len(rows) == 2
+    assert all(len(row.findall(f"{word}tc")) == 2 for row in rows)
+
+
 def test_native_table_uses_source_height_as_editable_row_floor(tmp_path: Path) -> None:
     markdown = tmp_path / "table.md"
     markdown.write_text(
@@ -962,10 +1064,13 @@ def test_geometry_driven_three_column_page_renders_native_no_group_flow(
     tmp_path: Path,
 ) -> None:
     markdown = tmp_path / "newspaper.md"
+    long_first_column = "Column one opening paragraph. " + " ".join(
+        f"geometry-owned-word-{index}" for index in range(90)
+    )
     markdown.write_text(
         "![Masthead](masthead.png)\n\n"
         "# BROADSHEET HEADLINE\n\n"
-        "Column one opening paragraph.\n\n"
+        f"{long_first_column}\n\n"
         "Column one continuation.\n\n"
         "Column two opening paragraph.\n\n"
         "Column two continuation.\n\n"
@@ -1018,6 +1123,8 @@ def test_geometry_driven_three_column_page_renders_native_no_group_flow(
             source_rows=[] if block.kind is MarkdownBlockKind.IMAGE else [boxes[index]],
             source_gap_before=0,
             match_score=1.0,
+            geometry_source="json_consensus",
+            evidence_providers=("provider",),
         )
         for index, block in enumerate(content.blocks)
     ]
@@ -1989,6 +2096,162 @@ def test_separate_masthead_blocks_and_bottom_furniture_use_native_zones(
     left_alignment = left_footer.find(f".//{word}jc")
     assert left_alignment is not None
     assert left_alignment.get(f"{word}val") == "left"
+
+
+def test_no_source_footer_does_not_materialize_empty_footer_part(tmp_path: Path) -> None:
+    block = MarkdownBlock(
+        id="page-1-body",
+        index=0,
+        kind=MarkdownBlockKind.PARAGRAPH,
+        text="Editable first-page body.",
+    )
+    content = MarkdownContent(source=str(tmp_path / "content.md"), blocks=[block])
+    page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=800,
+        pdf_width=595,
+        pdf_height=793,
+        content_bbox=PixelBox(x0=35, y0=20, x1=565, y1=780),
+        line_pitch=30,
+        image=Image.new("RGB", (600, 800), "white"),
+        metadata={"source_kind": "image", "column_count": 1},
+    )
+    scan = ScanDocumentLayout(source=str(tmp_path / "layout.png"), pages=[page])
+    body_box = PixelBox(x0=60, y0=100, x1=500, y1=124)
+    placement = HybridBlockPlacement(
+        block_id=block.id,
+        block_index=block.index,
+        page_number=1,
+        source_bbox=body_box,
+        source_rows=[body_box],
+        source_gap_before=0,
+    )
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=scan.source,
+        pages=[
+            HybridPagePlan(
+                number=1,
+                pdf_width=page.pdf_width,
+                pdf_height=page.pdf_height,
+                raster_width=page.width,
+                raster_height=page.height,
+                content_bbox=page.content_bbox,
+                line_pitch=page.line_pitch,
+                placements=[placement],
+            )
+        ],
+    )
+
+    payload = render_hybrid_docx(content, scan, plan, [])
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        names = package.namelist()
+        document = ElementTree.fromstring(package.read("word/document.xml"))
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+    assert not any(name.startswith("word/footer") for name in names)
+    assert document.find(f".//{word}footerReference") is None
+
+
+def test_footer_to_no_footer_section_emits_empty_unlink(tmp_path: Path) -> None:
+    blocks = [
+        MarkdownBlock(
+            id="page-1-body",
+            index=0,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable first-page body.",
+        ),
+        MarkdownBlock(
+            id="page-1-footer",
+            index=1,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Page 1/2",
+        ),
+        MarkdownBlock(
+            id="page-2-body",
+            index=2,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text="Editable second-page body.",
+        ),
+    ]
+    content = MarkdownContent(source=str(tmp_path / "content.md"), blocks=blocks)
+    pages = [
+        ScanPageLayout(
+            number=number,
+            width=600,
+            height=800,
+            pdf_width=595,
+            pdf_height=793,
+            content_bbox=PixelBox(x0=35, y0=20, x1=565, y1=780),
+            line_pitch=30,
+            image=Image.new("RGB", (600, 800), "white"),
+            metadata={"source_kind": "image", "column_count": 1},
+        )
+        for number in (1, 2)
+    ]
+    scan = ScanDocumentLayout(source=str(tmp_path / "layout.png"), pages=pages)
+    first_body = PixelBox(x0=60, y0=100, x1=500, y1=124)
+    first_footer = PixelBox(x0=480, y0=760, x1=555, y1=780)
+    second_body = PixelBox(x0=60, y0=100, x1=500, y1=124)
+    placements = [
+        HybridBlockPlacement(
+            block_id="page-1-body",
+            block_index=0,
+            page_number=1,
+            source_bbox=first_body,
+            source_rows=[first_body],
+            source_gap_before=0,
+        ),
+        HybridBlockPlacement(
+            block_id="page-1-footer",
+            block_index=1,
+            page_number=1,
+            source_bbox=first_footer,
+            source_rows=[first_footer],
+            source_gap_before=0,
+        ),
+        HybridBlockPlacement(
+            block_id="page-2-body",
+            block_index=2,
+            page_number=2,
+            source_bbox=second_body,
+            source_rows=[second_body],
+            source_gap_before=0,
+        ),
+    ]
+    plan = HybridLayoutPlan(
+        content_source=content.source,
+        layout_source=scan.source,
+        pages=[
+            HybridPagePlan(
+                number=page.number,
+                pdf_width=page.pdf_width,
+                pdf_height=page.pdf_height,
+                raster_width=page.width,
+                raster_height=page.height,
+                content_bbox=page.content_bbox,
+                line_pitch=page.line_pitch,
+                placements=[
+                    placement for placement in placements if placement.page_number == page.number
+                ],
+            )
+            for page in pages
+        ],
+    )
+
+    payload = render_hybrid_docx(content, scan, plan, [])
+    with zipfile.ZipFile(io.BytesIO(payload)) as package:
+        document = ElementTree.fromstring(package.read("word/document.xml"))
+        footer_names = sorted(name for name in package.namelist() if name.startswith("word/footer"))
+        footers = [ElementTree.fromstring(package.read(name)) for name in footer_names]
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    footer_texts = [
+        " ".join(node.text or "" for node in footer.iter(f"{word}t")) for footer in footers
+    ]
+
+    assert footer_texts == ["Page 1/2", ""]
+    assert len(document.findall(f".//{word}footerReference")) == 2
 
 
 def test_multilingual_page_fraction_footer_fallback_is_unique_per_section(

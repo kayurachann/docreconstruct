@@ -814,6 +814,62 @@ def test_exact_combined_provider_units_recover_only_leading_text_owners() -> Non
     assert all(option.id not in by_block for option in options)
 
 
+def test_combined_provider_unit_recovers_exact_trailing_byline_suffix() -> None:
+    body_text = (
+        "The final editable stanza keeps every long authority line in order, "
+        "including one deliberately different spelling near the ending."
+    )
+    byline = "PHI-YEN"
+    content = MarkdownContent(
+        source="authority.md",
+        blocks=[
+            MarkdownBlock(
+                id="body",
+                index=0,
+                kind=MarkdownBlockKind.PARAGRAPH,
+                text=body_text,
+            ),
+            MarkdownBlock(
+                id="byline",
+                index=1,
+                kind=MarkdownBlockKind.HEADING,
+                text=byline,
+                level=2,
+            ),
+        ],
+    )
+    provider_text = (
+        "The final editable stanza keeps every long authority line in order, "
+        "including one deliberately divergent spelling near the ending. "
+        f"{byline}"
+    )
+    document = _document(
+        "mineru",
+        [
+            _element(
+                "combined-final-stanza",
+                provider_text,
+                (700, 1400, 950, 1900),
+                provider="mineru",
+            )
+        ],
+    )
+
+    matches = match_sidecar_evidence(content, _layout(), document)
+    by_block = {match.block_id: match for match in matches}
+
+    assert set(by_block) == {"body", "byline"}
+    assert (
+        by_block["body"].element_ids == by_block["byline"].element_ids == ("combined-final-stanza",)
+    )
+    assert by_block["byline"].source_bbox == PixelBox(
+        x0=700,
+        y0=1400,
+        x1=950,
+        y1=1900,
+    )
+
+
 def test_combined_provider_unit_rejects_repeated_location_ambiguity() -> None:
     content = MarkdownContent(
         source="authority.md",

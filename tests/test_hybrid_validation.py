@@ -385,6 +385,20 @@ def _add_body_columns_caption(root: ElementTree.Element, count: int) -> None:
     body.insert(list(body).index(section) if section is not None else len(body), table)
 
 
+def _reverse_body_paragraph_order(root: ElementTree.Element) -> None:
+    body = root.find(_WORD + "body")
+    assert body is not None
+    children = list(body)
+    paragraphs = [child for child in children if child.tag == _WORD + "p"]
+    if len(paragraphs) < 2:
+        raise AssertionError("fixture must contain multiple body paragraphs")
+    insertion_index = min(children.index(paragraph) for paragraph in paragraphs)
+    for paragraph in paragraphs:
+        body.remove(paragraph)
+    for offset, paragraph in enumerate(reversed(paragraphs)):
+        body.insert(insertion_index + offset, paragraph)
+
+
 def _add_populated_body_columns(
     root: ElementTree.Element,
     count: int,
@@ -654,6 +668,17 @@ def test_hybrid_validation_requires_matching_tagged_native_body_columns(
     assert _gate(matching_report, "native_body_columns").passed
     assert matching_report.metrics["rendered_body_column_counts"] == [3]
     assert matching_report.metrics["body_column_coverage"] == 1.0
+
+    reordered = tmp_path / "body-columns-reordered.docx"
+
+    def reorder_native_columns(root: ElementTree.Element) -> None:
+        _reverse_body_paragraph_order(root)
+        _add_body_columns_caption(root, 3)
+
+    _mutate_document_xml(output, reordered, reorder_native_columns)
+    reordered_report = validate_hybrid(markdown, layout, reordered)
+    assert _gate(reordered_report, "native_content_projection").passed
+    assert _gate(reordered_report, "native_body_columns").passed
 
 
 def test_hybrid_validation_checks_body_column_payload_and_flow_safety(

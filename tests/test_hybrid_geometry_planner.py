@@ -237,18 +237,22 @@ $$\\begin{aligned}&=h\\\\&=i\\\\&=j\\\\&=k\\end{aligned}$$
     vertical_scale = page.pdf_width / page.width
     printable_height = page.content_bbox.height * vertical_scale
     font_size = max(8.6, min(12.0, page.line_pitch * vertical_scale * 0.76))
+    line_height = max(font_size + 1.2, page.line_pitch * vertical_scale)
     budget = build_page_vertical_fit_budget(
         page,
         placements,
+        blocks=content.blocks,
         printable_height_points=printable_height,
         font_size_points=font_size,
+        line_height_points=line_height,
     )
 
     assert budget.calibrated
     assert budget.fits
     assert 0 < budget.block_gap_scale < 1
     assert budget.row_gap_scale == 1
-    assert budget.native_line_box_allowance == font_size * 0.33 * 18
+    assert budget.native_line_box_allowance >= font_size * 0.33 * 18
+    assert budget.font_size_scale == 1
     assert budget.estimated_footprint <= printable_height - budget.headroom
     fitted = apply_page_vertical_fit_budget(page, placements, budget)
     assert len(fitted) == 10
@@ -257,6 +261,7 @@ $$\\begin{aligned}&=h\\\\&=i\\\\&=j\\\\&=k\\end{aligned}$$
     assert sum(int(placement.source_gap_before or 0) for placement in fitted[1:]) < sum(
         int(placement.source_gap_before or 0) for placement in placements[1:]
     )
+    assert all((placement.source_gap_before or 0) >= 0 for placement in fitted)
     assert [placement.source_rows for placement in fitted] == [
         placement.source_rows for placement in placements
     ]
@@ -555,6 +560,55 @@ def test_vertical_fit_replaces_coarse_merged_prose_row_with_source_glyph_units()
     )
 
 
+def test_vertical_fit_preserves_coarse_tall_inline_math_ink() -> None:
+    page = ScanPageLayout(
+        number=1,
+        width=1200,
+        height=1697,
+        pdf_width=595.28,
+        pdf_height=841.89,
+        content_bbox=PixelBox(x0=80, y0=60, x1=1120, y1=1620),
+        line_pitch=40,
+        text_lines=[
+            ScanTextLine(
+                bbox=PixelBox(x0=100, y0=80, x1=1050, y1=110),
+                segments=[],
+                ink_density=0.1,
+            )
+        ],
+        image=Image.new("RGB", (1200, 1697), "white"),
+        metadata={"source_kind": "pdf", "column_count": 1},
+    )
+    block = MarkdownBlock(
+        id="paragraph",
+        index=0,
+        kind=MarkdownBlockKind.PARAGRAPH,
+        text=r"From $\int_0^x e^{t^2}\,dt=\frac{x^3}{3}$ we obtain the limit.",
+    )
+    coarse = PixelBox(x0=100, y0=180, x1=860, y1=360)
+    placement = HybridBlockPlacement(
+        block_id=block.id,
+        block_index=0,
+        page_number=1,
+        source_bbox=coarse,
+        source_rows=[coarse],
+        source_gap_before=20,
+    )
+
+    budget = build_page_vertical_fit_budget(
+        page,
+        [placement],
+        blocks=[block],
+        printable_height_points=760,
+        font_size_points=12,
+        line_height_points=18,
+    )
+
+    raw_union_height = coarse.height * page.pdf_width / page.width
+    assert budget.calibrated
+    assert budget.fixed_ink_height == pytest.approx(raw_union_height)
+
+
 def test_centered_formula_fragments_are_not_a_split_masthead() -> None:
     content = PixelBox(x0=86, y0=27, x1=958, y1=1347)
     lines = [
@@ -598,6 +652,61 @@ def test_adjacent_dense_baselines_are_not_collapsed_by_overlapping_boxes(
     )
 
     assert visual_text_rows(page) == [line.bbox for line in lines]
+
+
+def test_slightly_overlapping_full_width_baselines_remain_distinct() -> None:
+    boxes = [
+        PixelBox(x0=28, y0=27, x1=1218, y1=58),
+        PixelBox(x0=30, y0=56, x1=1218, y1=81),
+        PixelBox(x0=28, y0=79, x1=1165, y1=114),
+        PixelBox(x0=28, y0=112, x1=907, y1=137),
+        PixelBox(x0=28, y0=135, x1=1067, y1=172),
+        PixelBox(x0=28, y0=170, x1=706, y1=204),
+        PixelBox(x0=28, y0=202, x1=1159, y1=231),
+        PixelBox(x0=28, y0=229, x1=1159, y1=268),
+    ]
+    lines = [ScanTextLine(bbox=box, segments=[box], ink_density=0.1) for box in boxes]
+    page = ScanPageLayout(
+        number=1,
+        width=1246,
+        height=400,
+        pdf_width=595,
+        pdf_height=191,
+        content_bbox=PixelBox(x0=20, y0=20, x1=1225, y1=300),
+        line_pitch=30,
+        text_lines=lines,
+        image=Image.new("RGB", (1246, 400), "white"),
+    )
+
+    assert visual_text_rows(page) == boxes
+
+
+def test_sub_pitch_fraction_components_merge_into_one_logical_row() -> None:
+    fragments = [
+        PixelBox(x0=160, y0=20, x1=440, y1=34),
+        PixelBox(x0=120, y0=37, x1=480, y1=40),
+        PixelBox(x0=160, y0=43, x1=440, y1=58),
+    ]
+    following = PixelBox(x0=50, y0=100, x1=550, y1=126)
+    lines = [
+        ScanTextLine(bbox=box, segments=[box], ink_density=0.1) for box in [*fragments, following]
+    ]
+    page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=220,
+        pdf_width=595,
+        pdf_height=218,
+        content_bbox=PixelBox(x0=40, y0=15, x1=560, y1=180),
+        line_pitch=30,
+        text_lines=lines,
+        image=Image.new("RGB", (600, 220), "white"),
+    )
+
+    assert visual_text_rows(page) == [
+        PixelBox(x0=120, y0=20, x1=480, y1=58),
+        following,
+    ]
 
 
 def test_compact_option_group_shares_visual_rows_without_losing_geometry(
@@ -990,6 +1099,112 @@ def test_three_column_rows_follow_column_major_reading_order() -> None:
     assert all(row.x0 == 400 and row.x1 == 535 for row in groups[3])
     assert groups[4] == [PixelBox(x0=60, y0=250, x1=180, y1=264)]
     assert not any(row.x0 == 188 for row in visual_text_rows(page))
+
+
+def test_evidence_anchor_intervals_follow_column_major_rank_across_y_reset() -> None:
+    columns = [
+        PixelBox(x0=40, y0=80, x1=175, y1=260),
+        PixelBox(x0=220, y0=80, x1=355, y1=260),
+    ]
+    left_rows = [PixelBox(x0=40, y0=y0, x1=175, y1=y0 + 14) for y0 in (100, 130, 160, 190)]
+    right_rows = [PixelBox(x0=220, y0=y0, x1=355, y1=y0 + 14) for y0 in (100, 130, 160, 190, 220)]
+    text_lines = []
+    for row_index in range(5):
+        segments = [right_rows[row_index]]
+        if row_index < len(left_rows):
+            segments.insert(0, left_rows[row_index])
+        text_lines.append(
+            ScanTextLine(
+                bbox=PixelBox(
+                    x0=min(segment.x0 for segment in segments),
+                    y0=min(segment.y0 for segment in segments),
+                    x1=max(segment.x1 for segment in segments),
+                    y1=max(segment.y1 for segment in segments),
+                ),
+                segments=segments,
+                ink_density=0.1,
+            )
+        )
+    page = ScanPageLayout(
+        number=1,
+        width=400,
+        height=320,
+        pdf_width=595,
+        pdf_height=476,
+        content_bbox=PixelBox(x0=20, y0=40, x1=380, y1=290),
+        line_pitch=30,
+        text_lines=text_lines,
+        metadata={
+            "source_kind": "image",
+            "column_count": 2,
+            "column_boxes": [[box.x0, box.y0, box.x1, box.y1] for box in columns],
+        },
+        image=Image.new("RGB", (400, 320), "white"),
+    )
+    blocks = [
+        MarkdownBlock(id="left-top", index=0, kind=MarkdownBlockKind.PARAGRAPH, text="L top"),
+        MarkdownBlock(id="left-body", index=1, kind=MarkdownBlockKind.PARAGRAPH, text="L body"),
+        MarkdownBlock(id="left-rule", index=2, kind=MarkdownBlockKind.RULE, text="---"),
+        MarkdownBlock(id="left-bottom", index=3, kind=MarkdownBlockKind.PARAGRAPH, text="L bottom"),
+        MarkdownBlock(id="right-top", index=4, kind=MarkdownBlockKind.PARAGRAPH, text="R top"),
+        MarkdownBlock(
+            id="right-heading",
+            index=5,
+            kind=MarkdownBlockKind.HEADING,
+            text="Right heading",
+            level=2,
+        ),
+        MarkdownBlock(id="right-rule", index=6, kind=MarkdownBlockKind.RULE, text="---"),
+        MarkdownBlock(id="right-body", index=7, kind=MarkdownBlockKind.PARAGRAPH, text="R body"),
+        MarkdownBlock(
+            id="right-bottom", index=8, kind=MarkdownBlockKind.PARAGRAPH, text="R bottom"
+        ),
+    ]
+    content = MarkdownContent(source="content.md", blocks=blocks)
+    layout = ScanDocumentLayout(source="layout.png", pages=[page])
+    anchor_rows = {
+        "left-top": left_rows[0],
+        "left-bottom": left_rows[3],
+        "right-top": right_rows[0],
+        "right-bottom": right_rows[4],
+    }
+    evidence = [
+        EvidenceMatch(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+            source_bbox=anchor_rows[block.id],
+            source_rows=[anchor_rows[block.id]],
+            match_score=0.99,
+            confidence=0.99,
+            providers=("provider",),
+        )
+        for block in blocks
+        if block.id in anchor_rows
+    ]
+
+    plan = build_hybrid_layout_plan(content, layout, [], [], evidence_matches=evidence)
+    placements = plan.pages[0].placements
+    expected_rows = {
+        "left-body": left_rows[1],
+        "left-rule": left_rows[2],
+        "right-heading": right_rows[1],
+        "right-rule": right_rows[2],
+        "right-body": right_rows[3],
+    }
+
+    assert all(placement.source_bbox is not None for placement in placements)
+    assert (
+        len([placement for placement in placements if placement.source_bbox is not None])
+        / len(placements)
+        == 1.0
+    )
+    for placement in placements:
+        expected = expected_rows.get(placement.block_id)
+        if expected is None:
+            continue
+        assert placement.source_rows == [expected]
+        assert placement.geometry_source == "scan_inferred"
 
 
 def test_tall_post_masthead_headline_remains_a_spanning_prefix() -> None:

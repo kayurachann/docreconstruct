@@ -888,6 +888,11 @@ def _shared_consecutive_text_candidates(
                 continue
 
             combined_text = " ".join(fragments)
+            aligned_members = [
+                aligned_by_block[member.id]
+                for member in blocks[start:end]
+                if member.id in aligned_by_block
+            ]
             previous = next(
                 (
                     candidate
@@ -908,16 +913,37 @@ def _shared_consecutive_text_candidates(
                 if not _inside_anchor_window(unit, previous, following):
                     continue
                 source_text = unit.normalized_text
+                # A layout provider often appends a short byline/signature to
+                # the final prose rectangle.  Recover that trailing heading
+                # when it is an exact suffix of the very unit already owning
+                # the preceding Markdown block.  The relaxed whole-span score
+                # tolerates OCR spelling disagreement in the prose, while the
+                # exact suffix, shared unit identity, and heading-only rule
+                # keep this from assigning option children or unrelated text.
+                trailing_heading_suffix = (
+                    len(recoverable) == 1
+                    and recoverable[0] is blocks[end - 1]
+                    and recoverable[0].kind is MarkdownBlockKind.HEADING
+                    and bool(aligned_members)
+                    and source_text.endswith(normalized_blocks[end - 1])
+                    and all(
+                        candidate.source_key == unit.source_key
+                        and candidate.start <= unit.position < candidate.end
+                        for candidate in aligned_members
+                    )
+                )
                 length_agreement = min(len(combined_text), len(source_text)) / max(
                     1,
                     max(len(combined_text), len(source_text)),
                 )
-                if length_agreement < 0.985:
+                minimum_length = 0.95 if trailing_heading_suffix else 0.985
+                minimum_similarity = 0.94 if trailing_heading_suffix else 0.985
+                if length_agreement < minimum_length:
                     continue
                 similarity = _text_similarity_at_least(
                     combined_text,
                     source_text,
-                    0.985,
+                    minimum_similarity,
                 )
                 if similarity is None:
                     continue

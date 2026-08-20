@@ -50,6 +50,10 @@ from docreconstruct.reconstruction.markdown_content import (
     MarkdownContent,
     parse_markdown_content,
 )
+from docreconstruct.reconstruction.markdown_inline import (
+    inline_math_expressions,
+    parse_markdown_inline,
+)
 from docreconstruct.reconstruction.math_omml import (
     build_omml,
     equation_row_count,
@@ -71,7 +75,6 @@ _CJK_PATTERN = re.compile(
     r"[\u1100-\u11ff\u3040-\u30ff\u3130-\u318f\u3400-\u4dbf"
     r"\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]"
 )
-_INLINE_MATH = re.compile(r"\$([^$]+)\$")
 _CONTROL_LEAK = re.compile(r"\\(?:begin|end|big|left|right)|\\\\")
 _NARY_SOURCE = re.compile(r"\\(?P<command>oint|int|sum|prod)(?![A-Za-z])")
 _INTEGRAL_SOURCE = re.compile(r"\\(?:oint|int)(?![A-Za-z])(?P<limits>\s*\\limits(?![A-Za-z]))?")
@@ -178,8 +181,10 @@ def _projection_difference(expected: str, actual: str) -> dict[str, Any] | None:
 
 
 def _inline_projection(value: str) -> str:
-    value = re.sub(r"<eq>(.*?)</eq>", r"$\1$", value)
-    return _INLINE_MATH.sub(lambda match: latex_visible_text(match.group(1)), value)
+    return "".join(
+        latex_visible_text(segment.value) if segment.is_math else segment.value
+        for segment in parse_markdown_inline(value)
+    )
 
 
 def _markdown_projection(content: MarkdownContent) -> str:
@@ -232,7 +237,7 @@ def _math_sources(content: MarkdownContent) -> tuple[list[str], list[str]]:
             expressions.append(block.text)
             display.append(block.text)
         elif block.kind is not MarkdownBlockKind.IMAGE:
-            expressions.extend(match.group(1) for match in _INLINE_MATH.finditer(block.text))
+            expressions.extend(inline_math_expressions(block.text))
     return expressions, display
 
 
@@ -1005,7 +1010,7 @@ def _source_math_expectations(content: MarkdownContent) -> dict[str, Any]:
         elif block.kind is MarkdownBlockKind.IMAGE:
             sources = []
         else:
-            sources = [(match.group(1), False) for match in _INLINE_MATH.finditer(block.text)]
+            sources = [(expression, False) for expression in inline_math_expressions(block.text)]
         for source, is_display in sources:
             commands = [match.group("command") for match in _NARY_SOURCE.finditer(source)]
             nary_symbols.update(_NARY_SYMBOLS[command] for command in commands)
@@ -1584,9 +1589,14 @@ def validate_hybrid(
     source_bag = Counter(re.findall(r"\S+", source_projection))
     candidate_bag = Counter(re.findall(r"\S+", candidate_projection))
     furniture_reorders_content = bool(expected_mastheads or expected_footers)
+    native_columns_reorder_content = any(
+        isinstance(page.metadata.get("column_count"), int)
+        and int(page.metadata["column_count"]) >= 2
+        for page in scan.pages
+    )
     content_projection_matches = (
         source_bag == candidate_bag
-        if furniture_reorders_content
+        if furniture_reorders_content or native_columns_reorder_content
         else source_projection == candidate_projection
     )
     tagged_mastheads = sum(
@@ -1658,9 +1668,10 @@ def validate_hybrid(
             expected=_text_evidence(source_projection),
             actual=_text_evidence(candidate_projection),
             detail=(
-                "Exact stream order is required unless native masthead/footer furniture "
-                "legitimately changes OOXML traversal order; those cases retain an exact "
-                "visible-token multiset and are checked by dedicated layout gates."
+                "Exact stream order is required unless native masthead/footer furniture or "
+                "a tagged multi-column flow legitimately changes OOXML traversal order; "
+                "those cases retain an exact visible-token multiset and are checked by "
+                "dedicated layout gates."
             ),
         ),
         HybridValidationGate(

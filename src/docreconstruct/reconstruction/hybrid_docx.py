@@ -39,6 +39,7 @@ from docreconstruct.reconstruction.hybrid_planner import (
     HybridLayoutPlan,
     apply_page_vertical_fit_budget,
     build_page_vertical_fit_budget,
+    contains_tall_inline_math,
     equation_layout_units,
     source_row_reading_order,
 )
@@ -47,6 +48,7 @@ from docreconstruct.reconstruction.markdown_content import (
     MarkdownBlockKind,
     MarkdownContent,
 )
+from docreconstruct.reconstruction.markdown_inline import parse_markdown_inline
 from docreconstruct.reconstruction.math_omml import append_omml, equation_row_count
 from docreconstruct.reconstruction.scan_layout import PixelBox, ScanDocumentLayout
 
@@ -390,7 +392,6 @@ def _add_rich_text(
     bold_prefix: bool = False,
     east_asia_heading: bool = False,
 ) -> None:
-    text = re.sub(r"<eq>(.*?)</eq>", r"$\1$", text)
     if bold_prefix:
         match = re.match(
             r"^((?:(?:Câu|Question|Q\.?|Bài|Item)\s*[\w.-]+\s*[:.)]"
@@ -402,13 +403,11 @@ def _add_rich_text(
             run = paragraph.add_run(match.group(1) + " ")
             _set_font(run, size, bold=True)
             text = text[match.end() :]
-    for chunk in re.split(r"(\$[^$]+\$)", text):
-        if not chunk:
-            continue
-        if chunk.startswith("$") and chunk.endswith("$"):
-            append_omml(paragraph, chunk[1:-1], font_size=size)
+    for segment in parse_markdown_inline(text):
+        if segment.is_math:
+            append_omml(paragraph, segment.value, font_size=size)
         else:
-            run = paragraph.add_run(chunk)
+            run = paragraph.add_run(segment.value)
             _set_font(run, size, east_asia_heading=east_asia_heading)
 
 
@@ -454,6 +453,7 @@ def _new_paragraph(
         if (
             placement is not None
             and layout is not None
+            and not contains_tall_inline_math(text)
             and kind
             in {
                 MarkdownBlockKind.PARAGRAPH,
@@ -785,17 +785,6 @@ def _set_row_minimum_height(row: Any, height_points: float) -> None:
     height.set(qn("w:hRule"), "atLeast")
 
 
-def _contains_tall_inline_math(text: str) -> bool:
-    """Return whether inline Office Math needs more than ordinary leading."""
-
-    return bool(
-        re.search(
-            r"\\(?:frac|dfrac|tfrac|int|oint|sum|prod|sqrt|lim|overbrace|underbrace)\b",
-            text,
-        )
-    )
-
-
 def _borderless_table(
     parent: WordDocumentType | _Cell,
     rows: int,
@@ -977,6 +966,16 @@ def _render_options(
     columns = (
         2
         if len(blocks) == 4 and source_row_count >= 2 and has_nary and maximum_fraction_count == 0
+        else 2
+        if (
+            len(blocks) == 4
+            and source_geometry is None
+            and has_nary
+            and longest <= 115
+            and maximum_fraction_count <= 1
+        )
+        else 1
+        if len(blocks) == 4 and source_geometry is None and has_nary
         else len(blocks)
         if len(blocks) in {2, 3, 4} and longest <= 55 and maximum_fraction_count <= 1
         else 2
@@ -993,7 +992,7 @@ def _render_options(
             size=size,
             line_height=line_height,
         )
-        tall_math = any(_contains_tall_inline_math(block.text) for block in blocks)
+        tall_math = any(contains_tall_inline_math(block.text) for block in blocks)
         natural_floor = max(
             line_height,
             size * (1.82 if tall_math else 1.18),
@@ -2501,6 +2500,12 @@ def _render_multi_column_page(
         for block, assignment in zip(blocks, assignments, strict=True)
         if isinstance(assignment, int)
     ]
+    body_geometry_coverage = sum(
+        1
+        for block in body_sequence
+        if (placement := placements.get(block.id)) is not None and placement.source_bbox is not None
+    ) / max(1, len(body_sequence))
+    geometry_materially_covers_body = body_geometry_coverage >= 0.50
     target_heights = [max(1.0, bottom - effective_body_top) for bottom in bottoms]
     ink_capacities = _source_column_ink_capacities(
         page,
@@ -2510,7 +2515,11 @@ def _render_multi_column_page(
     )
     flow_capacities = ink_capacities or target_heights
     balanced_streams: list[list[MarkdownBlock]] = []
-    if len(columns) >= 3 and not any(block.starts_group for block in body_sequence):
+    if (
+        len(columns) >= 3
+        and not geometry_materially_covers_body
+        and not any(block.starts_group for block in body_sequence)
+    ):
         dialogue_boundary = _dialogue_story_boundary(body_sequence)
         if dialogue_boundary is not None:
             leading_streams = _balanced_editable_column_streams(
@@ -2908,7 +2917,10 @@ def _render_source_footer(
     *,
     size: float,
     line_height: float,
+    clear_inherited: bool = False,
 ) -> None:
+    if not blocks and not clear_inherited:
+        return
     footer = section.footer
     footer.is_linked_to_previous = False
     paragraph = footer.paragraphs[0]
@@ -3047,6 +3059,7 @@ def render_hybrid_docx(
     body_size = max(8.6, min(12.0, pitch_points * 0.76))
     line_height = max(body_size + 1.2, pitch_points)
 
+    effective_footer_has_content = False
     for page_index, page_plan in enumerate(plan.pages):
         section = (
             document.sections[0] if page_index == 0 else document.add_section(WD_SECTION.NEW_PAGE)
@@ -3149,7 +3162,9 @@ def render_hybrid_docx(
             source_page,
             size=page_body_size,
             line_height=page_line_height,
+            clear_inherited=effective_footer_has_content and not footer_blocks,
         )
+        effective_footer_has_content = bool(footer_blocks)
         masthead_rendered, blocks = _render_split_masthead(
             document,
             blocks,

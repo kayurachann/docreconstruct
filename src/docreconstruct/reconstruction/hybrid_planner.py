@@ -120,6 +120,17 @@ class VerticalFitBudget(BaseModel):
     fits: bool
 
 
+def contains_tall_inline_math(text: str) -> bool:
+    """Return whether inline Office Math needs a taller native line box."""
+
+    return bool(
+        re.search(
+            r"\\(?:frac|dfrac|tfrac|int|oint|sum|prod|sqrt|lim|overbrace|underbrace)\b",
+            text,
+        )
+    )
+
+
 def _page_vertical_scale(page: ScanPageLayout) -> float:
     if page.metadata.get("source_kind") == "image":
         return page.pdf_height / page.height
@@ -408,6 +419,7 @@ def build_page_vertical_fit_budget(
             if (
                 coarse_row
                 and block is not None
+                and not contains_tall_inline_math(block.text)
                 and block.kind
                 in {
                     MarkdownBlockKind.PARAGRAPH,
@@ -448,27 +460,33 @@ def build_page_vertical_fit_budget(
     # equation is still one paragraph but consumes five native math rows.
     # The source boxes above measure glyph ink, so this per-row allowance is
     # the renderer leading that must be reserved before retaining scan gaps.
-    native_line_count = (
-        estimated_line_count
-        if block_by_id
-        else float(
-            sum(
-                max(1, len(_unique_source_rows(page, placement.source_rows)))
-                for placement in ordered
-            )
+    source_line_count = float(
+        sum(
+            max(1, len(_unique_source_rows(page, placement.source_rows)))
+            for placement in ordered
+            if (block := block_by_id.get(placement.block_id)) is None
+            or block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
         )
     )
+    native_line_count = estimated_line_count if block_by_id else source_line_count
     nominal_line_height = (
         line_height_points
         if line_height_points is not None
         else font_size_points * (1.0 + native_leading_em)
     )
-    native_leading_per_line = (
-        max(0.0, nominal_line_height - source_glyph_height)
-        if line_height_points is not None
-        else font_size_points * native_leading_em
-    )
-    native_allowance = native_leading_per_line * native_line_count
+    if line_height_points is not None:
+        measured_native_allowance = (
+            max(0.0, nominal_line_height - source_glyph_height) * native_line_count
+        )
+        # Estimated Markdown rows are useful when source geometry is partial,
+        # but a small measured leading multiplied by those estimates must not
+        # reserve less than the conservative leading for actual mapped rows.
+        # Otherwise the difference is incorrectly released into paragraph
+        # gaps and can push an atomic equation onto another page.
+        source_native_floor = font_size_points * native_leading_em * source_line_count
+        native_allowance = max(measured_native_allowance, source_native_floor)
+    else:
+        native_allowance = font_size_points * native_leading_em * native_line_count
     fixed_total = fixed_ink + native_allowance + leading_gap
     elastic_target = max(0.0, printable_height_points - headroom - fixed_total)
     raw_elastic = block_gaps + row_gaps
@@ -617,6 +635,8 @@ def _merge_visual_rows(rows: list[PixelBox], line_pitch: float) -> list[PixelBox
 def _merge_single_column_row_fragments(
     rows: list[PixelBox],
     line_pitch: float,
+    *,
+    fragmented_page: bool | None = None,
 ) -> list[PixelBox]:
     """Merge vertically adjacent glyph fragments into logical source slots.
 
@@ -632,6 +652,14 @@ def _merge_single_column_row_fragments(
     maximum_overlap = max(2.0, line_pitch * 0.15)
     component_height = line_pitch * 0.90
     minimum_edge_shift = max(3.0, line_pitch * 0.35)
+    if fragmented_page is None:
+        vertical_span = max(box.y1 for box in rows) - min(box.y0 for box in rows)
+        baseline_capacity = max(1.0, vertical_span / max(1.0, line_pitch))
+        # A page whose detector already reports roughly one band per baseline
+        # is ordinary dense text: small overlaps there are dilation, not
+        # evidence of a fraction/equation component. Sparse pages with many
+        # vertically split formula fragments need the overlap merge.
+        fragmented_page = len(rows) / baseline_capacity < 0.82
     merged: list[PixelBox] = []
     previous_fragment: PixelBox | None = None
     for box in sorted(rows, key=lambda item: (item.y0, item.x0)):
@@ -650,10 +678,17 @@ def _merge_single_column_row_fragments(
             box.width,
             previous_fragment.width,
         )
-        component_pair = min(box.height, previous_fragment.height) <= component_height and (
-            horizontal_change >= minimum_edge_shift or width_ratio <= 0.92
+        component_shape = horizontal_change >= minimum_edge_shift or width_ratio <= 0.92
+        component_pair = (
+            min(box.height, previous_fragment.height) <= component_height and component_shape
         )
-        if -maximum_overlap <= gap <= maximum_gap and (gap <= 0 or component_pair):
+        # Scan line detectors commonly dilate adjacent prose baselines until
+        # their boxes overlap by one or two pixels.  Treating that overlap as
+        # fraction evidence creates transitive mega-rows.  Permit overlap-only
+        # merging on a demonstrably fragmented page; dense baseline streams
+        # still require an independent component shape and a positive gap.
+        overlap_component = fragmented_page and -maximum_overlap <= gap <= 0
+        if (0 <= gap <= maximum_gap and component_pair) or overlap_component:
             merged[-1] = PixelBox(
                 x0=min(current.x0, box.x0),
                 y0=min(current.y0, box.y0),
@@ -709,27 +744,42 @@ def source_row_reading_order(
     columns = _page_column_boxes(page)
     if not columns:
         return sorted(rows, key=lambda box: (box.y0, box.x0))
-    body_top = min(column.y0 for column in columns)
-    body_bottom = max(column.y1 for column in columns)
 
-    def key(box: PixelBox) -> tuple[int, int, int]:
-        center_y = (box.y0 + box.y1) / 2.0
-        if center_y < body_top - page.line_pitch * 0.25:
-            return (-1, box.y0, box.x0)
-        overlaps = [max(0, min(box.x1, column.x1) - max(box.x0, column.x0)) for column in columns]
-        if max(overlaps, default=0) > 0:
-            column_index = max(range(len(columns)), key=overlaps.__getitem__)
-            return (column_index, box.y0, box.x0)
-        if center_y > body_bottom + page.line_pitch * 0.25:
-            return (len(columns), box.y0, box.x0)
-        center_x = (box.x0 + box.x1) / 2.0
-        column_index = min(
-            range(len(columns)),
-            key=lambda index: abs(center_x - (columns[index].x0 + columns[index].x1) / 2.0),
-        )
-        return (column_index, box.y0, box.x0)
+    return sorted(
+        rows,
+        key=lambda box: (_source_flow_band(page, box, columns), box.y0, box.x0),
+    )
 
-    return sorted(rows, key=key)
+
+def _source_flow_band(
+    page: ScanPageLayout,
+    box: PixelBox,
+    columns: Sequence[PixelBox] | None = None,
+) -> int:
+    """Return the monotonic reading-order band that owns a source box."""
+
+    resolved_columns = list(columns) if columns is not None else _page_column_boxes(page)
+    if not resolved_columns:
+        return 0
+    body_top = min(column.y0 for column in resolved_columns)
+    body_bottom = max(column.y1 for column in resolved_columns)
+    center_y = (box.y0 + box.y1) / 2.0
+    if center_y < body_top - page.line_pitch * 0.25:
+        return -1
+    overlaps = [
+        max(0, min(box.x1, column.x1) - max(box.x0, column.x0)) for column in resolved_columns
+    ]
+    if max(overlaps, default=0) > 0:
+        return max(range(len(resolved_columns)), key=overlaps.__getitem__)
+    if center_y > body_bottom + page.line_pitch * 0.25:
+        return len(resolved_columns)
+    center_x = (box.x0 + box.x1) / 2.0
+    return min(
+        range(len(resolved_columns)),
+        key=lambda index: abs(
+            center_x - (resolved_columns[index].x0 + resolved_columns[index].x1) / 2.0
+        ),
+    )
 
 
 def visual_text_row_groups(
@@ -751,6 +801,15 @@ def visual_text_row_groups(
     lines = sorted(page.text_lines, key=lambda item: (item.bbox.y0, item.bbox.x0))
     column_boxes = _page_column_boxes(page)
     if not column_boxes:
+        all_segments = [segment for line in lines for segment in (line.segments or [line.bbox])]
+        all_baseline_rows = _merge_visual_rows(all_segments, page.line_pitch)
+        if not all_baseline_rows:
+            return [[]]
+        all_vertical_span = max(row.y1 for row in all_baseline_rows) - min(
+            row.y0 for row in all_baseline_rows
+        )
+        all_baseline_capacity = max(1.0, all_vertical_span / max(1.0, page.line_pitch))
+        fragmented_page = len(all_baseline_rows) / all_baseline_capacity < 0.82
         visible_segments = [
             segment
             for line in lines
@@ -760,7 +819,13 @@ def visual_text_row_groups(
         if not visible_segments:
             return [[]]
         baseline_rows = _merge_visual_rows(visible_segments, page.line_pitch)
-        return [_merge_single_column_row_fragments(baseline_rows, page.line_pitch)]
+        return [
+            _merge_single_column_row_fragments(
+                baseline_rows,
+                page.line_pitch,
+                fragmented_page=fragmented_page,
+            )
+        ]
 
     tolerance = page.line_pitch * 0.25
     body_top = min(box.y0 for box in column_boxes)
@@ -926,6 +991,9 @@ def _snap_evidence_rows_to_scan(
 
 def _option_column_count(options: Sequence[MarkdownBlock]) -> int:
     longest = max((len(_project_inline_math(block.text)) for block in options), default=0)
+    has_nary = any(re.search(r"\\(?:int|oint|sum|prod)\b", block.text) for block in options)
+    if len(options) == 4 and has_nary:
+        return 2 if longest <= 115 else 1
     if len(options) == 4 and longest <= 55:
         return 4
     if len(options) == 4 and longest <= 115:
@@ -1330,36 +1398,59 @@ def _assign_text_geometry(
         ),
         key=lambda item: item[0],
     )
+    ordered_rows = source_row_reading_order(page, rows)
+    row_rank = {(row.x0, row.y0, row.x1, row.y1): rank for rank, row in enumerate(ordered_rows)}
+    tolerance = page.line_pitch * 0.25
+
+    def boundary_rank(anchor: PixelBox, *, after: bool) -> int:
+        """Find an anchor boundary in monotonic source reading order."""
+
+        anchor_band = _source_flow_band(page, anchor, column_boxes)
+        cutoff = anchor.y1 - tolerance if after else anchor.y0 + tolerance
+        for rank, row in enumerate(ordered_rows):
+            row_band = _source_flow_band(page, row, column_boxes)
+            if row_band < anchor_band:
+                continue
+            if row_band > anchor_band:
+                return rank
+            center = (row.y0 + row.y1) / 2.0
+            if center >= cutoff:
+                return rank
+        return len(ordered_rows)
+
     unit_cursor = 0
-    lower_y = page.content_bbox.y0
+    lower_rank = 0
+    previous_anchor: PixelBox | None = None
     used_rows: set[tuple[int, int, int, int]] = set()
     for anchor_index, optional_anchor in [*anchors_by_index, (math.inf, None)]:
         segment_units: list[list[MarkdownBlock]] = []
         while unit_cursor < len(units) and units[unit_cursor][0].index < anchor_index:
             segment_units.append(units[unit_cursor])
             unit_cursor += 1
-        upper_y = optional_anchor.y0 if optional_anchor is not None else page.content_bbox.y1
-        tolerance = page.line_pitch * 0.25
+        upper_rank = (
+            max(lower_rank, boundary_rank(optional_anchor, after=False))
+            if optional_anchor is not None
+            else len(ordered_rows)
+        )
         segment_groups: list[list[PixelBox]] = []
         for group in row_groups:
             segment_rows = []
             for row in group:
                 key = (row.x0, row.y0, row.x1, row.y1)
-                center = (row.y0 + row.y1) / 2
-                if (
-                    key in used_rows
-                    or center < lower_y - tolerance
-                    or center >= upper_y + tolerance
-                ):
+                if key in used_rows or row_rank[key] < lower_rank or row_rank[key] >= upper_rank:
                     continue
                 segment_rows.append(row)
                 used_rows.add(key)
             if segment_rows:
                 segment_groups.append(segment_rows)
         assignments = partition_units(segment_units, segment_groups)
-        for assignment_index, (group_units, group_rows, row_characters) in enumerate(assignments):
-            group_previous_bottom = lower_y
-            if multi_column and assignment_index > 0:
+        for group_units, group_rows, row_characters in assignments:
+            group_previous_bottom = page.content_bbox.y0
+            if previous_anchor is not None:
+                group_previous_bottom = previous_anchor.y1
+            if previous_anchor is not None and _source_flow_band(
+                page, previous_anchor, column_boxes
+            ) != _source_flow_band(page, group_rows[0], column_boxes):
                 group_previous_bottom = group_rows[0].y0
             assign_segment(
                 group_units,
@@ -1369,7 +1460,8 @@ def _assign_text_geometry(
                 consume_all_rows=not multi_column,
             )
         if optional_anchor is not None:
-            lower_y = max(lower_y, optional_anchor.y1)
+            lower_rank = max(lower_rank, boundary_rank(optional_anchor, after=True))
+            previous_anchor = optional_anchor
 
     result: list[HybridBlockPlacement] = []
     for placement in placements:
@@ -1899,6 +1991,7 @@ __all__ = [
     "apply_page_vertical_fit_budget",
     "build_hybrid_layout_plan",
     "build_page_vertical_fit_budget",
+    "contains_tall_inline_math",
     "equation_layout_units",
     "source_row_reading_order",
     "visual_text_row_groups",
