@@ -35,6 +35,7 @@ from docreconstruct.reconstruction.hybrid_docx import (
     _render_image_table_pair,
     _source_column_ink_capacities,
     _source_figure_bytes,
+    _wrap_column_blocks,
     render_hybrid_docx,
 )
 from docreconstruct.reconstruction.hybrid_planner import (
@@ -51,6 +52,7 @@ from docreconstruct.reconstruction.markdown_content import (
     MarkdownContent,
     parse_markdown_content,
 )
+from docreconstruct.reconstruction.markdown_inline import parse_markdown_inline
 from docreconstruct.reconstruction.math_omml import build_omml
 from docreconstruct.reconstruction.scan_layout import (
     PixelBox,
@@ -2142,6 +2144,44 @@ def test_generated_property_containers_follow_the_ooxml_child_order(tmp_path: Pa
     assert inspected >= 3
     # CT_Shd requires w:val; "clear" is the plain solid fill.
     assert 'w:val="clear"' in document_xml
+
+
+def test_column_wrapping_never_breaks_a_protected_inline_span() -> None:
+    """A hard wrap must not split inline math, code, or a URL.
+
+    Every construct `parse_markdown_inline` protects is anchored to a single
+    line, so a break inside one destroys it: the formula becomes literal dollar
+    signs and a fragment of it is promoted to an unrelated equation. Plain prose
+    must still wrap, otherwise the two-column layout loses its line budget.
+    """
+
+    def block(text: str) -> MarkdownBlock:
+        return MarkdownBlock(id="md-1", index=0, kind=MarkdownBlockKind.PARAGRAPH, text=text)
+
+    def math_of(text: str) -> list[str]:
+        return [segment.value for segment in parse_markdown_inline(text) if segment.is_math]
+
+    formula = r"Total energy is $E = mc^2 + \frac{1}{2} m v^2$ everywhere in the derivation."
+    wrapped = _wrap_column_blocks([block(formula)], characters_per_line=28)[0]
+
+    assert wrapped.text == formula
+    assert math_of(wrapped.text) == math_of(formula)
+    assert math_of(formula) == [r"E = mc^2 + \frac{1}{2} m v^2"]
+
+    # A code span too long to fit one line, whose contents would otherwise be
+    # re-read as TeX once a break lands inside it, is protected too.
+    code = "Run `x_{1} and y_{2} and z_{3} and w_{4} here` now to finish the line."
+    assert math_of(code) == []
+    assert _wrap_column_blocks([block(code)], characters_per_line=28)[0].text == code
+
+    prose = (
+        "This is ordinary prose that is long enough to be wrapped across "
+        "several lines by the column layout."
+    )
+    wrapped_prose = _wrap_column_blocks([block(prose)], characters_per_line=28)[0]
+
+    assert "\n" in wrapped_prose.text
+    assert wrapped_prose.text.replace("\n", " ") == prose
 
 
 def test_image_table_pair_keeps_the_other_visuals_in_its_group() -> None:
