@@ -50,7 +50,7 @@ from docreconstruct.reconstruction.markdown_content import (
 )
 from docreconstruct.reconstruction.markdown_inline import parse_markdown_inline
 from docreconstruct.reconstruction.math_omml import append_omml, equation_row_count
-from docreconstruct.reconstruction.scan_layout import PixelBox, ScanDocumentLayout
+from docreconstruct.reconstruction.scan_layout import PixelBox, ScanDocumentLayout, ScanRegionKind
 
 _FONT = "Times New Roman"
 _HAN_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -1916,7 +1916,21 @@ def _compact_empty_paragraphs_in_cells(document: WordDocumentType) -> None:
             spacing.set(qn("w:line"), "20")
 
 
-def _duplicate_figure_annotation_ids(blocks: Sequence[MarkdownBlock]) -> set[str]:
+def _places_figure_pixels(content: MarkdownContent, layout: ScanDocumentLayout) -> bool:
+    """Report whether this job renders any original figure pixels at all."""
+
+    if any(block.kind is MarkdownBlockKind.IMAGE for block in content.blocks):
+        return True
+    return any(
+        region.kind is not ScanRegionKind.TABLE for page in layout.pages for region in page.regions
+    )
+
+
+def _duplicate_figure_annotation_ids(
+    blocks: Sequence[MarkdownBlock],
+    *,
+    figures_rendered: bool,
+) -> set[str]:
     """Find OCR labels interleaved between options and already present in figures.
 
     OCR-to-Markdown tools sometimes emit short labels from a nearby figure in
@@ -1924,9 +1938,18 @@ def _duplicate_figure_annotation_ids(blocks: Sequence[MarkdownBlock]) -> set[str
     contains those pixels, so rendering the labels again would duplicate and
     misplace them.  This structural rule is document-agnostic and never alters
     ordinary prose or a complete option.
+
+    That justification only holds when some figure is actually placed.  A
+    text-only exam still matches the surrounding shape — a short unpunctuated
+    line after the final option, before the next question — so without
+    ``figures_rendered`` the rule deleted reviewed Markdown that no raster
+    reproduced, and the ``native_content_projection`` gate, which still counts
+    that text as required, then failed the job.
     """
 
     duplicate_ids: set[str] = set()
+    if not figures_rendered:
+        return duplicate_ids
     index = 1
     while index < len(blocks) - 1:
         if blocks[index - 1].kind is not MarkdownBlockKind.OPTION:
@@ -3211,7 +3234,10 @@ def render_hybrid_docx(
     asset_match_by_id = {match.block_id: match for match in asset_matches}
     prepared_asset_mode = asset_payloads is not None
     asset_bytes: dict[str, bytes] = dict(asset_payloads or {})
-    duplicate_figure_annotations = _duplicate_figure_annotation_ids(content.blocks)
+    duplicate_figure_annotations = _duplicate_figure_annotation_ids(
+        content.blocks,
+        figures_rendered=_places_figure_pixels(content, layout),
+    )
     markdown_directory = Path(content.source).parent
     for block in () if prepared_asset_mode else content.image_blocks:
         if block.id in asset_bytes:
