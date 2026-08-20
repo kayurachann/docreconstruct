@@ -1,0 +1,641 @@
+{
+  "schema_version": "0.1",
+  "suite": "OmniDocBench official demo",
+  "evaluation_lane": "oracle_reconstruction",
+  "scope": "all_18_official_demo_pages",
+  "upstream": {
+    "repository": "https://github.com/opendatalab/OmniDocBench",
+    "dataset": "https://huggingface.co/datasets/opendatalab/OmniDocBench",
+    "revision": "193627ae9e97d89188468ed1ee3b7a856ff76044",
+    "annotation_file": {
+      "path": "demo_data/omnidocbench_demo/OmniDocBench_demo.json",
+      "sha256": "146690eae39d35ae95eff9d92889876eb45137285cb73cd5af451329411c9207",
+      "size": 1502441
+    },
+    "rights": "research-only; source data and derivatives are not redistributed here"
+  },
+  "docreconstruct": {
+    "revision": "11321aa920917b8c946dec6c5a95fe0f6fa1127e",
+    "converter_contract": "omnidocbench-demo-to-canonical-ir/0.1"
+  },
+  "conversion": {
+    "ignored_annotations": "ignore=true",
+    "geometry": "poly preserved; bbox is min/max polygon envelope in top-left pixel coordinates",
+    "reading_order": "OmniDocBench order retained when nonnegative",
+    "semantics": "category_type mapped to canonical ElementType; text, table HTML/LaTeX, formula LaTeX, attributes and source IDs retained",
+    "authority_warning": "ground-truth Markdown and ground-truth geometry; not an OCR or parser benchmark"
+  },
+  "runtime": {
+    "os": "Microsoft Windows 11 IoT Enterprise LTSC",
+    "python": "3.12.0",
+    "cpu": "AMD Ryzen 5 5600H with Radeon Graphics",
+    "ram_gib": 7.38,
+    "libreoffice": "LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb",
+    "libreoffice_sha256": "40ebd75ff8c2d4a228166ffa9ac13b97b947f7ddef67152ae45cf4c98c1ae5e5"
+  },
+  "reports": {
+    "native-report.json": {
+      "sha256": "7a47bcf1498c474ff72c217d7af7dd4e5b2f75e28877b935c0629e02c0cce0de",
+      "size": 414670
+    },
+    "libreoffice-report.json": {
+      "sha256": "331798fd1d936f0f1f57189f77189afb7983c351b75c82d89f0957eaf0c7bb82",
+      "size": 443909
+    }
+  },
+  "cases": [
+    {
+      "case_id": "odb-demo-00-yanbaopptmerge_SE05.pdf_7",
+      "upstream_image": "yanbaopptmerge_SE05.pdf_7.jpg",
+      "upstream_page_no": 7,
+      "tags": {
+        "language": "english",
+        "scripts": [
+          "latin"
+        ],
+        "document_type": "PPT2PDF",
+        "degradations": [
+          "colorful_backgroud"
+        ],
+        "content_kinds": [
+          "text",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "660a25910840a721a7a44d85793b39f2e1bc7cf97273a181be1cc891fcce45d9",
+        "size": 197209
+      },
+      "reviewed_markdown": {
+        "sha256": "58b8072bb4d8a83ec01978cd988bbdda2cb3a9d0f44fee7dc10e5afa6ffad71b",
+        "size": 374
+      },
+      "canonical_evidence": {
+        "sha256": "78152ac2d71a6d323d4e0e74ac1987f71f92147911393f9b52ba4f8f8185dd06",
+        "size": 10126
+      }
+    },
+    {
+      "case_id": "odb-demo-01-yanbaopptmerge_yanbaoPPT_145",
+      "upstream_image": "yanbaopptmerge_yanbaoPPT_145.jpg",
+      "upstream_page_no": 145,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "PPT2PDF",
+        "degradations": [
+          "colorful_backgroud"
+        ],
+        "content_kinds": [
+          "text",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "9e9e9eea20bd765b1d17191e5fd9c8be8bd566ad0572bba1bebc273b6c0a27fa",
+        "size": 328694
+      },
+      "reviewed_markdown": {
+        "sha256": "9fbbc4c4ec377b17aa2cc212d357d3dbfe4715dd66446a63b1a00bc4aef3f8fb",
+        "size": 479
+      },
+      "canonical_evidence": {
+        "sha256": "e2ab764aa8d8fa1ed8c903f01d13c36634f7f93a04cc3f15ac4b74bbe8f9bcfb",
+        "size": 6024
+      }
+    },
+    {
+      "case_id": "odb-demo-02-docstructbench_llm-raw-scihub-o.O-j.chroma.2005.05.085.pdf_4",
+      "upstream_image": "docstructbench_llm-raw-scihub-o.O-j.chroma.2005.05.085.pdf_4.jpg",
+      "upstream_page_no": 4,
+      "tags": {
+        "language": "english",
+        "scripts": [
+          "latin"
+        ],
+        "document_type": "academic_literature",
+        "degradations": [
+          "table_fewer_line",
+          "table_horizontal",
+          "table_span",
+          "table_with_formula"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "double_column"
+        ]
+      },
+      "image": {
+        "sha256": "4e9058bfe130253081875f7c2b3c0577d72bbb854978ad16b9792b23732f3b58",
+        "size": 935935
+      },
+      "reviewed_markdown": {
+        "sha256": "8cb7a7bbb4a8553c88933fb075c3ed4912eb359538dcfdb245f37772a72b8c64",
+        "size": 6678
+      },
+      "canonical_evidence": {
+        "sha256": "53bb6d667ecf52a3e4c054834753b83ae25adbaba5873730e13406fe34b03119",
+        "size": 37345
+      }
+    },
+    {
+      "case_id": "odb-demo-03-docstructbench_llm-raw-scihub-o.O-j.physletb.2004.06.101.pdf_3",
+      "upstream_image": "docstructbench_llm-raw-scihub-o.O-j.physletb.2004.06.101.pdf_3.jpg",
+      "upstream_page_no": 3,
+      "tags": {
+        "language": "english",
+        "scripts": [
+          "latin"
+        ],
+        "document_type": "academic_literature",
+        "degradations": [
+          "None"
+        ],
+        "content_kinds": [
+          "text",
+          "formula",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "72973d16afd94a4466b4070af16e7c6ad5ea6f58a4dab739c5be9a2abceffe32",
+        "size": 444407
+      },
+      "reviewed_markdown": {
+        "sha256": "7a26ca11d8b8438cd243e2275cdbad344095aca579a495947c02dd2c74e98e1b",
+        "size": 4069
+      },
+      "canonical_evidence": {
+        "sha256": "417c2e14f17635eefabaff8c32c4c1e4b3ab43dfc5e24bbb85ae193cf9f230fa",
+        "size": 60646
+      }
+    },
+    {
+      "case_id": "odb-demo-04-docstructbench_dianzishu_zhongwenzaixian-o.O-60599898.pdf_30",
+      "upstream_image": "docstructbench_dianzishu_zhongwenzaixian-o.O-60599898.pdf_30.jpg",
+      "upstream_page_no": 30,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "book",
+        "degradations": [
+          "None"
+        ],
+        "content_kinds": [
+          "text",
+          "double_column"
+        ]
+      },
+      "image": {
+        "sha256": "c395358f7b52298b01e242028caa9ef039636cdda71d082d9fb47ce1b1e8eb4e",
+        "size": 1117392
+      },
+      "reviewed_markdown": {
+        "sha256": "e7fa04b55d389bde26592bca09c92eff87704e6b405da6de487ee0aff75d9652",
+        "size": 5962
+      },
+      "canonical_evidence": {
+        "sha256": "76937469510257695691770a00894d0e67f245b7e42d043463fbc58dca05ec9e",
+        "size": 25405
+      }
+    },
+    {
+      "case_id": "odb-demo-05-docstructbench_dianzishu_zhongwenzaixian-o.O-61522235.pdf_170",
+      "upstream_image": "docstructbench_dianzishu_zhongwenzaixian-o.O-61522235.pdf_170.jpg",
+      "upstream_page_no": 170,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "book",
+        "degradations": [
+          "table_horizontal",
+          "table_omission_line",
+          "table_span"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "figure",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "5160457645e8c9dfba857867f30217147f3ec862b622ef9e5d5e64478b100da7",
+        "size": 516093
+      },
+      "reviewed_markdown": {
+        "sha256": "ca8605eca43ec35c003810a74029a99e96b2f3c96c83e71f2d126c205e24616d",
+        "size": 2398
+      },
+      "canonical_evidence": {
+        "sha256": "0fd750bb9e5d9d542b1207687507a08fdfdb2659e856debfebb74e80ac6d353c",
+        "size": 20846
+      }
+    },
+    {
+      "case_id": "odb-demo-06-docstructbench_dianzishu_zhongwenzaixian-o.O-61520814.pdf_185",
+      "upstream_image": "docstructbench_dianzishu_zhongwenzaixian-o.O-61520814.pdf_185.jpg",
+      "upstream_page_no": 41,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "magazine",
+        "degradations": [
+          "table_omission_line",
+          "table_horizontal",
+          "table_span",
+          "table_with_formula"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "figure"
+        ]
+      },
+      "image": {
+        "sha256": "f261e2e45e7834d3a4b872a0e48bf8260d8b80ae0e363d7bd63de5b831fd13df",
+        "size": 657034
+      },
+      "reviewed_markdown": {
+        "sha256": "4610ba4aaf6321688bd0b134986092dbc3048b944153437cc5100a44382b6313",
+        "size": 3139
+      },
+      "canonical_evidence": {
+        "sha256": "3a9be29b7fe6af5a4966161adcb2b1c85a1abde8edf0749fc54d02a0e462366a",
+        "size": 22669
+      }
+    },
+    {
+      "case_id": "odb-demo-07-docstructbench_dianzishu_zhongwenzaixian-o.O-61569294.pdf_128",
+      "upstream_image": "docstructbench_dianzishu_zhongwenzaixian-o.O-61569294.pdf_128.jpg",
+      "upstream_page_no": 53,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "magazine",
+        "degradations": [
+          "colorful_backgroud"
+        ],
+        "content_kinds": [
+          "text",
+          "figure",
+          "double_column"
+        ]
+      },
+      "image": {
+        "sha256": "0c00019978f99830ea45581f9b3258c573bc74649a33bdb765aa768f93a63fff",
+        "size": 584196
+      },
+      "reviewed_markdown": {
+        "sha256": "9d5366001feb6e5e88fe9b212f19c1490f99c33c35218a6adf3570fde2a30794",
+        "size": 1436
+      },
+      "canonical_evidence": {
+        "sha256": "918672a0e606c1d2869588de5d24e13768aab69c5ef95a22b95549438b4bc54e",
+        "size": 11141
+      }
+    },
+    {
+      "case_id": "odb-demo-08-jiaocaineedrop_Chapter9.pdf_46",
+      "upstream_image": "jiaocaineedrop_Chapter9.pdf_46.jpg",
+      "upstream_page_no": 1644,
+      "tags": {
+        "language": "english",
+        "scripts": [
+          "latin"
+        ],
+        "document_type": "exam_paper",
+        "degradations": [
+          "table_horizontal",
+          "colorful_backgroud",
+          "table_wireless_line",
+          "table_span"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "figure",
+          "1andmore_column"
+        ]
+      },
+      "image": {
+        "sha256": "1d51e20cb23995b6f77869c9e230cb330a314759487e71dd9d45c010a60ab7d5",
+        "size": 337199
+      },
+      "reviewed_markdown": {
+        "sha256": "9a0991a141806bcdb34f0cd5b680d03df287cfac13163a535cd597266f0f57d5",
+        "size": 2199
+      },
+      "canonical_evidence": {
+        "sha256": "1c451c7c9c4280df1bb018e456d919373f5feeba17385e0492bc5330f4ebee3a",
+        "size": 30278
+      }
+    },
+    {
+      "case_id": "odb-demo-09-jiaocaineedrop_Evans_PDE_Solution_Chapter_6_Second-Order_Elliptic_Equations.pdf_5",
+      "upstream_image": "jiaocaineedrop_Evans_PDE_Solution_Chapter_6_Second-Order_Elliptic_Equations.pdf_5.jpg",
+      "upstream_page_no": 1700,
+      "tags": {
+        "language": "english",
+        "scripts": [
+          "latin"
+        ],
+        "document_type": "exam_paper",
+        "degradations": [
+          "colorful_backgroud"
+        ],
+        "content_kinds": [
+          "text",
+          "formula",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "343f7425daf6e5f73d4784900650fe477756f84a230108af251e35585d854dee",
+        "size": 292729
+      },
+      "reviewed_markdown": {
+        "sha256": "023a09b382c8a02a4ebb61978cdc55efeed03623b1195e5b036f5774cc1e8a7f",
+        "size": 2923
+      },
+      "canonical_evidence": {
+        "sha256": "42189376bf7dd35ec9ab933a6c49646a1943798ba193b513fc602613eae4a691",
+        "size": 30024
+      }
+    },
+    {
+      "case_id": "odb-demo-10-jiaocaineedrop_jiaocai_needrop_en_1898",
+      "upstream_image": "jiaocaineedrop_jiaocai_needrop_en_1898.jpg",
+      "upstream_page_no": 2122,
+      "tags": {
+        "language": "english",
+        "scripts": [
+          "latin"
+        ],
+        "document_type": "colorful_textbook",
+        "degradations": [
+          "fuzzy_scan",
+          "colorful_backgroud",
+          "table_horizontal",
+          "table_full_line"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "564ae7b92c1fa1e7321e56b4d5e7051c2f6036f3fa852e916ba30aa9d630e9c9",
+        "size": 320173
+      },
+      "reviewed_markdown": {
+        "sha256": "b3508b7136032478ad338694f339605441ee6d7b76a7929fb925cdebdbfa8c70",
+        "size": 2264
+      },
+      "canonical_evidence": {
+        "sha256": "7aa0868d0770581ff38229483b73405e94b3aa9e4d4e23d668d34f9163e623b6",
+        "size": 17765
+      }
+    },
+    {
+      "case_id": "odb-demo-11-jiaocaineedrop_jiaocai_needrop_en_3361",
+      "upstream_image": "jiaocaineedrop_jiaocai_needrop_en_3361.jpg",
+      "upstream_page_no": 2408,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "colorful_textbook",
+        "degradations": [
+          "None",
+          "fuzzy_scan"
+        ],
+        "content_kinds": [
+          "text",
+          "figure",
+          "double_column"
+        ]
+      },
+      "image": {
+        "sha256": "1054948e0b128fc47b09e6b31b4fc7a0a93a6de811b60b96ceec98902fd4c63f",
+        "size": 85195
+      },
+      "reviewed_markdown": {
+        "sha256": "b7515715e011fd100bc6ea406388514d018196b281d5e187eef53ee7e115f0a3",
+        "size": 3277
+      },
+      "canonical_evidence": {
+        "sha256": "40818fe6c9ee41e03aad327b44de5f0dddf6e20d65ac6d72ab1fa4d195b81c3b",
+        "size": 54735
+      }
+    },
+    {
+      "case_id": "odb-demo-12-notes_1ba14cb325bc448f7201b20502ecf2b5_15",
+      "upstream_image": "notes_1ba14cb325bc448f7201b20502ecf2b5_15.jpg",
+      "upstream_page_no": 15,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "note",
+        "degradations": [
+          "none_reported"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "08cef981592fb283c2f65a9505567861ffd02aa47f1a1c786cc02e2df4884506",
+        "size": 132934
+      },
+      "reviewed_markdown": {
+        "sha256": "0947bab73164128af0c166f0680e4db81637987d2a8d109d62035df1ae6a9f6c",
+        "size": 1570
+      },
+      "canonical_evidence": {
+        "sha256": "c636d6c7bd861ced0d2d296625773b0d0e093e16767385481371af5dff6586a5",
+        "size": 18284
+      }
+    },
+    {
+      "case_id": "odb-demo-13-notes_f7f010b78016aeebd76e56d9283eb67f_49",
+      "upstream_image": "notes_f7f010b78016aeebd76e56d9283eb67f_49.jpg",
+      "upstream_page_no": 49,
+      "tags": {
+        "language": "en_ch_mixed",
+        "scripts": [
+          "latin",
+          "han"
+        ],
+        "document_type": "note",
+        "degradations": [
+          "none_reported"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "4d07d9ca8b2260b96e9eb4b25b11d722e0f3a2f181489329f29ee40455f6dba5",
+        "size": 134842
+      },
+      "reviewed_markdown": {
+        "sha256": "d109e99f61b798aa23d884eb6abea76fbe3f013ca17cc59d5dbf90727d5c2f9c",
+        "size": 1765
+      },
+      "canonical_evidence": {
+        "sha256": "729c61e53045fd8d3b0b1db304b9677a47ed3f419fea3f003a55aa7ae691c132",
+        "size": 28948
+      }
+    },
+    {
+      "case_id": "odb-demo-14-newspaper_1cddf9d22ca549f3a86cf1512a3110cc_1",
+      "upstream_image": "newspaper_1cddf9d22ca549f3a86cf1512a3110cc_1.jpg",
+      "upstream_page_no": 1,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "newspaper",
+        "degradations": [
+          "none_reported"
+        ],
+        "content_kinds": [
+          "text",
+          "figure"
+        ]
+      },
+      "image": {
+        "sha256": "34a36a432af567a7cc3f90634fe49e05dd7742baa34dd14e6a4a1996965c1ffe",
+        "size": 401677
+      },
+      "reviewed_markdown": {
+        "sha256": "f89341a9d5b5f27e045f05f00ac27332d6754352a591943422a068e2144c2460",
+        "size": 25663
+      },
+      "canonical_evidence": {
+        "sha256": "dc88f81c1c08429bee4838dedaa14434951e3ff69356a7f36aa4ca39bc7c29e2",
+        "size": 157584
+      }
+    },
+    {
+      "case_id": "odb-demo-15-newspaper_5e266dfd9c498cab274e12a7b4a75755_4",
+      "upstream_image": "newspaper_5e266dfd9c498cab274e12a7b4a75755_4.jpg",
+      "upstream_page_no": 4,
+      "tags": {
+        "language": "english",
+        "scripts": [
+          "latin"
+        ],
+        "document_type": "newspaper",
+        "degradations": [
+          "none_reported"
+        ],
+        "content_kinds": [
+          "text",
+          "three_column"
+        ]
+      },
+      "image": {
+        "sha256": "4084808923e8735f1ef837903f79d9eafc37833cd72be42868f6a5bfb67e49ee",
+        "size": 238945
+      },
+      "reviewed_markdown": {
+        "sha256": "e08a91b8c03116876b54244141e7b5d80fe3d7f3cbb140b2a5beccced36916f7",
+        "size": 6676
+      },
+      "canonical_evidence": {
+        "sha256": "cccdb132505e70c629a9137439024f7a7c0807b2ffe6baf47576d33bbe0e3d27",
+        "size": 45157
+      }
+    },
+    {
+      "case_id": "odb-demo-16-eastmoney_62b4149b1612ce28d20f26cd5c5b2e18f80b26fca6e4452e090376a2fe72eae3.pdf_0",
+      "upstream_image": "eastmoney_62b4149b1612ce28d20f26cd5c5b2e18f80b26fca6e4452e090376a2fe72eae3.pdf_0.jpg",
+      "upstream_page_no": 0,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "research_report",
+        "degradations": [
+          "table_horizontal",
+          "table_omission_line"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "figure",
+          "1andmore_column"
+        ]
+      },
+      "image": {
+        "sha256": "6daff9df78a43b55350b4dea32f77748736e2e6da67b96c8738c14a19e5c9569",
+        "size": 546737
+      },
+      "reviewed_markdown": {
+        "sha256": "f847efb292c7a238bf3f1bb8fba886b71315943c3e545146005a5390f8f745bb",
+        "size": 6315
+      },
+      "canonical_evidence": {
+        "sha256": "9c4e7e24943e3c5688e110274ecec26c52dc3790e36ebdfebb4646541ed5a166",
+        "size": 54283
+      }
+    },
+    {
+      "case_id": "odb-demo-17-yanbaopptmerge_0c79d327060dbf9f1582d03c235dadb039533a19091d2c0d24f2ad95d267f79b.pdf_2",
+      "upstream_image": "yanbaopptmerge_0c79d327060dbf9f1582d03c235dadb039533a19091d2c0d24f2ad95d267f79b.pdf_2.jpg",
+      "upstream_page_no": 2,
+      "tags": {
+        "language": "simplified_chinese",
+        "scripts": [
+          "han"
+        ],
+        "document_type": "research_report",
+        "degradations": [
+          "table_horizontal",
+          "table_omission_line",
+          "table_span"
+        ],
+        "content_kinds": [
+          "text",
+          "table",
+          "single_column"
+        ]
+      },
+      "image": {
+        "sha256": "db3b09727089da556f740c9e06674265d7e0603bd024aa1f15e5c0d75127ce8c",
+        "size": 477952
+      },
+      "reviewed_markdown": {
+        "sha256": "5ab559c29330dc7ef8233ccd8c33b827a4a299ee1348b36a7f0a4f940a0e9278",
+        "size": 4369
+      },
+      "canonical_evidence": {
+        "sha256": "a8b8653858809a7b65766968fdafc6545928abcf879ff456230129facc5a229f",
+        "size": 39218
+      }
+    }
+  ]
+}

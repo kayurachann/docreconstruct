@@ -8,6 +8,28 @@ trúc, có thể chỉnh sửa. Trong quy trình này, kết quả OCR chỉ là
 để đối chiếu chứ không phải sản phẩm cuối cùng. Mô hình tài liệu hợp nhất, trình
 lập bố cục và trình xuất tệp sẽ quyết định cách tạo DOCX, HTML hoặc JSON.
 
+## Tình trạng đánh giá chuẩn công khai
+
+Kết quả đánh giá công khai đầu tiên, tách biệt với các ví dụ minh họa được tuyển
+chọn, đã chạy **đủ 18 trang** của bộ demo chính thức OmniDocBench. Đây là phép
+thử tái tạo dùng dữ liệu chuẩn làm căn cứ (`oracle_reconstruction`): quy trình
+dùng Markdown và hình học chuẩn để tách riêng chất lượng tái tạo, vì vậy **không
+phải** phép so sánh OCR.
+
+| Kết quả | Giá trị đo được |
+| --- | ---: |
+| Quy trình chạy thành công | **8/18 (44,44%)** |
+| Đạt toàn bộ tiêu chí đo được | **1/18 (5,56%)** |
+| Thất bại khi căn chỉnh bằng chứng ở chế độ nghiêm ngặt | **10/18** |
+| Điểm tương đồng hình ảnh LibreOffice v2.1, tính cả trường hợp thất bại | **0.104675** |
+
+Các trường hợp thất bại vẫn được giữ trong báo cáo và nhận điểm hình ảnh bằng
+không. Xem [đầy đủ quy trình, kết quả và danh sách thất
+bại](../../benchmark/omnidocbench-demo/README.md). Kết quả này không thể dùng để
+so sánh với Docling, MinerU hoặc Marker; muốn so sánh hợp lệ, dự án còn phải chạy
+một phép thử mà Markdown và JSON được tạo từ chính ảnh đầu vào, không sử dụng dữ
+liệu chuẩn.
+
 ## Giao diện web và việc tải tài liệu lên
 
 Sau khi quy trình triển khai GitHub Pages hoàn tất, giao diện web tĩnh sẽ có tại

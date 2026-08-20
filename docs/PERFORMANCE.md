@@ -119,6 +119,12 @@ all dominate these local numbers.
 
 ## Reproducible reconstruction benchmark
 
+The first [public unfiltered baseline](../benchmark/omnidocbench-demo/README.md)
+runs all 18 official OmniDocBench demo pages and publishes every failure. Its
+8/18 operational result is deliberately kept separate from the three selected
+showcases. Because it uses ground-truth Markdown and geometry, it measures only
+the reconstruction lane and is not an end-to-end parser comparison.
+
 `benchmark-reconstruction` evaluates the production three-authority path. A
 case must include the original PDF/image, reviewed Markdown, and one or more
 positioned JSON sidecars. The runner generates a fresh DOCX and QA report for

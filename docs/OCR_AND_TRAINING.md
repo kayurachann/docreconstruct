@@ -400,6 +400,12 @@ annotations. [OmniDocBench](https://github.com/opendatalab/OmniDocBench) is a
 valuable end-to-end benchmark, but its dataset is research-only; pin the exact
 dataset/evaluator version because its metrics evolve.
 
+An initial [public OmniDocBench demo baseline](../benchmark/omnidocbench-demo/README.md)
+now retains all 18 official demo pages, including ten strict-alignment
+failures. It is an oracle-reconstruction lane using ground-truth Markdown and
+geometry, not an OCR/parser score. The project has not yet published a valid
+provider-realistic OmniDocBench comparison with Docling, MinerU, or Marker.
+
 ## Required evaluation slices
 
 Never accept a single aggregate score. Reports must break out language,

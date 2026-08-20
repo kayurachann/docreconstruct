@@ -42,6 +42,32 @@ users or backend operators are responsible for installing, operating, or
 contracting with any inference system they choose. An open-source OCR engine
 does not imply free hosted compute.
 
+“High fidelity” is a design target for the three-authority workflow, not a
+claim of universal accuracy. The project has not yet published a full
+OmniDocBench end-to-end parser score or a controlled comparison with Docling,
+MinerU, or Marker.
+
+## Public benchmark status
+
+The first non-showcase baseline now runs **all 18 pages** of the official
+OmniDocBench demo at pinned revision `193627a`. It uses ground-truth Markdown
+and ground-truth geometry to isolate reconstruction behavior; it is not an OCR
+comparison.
+
+| Result | Measured value |
+| --- | ---: |
+| Operational success | **8/18 (44.44%)** |
+| Accepted by every measured gate | **1/18 (5.56%)** |
+| Strict evidence-alignment failures | **10/18** |
+| Failure-inclusive LibreOffice visual v2.1 score | **0.104675** |
+
+This result is intentionally not flattering. Failed cases remain in the report
+and contribute zero to rendered quality. See the complete
+[protocol, reports, and failure ledger](benchmark/omnidocbench-demo/README.md).
+Until a provider-realistic lane is run through the official OmniDocBench
+semantic evaluator, this repository must not claim benchmark superiority over
+document parsers or OCR systems.
+
 ## What v0.1 can do
 
 - Represent pages and elements in a strict Pydantic `Document` model with
