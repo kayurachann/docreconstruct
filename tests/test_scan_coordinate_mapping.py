@@ -263,3 +263,76 @@ def test_photographed_page_records_compact_forward_row_mapping(tmp_path: Path) -
     assert interior_projection is not None
     assert 0 <= interior_projection.x0 < interior_projection.x1 <= page.width
     assert 0 <= interior_projection.y0 < interior_projection.y1 <= page.height
+
+
+def test_dominant_gap_needs_agreement_before_it_overrides_the_page_prior() -> None:
+    """A handful of section breaks is not a line rhythm.
+
+    The 16-60 px window that classifies a gap as a line pitch only describes a
+    page rasterized at roughly 150-200 DPI, so a denser scan or double spacing
+    falls outside it. Reading the gaps is right when they agree, but a
+    photographed page whose bands barely separate yields three gaps that are
+    structural breaks, and their median is not a pitch.
+    """
+
+    from docreconstruct.reconstruction.scan_layout import _dominant_gap
+
+    # A real rhythm: many gaps clustered around one value.
+    assert _dominant_gap([100.0, 99.0, 101.0, 100.5, 100.0, 250.0]) == pytest.approx(100.0, abs=1)
+    # Too few gaps to be evidence of anything.
+    assert _dominant_gap([8.5, 351.0, 431.0]) is None
+    assert _dominant_gap([]) is None
+    # Enough gaps, but no majority agrees on one value.
+    assert _dominant_gap([10.0, 60.0, 140.0, 300.0, 700.0]) is None
+
+
+@pytest.mark.parametrize(
+    ("dpi", "font_points", "leading_points"),
+    [(192, 12.0, 14.0), (192, 12.0, 28.0), (300, 12.0, 24.0), (400, 12.0, 14.0)],
+)
+def test_line_pitch_follows_the_page_not_the_pixel_window(
+    dpi: int,
+    font_points: float,
+    leading_points: float,
+) -> None:
+    """The measured pitch must track the real leading at any resolution.
+
+    Outside the hard-coded 16-60 px window the estimate came from page height
+    alone, so a 300 DPI scan of 12pt on 24pt leading reported 11.2 pt where the
+    page is 24 pt — and every downstream body size, line height, and vertical
+    budget is derived from it.
+    """
+
+    pytest.importorskip("numpy")
+    from PIL import ImageFont
+
+    from docreconstruct.reconstruction.scan_layout import analyze_scan_page
+
+    scale = dpi / 72.0
+    width, height = int(612 * scale), int(792 * scale)
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("times.ttf", int(round(font_points * scale)))
+    except OSError:  # pragma: no cover - depends on installed fonts
+        pytest.skip("a scalable serif font is required to render the fixture")
+    pitch = leading_points * scale
+    top = margin = 72.0 * scale
+    while top + pitch < height - margin:
+        draw.text(
+            (margin, top),
+            "The quick brown fox jumps over the lazy dog today.",
+            font=font,
+            fill="black",
+        )
+        top += pitch
+
+    page = analyze_scan_page(
+        image,
+        number=1,
+        pdf_width=612.0,
+        pdf_height=792.0,
+        metadata={"source_kind": "pdf", "rectified": False},
+    )
+
+    assert page.line_pitch == pytest.approx(pitch, rel=0.05)
