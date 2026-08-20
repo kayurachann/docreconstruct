@@ -64,15 +64,26 @@ def _distance(reference: Sequence[Any], candidate: Sequence[Any]) -> int:
     return previous[-1]
 
 
-def _error_rate(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
+def _error_rate_of(
+    distance: int,
+    reference: Sequence[Any],
+    candidate: Sequence[Any],
+) -> float:
     if not reference:
         return 0.0 if not candidate else 1.0
-    return _distance(reference, candidate) / len(reference)
+    return distance / len(reference)
+
+
+def _accuracy_of(distance: int, reference: Sequence[Any], candidate: Sequence[Any]) -> float:
+    return _clamp(1.0 - distance / max(len(reference), len(candidate), 1))
+
+
+def _error_rate(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
+    return _error_rate_of(_distance(reference, candidate), reference, candidate)
 
 
 def _accuracy(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
-    denominator = max(len(reference), len(candidate), 1)
-    return _clamp(1.0 - _distance(reference, candidate) / denominator)
+    return _accuracy_of(_distance(reference, candidate), reference, candidate)
 
 
 def extract_text(source: Any) -> str:
@@ -147,11 +158,17 @@ def evaluate_text(reference: Any, candidate: Any) -> TextMetrics:
     candidate_words = re.findall(r"\S+", candidate_text)
     reference_numbers = _numbers(reference_text)
     candidate_numbers = _numbers(candidate_text)
+    # The error rate and the accuracy of one pair are two readings of a single
+    # edit distance.  Asking each helper for its own doubled the whole
+    # `O(len(reference) * len(candidate))` matrix for both the character and the
+    # word comparison on every evaluated case.
+    character_distance = _distance(reference_text, candidate_text)
+    word_distance = _distance(reference_words, candidate_words)
     return TextMetrics(
-        character_error_rate=_error_rate(reference_text, candidate_text),
-        word_error_rate=_error_rate(reference_words, candidate_words),
-        character_accuracy=_accuracy(reference_text, candidate_text),
-        word_accuracy=_accuracy(reference_words, candidate_words),
+        character_error_rate=_error_rate_of(character_distance, reference_text, candidate_text),
+        word_error_rate=_error_rate_of(word_distance, reference_words, candidate_words),
+        character_accuracy=_accuracy_of(character_distance, reference_text, candidate_text),
+        word_accuracy=_accuracy_of(word_distance, reference_words, candidate_words),
         exact_match=float(reference_text == candidate_text),
         numerical_accuracy=_accuracy(reference_numbers, candidate_numbers),
         reference_characters=len(reference_text),
@@ -445,6 +462,16 @@ class LayoutMetrics:
 
 def evaluate_layout(reference: Any, candidate: Any) -> LayoutMetrics:
     pairs, ref_count, cand_count = _match_elements(reference, candidate)
+    return _layout_metrics(reference, candidate, pairs, ref_count, cand_count)
+
+
+def _layout_metrics(
+    reference: Any,
+    candidate: Any,
+    pairs: list[tuple[_ElementRecord, _ElementRecord]],
+    ref_count: int,
+    cand_count: int,
+) -> LayoutMetrics:
     matched = len(pairs)
     precision = matched / cand_count if cand_count else float(ref_count == 0)
     recall = matched / ref_count if ref_count else float(cand_count == 0)
@@ -670,8 +697,14 @@ class StructureMetrics:
 
 def evaluate_structure(reference: Any, candidate: Any) -> StructureMetrics:
     pairs, _, _ = _match_elements(reference, candidate)
-    refs = _records(reference)
-    cands = _records(candidate)
+    return _structure_metrics(pairs, _records(reference), _records(candidate))
+
+
+def _structure_metrics(
+    pairs: list[tuple[_ElementRecord, _ElementRecord]],
+    refs: list[_ElementRecord],
+    cands: list[_ElementRecord],
+) -> StructureMetrics:
     ref_types = Counter(record.type for record in refs)
     cand_types = Counter(record.type for record in cands)
     precision, recall, f1 = _f1_from_counts(ref_types, cand_types)
@@ -686,6 +719,25 @@ def evaluate_structure(reference: Any, candidate: Any) -> StructureMetrics:
         table_topology_accuracy=table_topology,
         table_cell_text_accuracy=table_text,
         table_span_accuracy=table_span,
+    )
+
+
+def evaluate_layout_and_structure(
+    reference: Any,
+    candidate: Any,
+) -> tuple[LayoutMetrics, StructureMetrics]:
+    """Score layout and structure from one element matching.
+
+    `evaluate_layout` and `evaluate_structure` each ran `_match_elements` on the
+    same two documents, and that is the expensive step: a dense cost grid whose
+    every cell is an edit distance, followed by a cubic assignment. A caller
+    that wants both metrics pays for it once here.
+    """
+
+    pairs, ref_count, cand_count = _match_elements(reference, candidate)
+    return (
+        _layout_metrics(reference, candidate, pairs, ref_count, cand_count),
+        _structure_metrics(pairs, _records(reference), _records(candidate)),
     )
 
 
