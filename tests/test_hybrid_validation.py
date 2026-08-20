@@ -1253,3 +1253,27 @@ def test_a_relocated_footer_does_not_stop_body_order_from_being_checked(
     assert not _gate(
         validate_hybrid(markdown, layout, reversed_path), "native_content_projection"
     ).passed
+
+
+def test_native_tables_gate_ignores_the_renderer_own_layout_scaffolding() -> None:
+    """Layout tables must not stand in for the document's real tables.
+
+    The renderer builds tagged borderless tables to place a split masthead or a
+    multi-column body. Counting them let a document whose Markdown tables had
+    all degraded into plain paragraphs still satisfy the gate, because the
+    scaffolding alone reached the expected count.
+    """
+
+    def table(caption: str | None) -> ElementTree.Element:
+        namespace = hybrid_validation._WORD[1:-1]
+        markup = f'<w:tbl xmlns:w="{namespace}"><w:tblPr>'
+        if caption is not None:
+            markup += f'<w:tblCaption w:val="{caption}"/>'
+        return ElementTree.fromstring(markup + "</w:tblPr></w:tbl>")
+
+    assert hybrid_validation._is_layout_furniture(table("docreconstruct:split-masthead"))
+    assert hybrid_validation._is_layout_furniture(table("docreconstruct:body-columns-2"))
+    # A real table, whether it is captioned or not, always counts.
+    assert not hybrid_validation._is_layout_furniture(table(None))
+    assert not hybrid_validation._is_layout_furniture(table("Quarterly results"))
+    assert not hybrid_validation._is_layout_furniture(table("docreconstruct:other"))
