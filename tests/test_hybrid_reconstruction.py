@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -2008,6 +2009,139 @@ def test_scan_analysis_recovers_dense_lines_and_split_masthead(tmp_path: Path) -
     assert len(page.text_lines) >= 20
     assert len(page.line_bands) == len(page.text_lines)
     assert page.regions == []
+
+
+# ECMA-376 child order for the property containers this renderer writes into.
+_PROPERTY_SEQUENCES = {
+    "w:pPr": (
+        "w:pStyle",
+        "w:keepNext",
+        "w:keepLines",
+        "w:pageBreakBefore",
+        "w:framePr",
+        "w:widowControl",
+        "w:numPr",
+        "w:suppressLineNumbers",
+        "w:pBdr",
+        "w:shd",
+        "w:tabs",
+        "w:suppressAutoHyphens",
+        "w:kinsoku",
+        "w:wordWrap",
+        "w:overflowPunct",
+        "w:topLinePunct",
+        "w:autoSpaceDE",
+        "w:autoSpaceDN",
+        "w:bidi",
+        "w:adjustRightInd",
+        "w:snapToGrid",
+        "w:spacing",
+        "w:ind",
+        "w:contextualSpacing",
+        "w:mirrorIndents",
+        "w:suppressOverlap",
+        "w:jc",
+        "w:textDirection",
+        "w:textAlignment",
+        "w:textboxTightWrap",
+        "w:outlineLvl",
+        "w:divId",
+        "w:cnfStyle",
+        "w:rPr",
+        "w:sectPr",
+        "w:pPrChange",
+    ),
+    "w:tcPr": (
+        "w:cnfStyle",
+        "w:tcW",
+        "w:gridSpan",
+        "w:hMerge",
+        "w:vMerge",
+        "w:tcBorders",
+        "w:shd",
+        "w:noWrap",
+        "w:tcMar",
+        "w:textDirection",
+        "w:tcFitText",
+        "w:vAlign",
+        "w:hideMark",
+        "w:headers",
+        "w:cellIns",
+        "w:cellDel",
+        "w:cellMerge",
+        "w:tcPrChange",
+    ),
+    "w:tblPr": (
+        "w:tblStyle",
+        "w:tblpPr",
+        "w:tblOverlap",
+        "w:bidiVisual",
+        "w:tblStyleRowBandSize",
+        "w:tblStyleColBandSize",
+        "w:tblW",
+        "w:jc",
+        "w:tblCellSpacing",
+        "w:tblInd",
+        "w:tblBorders",
+        "w:shd",
+        "w:tblLayout",
+        "w:tblCellMar",
+        "w:tblLook",
+        "w:tblCaption",
+        "w:tblDescription",
+        "w:tblPrChange",
+    ),
+}
+
+
+def test_generated_property_containers_follow_the_ooxml_child_order(tmp_path: Path) -> None:
+    """Word's strict parser rejects an out-of-sequence property container.
+
+    `w:pPr`, `w:tcPr` and `w:tblPr` are `xsd:sequence`, so appending a border or
+    a shading element after python-docx has written a later-ordered sibling
+    makes the document invalid. Word reports "unreadable content" and repairs it
+    by discarding the property, so the thematic rule loses its line and table
+    borders and header shading disappear. LibreOffice is lenient, which is why a
+    rendered comparison does not catch it.
+    """
+
+    pytest.importorskip("numpy")
+    markdown = tmp_path / "ruled.md"
+    markdown.write_text(
+        "Intro paragraph text here.\n\n---\n\n"
+        "<table><tr><td>Head A</td><td>Head B</td></tr>"
+        "<tr><td>one</td><td>two</td></tr></table>\n\nTail paragraph.\n",
+        encoding="utf-8",
+    )
+    from PIL import ImageDraw
+
+    image = Image.new("RGB", (620, 877), "white")
+    draw = ImageDraw.Draw(image)
+    for index in range(8):
+        top = 60 + index * 70
+        draw.rectangle((55, top, 500, top + 28), fill="black")
+    layout = tmp_path / "ruled.png"
+    image.save(layout)
+    output = tmp_path / "ruled.docx"
+
+    reconstruct_hybrid(markdown, layout, output=output)
+
+    with zipfile.ZipFile(output) as package:
+        document_xml = package.read("word/document.xml").decode("utf-8")
+
+    inspected = 0
+    for container, sequence in _PROPERTY_SEQUENCES.items():
+        for match in re.finditer(rf"<{container}>(.*?)</{container}>", document_xml, re.S):
+            present = [
+                tag for tag in re.findall(r"<(w:[A-Za-z]+)", match.group(1)) if tag in sequence
+            ]
+            inspected += 1
+            assert present == sorted(present, key=sequence.index), (
+                f"{container} children out of schema order: {present}"
+            )
+    assert inspected >= 3
+    # CT_Shd requires w:val; "clear" is the plain solid fill.
+    assert 'w:val="clear"' in document_xml
 
 
 def test_image_table_pair_keeps_the_other_visuals_in_its_group() -> None:
