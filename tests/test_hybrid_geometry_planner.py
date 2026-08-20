@@ -1665,3 +1665,62 @@ def test_surplus_column_noise_does_not_disable_available_block_geometry(
     assert placement.source_bbox is not None
     assert placement.source_bbox.x0 >= 40 and placement.source_bbox.x1 <= 175
     assert 1 <= len(placement.source_rows) < len(visual_text_rows(page))
+
+
+def test_a_page_anchored_to_an_oversized_run_still_plans() -> None:
+    """Bounding the boundary scan must never make an anchored page infeasible.
+
+    The scan stops once a page is loaded far past its own height, but a page
+    whose evidence anchors sit beyond that point has to keep growing until it
+    contains them — otherwise `_segment_cost` returns infinity for every
+    reachable split and the whole plan is rejected.
+    """
+
+    per_page = 40
+    blocks = [
+        MarkdownBlock(
+            id=f"md-{index + 1}",
+            index=index,
+            kind=MarkdownBlockKind.PARAGRAPH,
+            text=f"Paragraph {index} of the reviewed body text.",
+        )
+        for index in range(2 * per_page)
+    ]
+    content = MarkdownContent(source="content.md", blocks=blocks)
+    layout = ScanDocumentLayout(
+        source="layout.pdf",
+        pages=[
+            ScanPageLayout(
+                number=number,
+                width=620,
+                height=877,
+                pdf_width=612,
+                pdf_height=792,
+                content_bbox=PixelBox(x0=40, y0=40, x1=580, y1=840),
+                line_pitch=24.0,
+                image=Image.new("RGB", (620, 877), "white"),
+                metadata={"source_kind": "pdf"},
+            )
+            for number in (1, 2)
+        ],
+    )
+    # Anchor the whole first run to page one, well past any weight-based cap.
+    matches = [
+        EvidenceMatch(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+            source_bbox=PixelBox(x0=50, y0=50 + index, x1=560, y1=70 + index),
+            match_score=0.95,
+            confidence=0.95,
+            providers=("json",),
+            element_ids=(f"e-{index}",),
+        )
+        for index, block in enumerate(blocks[:per_page])
+    ]
+
+    plan = build_hybrid_layout_plan(content, layout, [], [], evidence_matches=matches)
+
+    first_page = [placement.block_index for placement in plan.pages[0].placements]
+    assert first_page[-1] >= per_page - 1
+    assert len(plan.pages) == 2

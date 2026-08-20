@@ -2109,6 +2109,17 @@ def build_hybrid_layout_plan(
             return cost, (len(blocks),)
         best_cost = math.inf
         best_boundaries: tuple[int, ...] = ()
+        # Every page considered every remaining block as its boundary, so the
+        # search was quadratic in block count with no bound: a 30-page, 1800
+        # block document spent a minute here. A page loaded past several times
+        # its own height is never the cheaper split, but the scan cannot stop
+        # before the page's own anchors are contained, or an anchored document
+        # becomes infeasible. The test sits after the body so at least one `end`
+        # beyond the cap is always evaluated, which keeps a single oversized
+        # block, and an oversized anchored run, reachable.
+        anchors = [index for index, page in fixed_pages.items() if page == page_number]
+        floor_end = max(anchors) + 1 if anchors else start
+        weight_cap = 3.0 * max(1.0, targets[page_number - 1])
         for end in range(start, len(blocks) + 1):
             current = _segment_cost(
                 blocks,
@@ -2122,13 +2133,14 @@ def build_hybrid_layout_plan(
                 end,
                 targets[page_number - 1],
             )
-            if not math.isfinite(current):
-                continue
-            future, future_boundaries = solve(page_number + 1, end)
-            total = current + future
-            if total < best_cost:
-                best_cost = total
-                best_boundaries = (end, *future_boundaries)
+            if math.isfinite(current):
+                future, future_boundaries = solve(page_number + 1, end)
+                total = current + future
+                if total < best_cost:
+                    best_cost = total
+                    best_boundaries = (end, *future_boundaries)
+            if end > floor_end and (cumulative[end] - cumulative[start]) > weight_cap:
+                break
         return best_cost, best_boundaries
 
     score, boundaries = solve(1, 0)
