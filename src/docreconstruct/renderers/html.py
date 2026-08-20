@@ -23,6 +23,7 @@ from ._utils import (
     ordered_elements,
     pages,
     table_rows,
+    table_spans,
     value,
 )
 from .base import Renderer
@@ -135,11 +136,26 @@ def _render_table(element: Any) -> str:
         return f'<div class="dr-text">{html.escape(element_text(element))}</div>'
     metadata = element_metadata(element)
     header_rows = max(0, int(finite_number(metadata.get("header_rows", 1), 1.0)))
+    # The flattened grid renders a merged cell as its anchor plus empty boxes
+    # where the source had none.  When the source spans are known, re-emit them
+    # and drop the covered slots so the table keeps its real shape.
+    spans = table_spans(element)
     rendered_rows: list[str] = []
     for row_index, row in enumerate(rows):
         tag = "th" if row_index < header_rows else "td"
-        rendered_cells = "".join(f"<{tag}>{html.escape(cell)}</{tag}>" for cell in row)
-        rendered_rows.append(f"<tr>{rendered_cells}</tr>")
+        row_spans = spans[row_index] if row_index < len(spans) else []
+        rendered_cells: list[str] = []
+        for column_index, cell in enumerate(row):
+            colspan, rowspan = row_spans[column_index] if column_index < len(row_spans) else (1, 1)
+            if (colspan, rowspan) == (0, 0):
+                continue
+            attributes = ""
+            if colspan > 1:
+                attributes += f' colspan="{colspan}"'
+            if rowspan > 1:
+                attributes += f' rowspan="{rowspan}"'
+            rendered_cells.append(f"<{tag}{attributes}>{html.escape(cell)}</{tag}>")
+        rendered_rows.append(f"<tr>{''.join(rendered_cells)}</tr>")
     return '<table class="dr-table">' + "".join(rendered_rows) + "</table>"
 
 

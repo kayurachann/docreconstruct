@@ -616,6 +616,17 @@ def _layout_geometry(
 
 
 def _layout_text(layout: Any, document_text: str) -> str | None:
+    """Return the recognized body text of one layout, exactly as scanned.
+
+    URL redaction protects the provider endpoint, the access token, and the
+    caller's signed source URL, and it still guards every surface that can carry
+    them: the raw payload snapshots, the source label, and the `content_text`
+    audit field.  Body text is not one of those surfaces — it is the document
+    the user asked to transcribe — and redacting it silently truncated any URL
+    printed on the page to its origin, dropping the path, query, and fragment
+    from the editable output with no warning.
+    """
+
     if not isinstance(layout, Mapping):
         return None
     anchor = layout.get("textAnchor")
@@ -623,7 +634,7 @@ def _layout_text(layout: Any, document_text: str) -> str | None:
         return None
     direct = anchor.get("content")
     if isinstance(direct, str):
-        return _redact_embedded_urls(direct)
+        return direct
     pieces: list[str] = []
     for segment in _mapping_list(anchor.get("textSegments")):
         start = _nonnegative_integer(segment.get("startIndex"), default=0)
@@ -631,7 +642,7 @@ def _layout_text(layout: Any, document_text: str) -> str | None:
         if end > start and start < len(document_text):
             pieces.append(document_text[start : min(end, len(document_text))])
     combined = "".join(pieces)
-    return _redact_embedded_urls(combined) if combined else None
+    return combined or None
 
 
 def _layout_start(layout: Any) -> int:

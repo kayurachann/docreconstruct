@@ -9,7 +9,9 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -132,6 +134,20 @@ def find_libreoffice(explicit: str | Path | None = None) -> Path | None:
     )
 
 
+def _pixmap_image(image_module: Any, pixmap: Any) -> Any:
+    """Wrap a PyMuPDF pixmap as a Pillow image without a PNG round-trip."""
+
+    if pixmap.n == 3 and not pixmap.alpha and pixmap.stride == pixmap.width * 3:
+        return image_module.frombytes(
+            "RGB",
+            (pixmap.width, pixmap.height),
+            pixmap.samples,
+        )
+    import io
+
+    return image_module.open(io.BytesIO(pixmap.tobytes("png")))
+
+
 def _pdf_pages(
     path: Path,
     target_sizes: list[tuple[int, int]] | None,
@@ -160,15 +176,20 @@ def _pdf_pages(
                     target[1] / max(1.0, float(page.rect.height)),
                 )
             pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-            payload = pixmap.tobytes("png")
             if target is not None and (pixmap.width, pixmap.height) != target:
+                # Resample straight from the pixmap buffer.  Encoding the
+                # full-size page to PNG only to decode it again before resizing
+                # doubled the codec work on every rendered page and threw the
+                # result away.
                 import io
 
-                with Image.open(io.BytesIO(payload)) as opened:
+                with _pixmap_image(Image, pixmap) as opened:
                     resized = opened.resize(target, Image.Resampling.LANCZOS)
                     output = io.BytesIO()
                     resized.save(output, format="PNG")
                     payload = output.getvalue()
+            else:
+                payload = pixmap.tobytes("png")
             pages.append(payload)
     return tuple(pages), tuple(page_sizes_points)
 
@@ -178,6 +199,43 @@ def _process_output(completed: subprocess.CompletedProcess[str]) -> str | None:
         value.strip() for value in (completed.stdout, completed.stderr) if value and value.strip()
     )
     return diagnostic or None
+
+
+class _IdentityProbeRejected(Exception):
+    """The selected executable did not identify itself as LibreOffice."""
+
+    def __init__(self, diagnostic: str, return_code: int | None) -> None:
+        super().__init__(diagnostic)
+        self.diagnostic = diagnostic
+        self.return_code = return_code
+
+
+@lru_cache(maxsize=8)
+def _probed_version(executable: str, digest: str, timeout_seconds: int) -> str:
+    """Return the product identity of one exact binary image.
+
+    Every rendered page previously paid for a second LibreOffice launch — about
+    0.2 s — to re-establish an identity that cannot have changed. The cache is
+    keyed on the SHA-256 of the bytes, not on a path or a timestamp, so a
+    replaced or upgraded binary is a different key and is probed again; the
+    identity reported in the provenance stays byte-exact.
+    """
+
+    result = subprocess.run(
+        [str(_version_probe_executable(Path(executable))), "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    output = _process_output(result)
+    if result.returncode != 0 or not output or "libreoffice" not in output.casefold():
+        raise _IdentityProbeRejected(
+            "Selected executable did not identify itself as LibreOffice."
+            + (f" Probe output: {output}" if output else ""),
+            result.returncode,
+        )
+    return output.splitlines()[0].strip()
 
 
 def _version_probe_executable(executable: Path) -> Path:
@@ -247,12 +305,18 @@ def render_docx_pages(
 
     timeout_seconds = max(10, int(timeout))
     try:
-        version_result = subprocess.run(
-            [str(_version_probe_executable(office)), "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+        executable_version = _probed_version(str(office), executable_sha256, timeout_seconds)
+    except _IdentityProbeRejected as exc:
+        return DocumentRenderResult(
+            requested,
+            "libreoffice",
+            "error",
+            executable=str(office),
+            executable_sha256=executable_sha256,
+            discovery_source=discovery_source,
+            duration_seconds=time.perf_counter() - started,
+            return_code=exc.return_code,
+            diagnostic=exc.diagnostic,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return DocumentRenderResult(
@@ -265,27 +329,6 @@ def render_docx_pages(
             duration_seconds=time.perf_counter() - started,
             diagnostic=f"LibreOffice identity probe failed: {exc}",
         )
-    version_output = _process_output(version_result)
-    if (
-        version_result.returncode != 0
-        or not version_output
-        or "libreoffice" not in version_output.casefold()
-    ):
-        return DocumentRenderResult(
-            requested,
-            "libreoffice",
-            "error",
-            executable=str(office),
-            executable_sha256=executable_sha256,
-            discovery_source=discovery_source,
-            duration_seconds=time.perf_counter() - started,
-            return_code=version_result.returncode,
-            diagnostic=(
-                "Selected executable did not identify itself as LibreOffice."
-                + (f" Probe output: {version_output}" if version_output else "")
-            ),
-        )
-    executable_version = version_output.splitlines()[0].strip()
     with tempfile.TemporaryDirectory(prefix="docreconstruct-render-") as directory:
         workspace = Path(directory)
         output_directory = workspace / "output"

@@ -19,7 +19,7 @@ from docreconstruct.ir import (
     TextCandidate,
 )
 
-from .fusion_clustering import provider_sort_key
+from .fusion_clustering import DeferredKey, normalized_text, provider_sort_key
 
 
 def canonical_elements(elements: Sequence[Element]) -> list[Element]:
@@ -41,7 +41,7 @@ def element_sort_key(element: Element) -> tuple[object, ...]:
         element.type.value,
         normalized_text(element.text or ""),
         element.id,
-        _canonical_model_json(element),
+        DeferredKey(lambda: _canonical_model_json(element)),
     )
 
 
@@ -333,10 +333,6 @@ def remap_relationships(
         references=[target(value) or value for value in relationships.references],
         metadata=deepcopy(relationships.metadata),
     )
-
-
-def normalized_text(value: str) -> str:
-    return " ".join(value.split()).casefold()
 
 
 def _ordered_unique(values: Any) -> list[str]:

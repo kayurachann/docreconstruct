@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import unicodedata
 
 import pytest
 
@@ -16,8 +17,14 @@ from docreconstruct.ir import (
     Point,
     Provenance,
     Relationship,
+    SourceType,
 )
-from docreconstruct.normalization import fuse_documents, fuse_element_evidence, fuse_pages
+from docreconstruct.normalization import (
+    fuse_documents,
+    fuse_element_evidence,
+    fuse_pages,
+    fusion_clustering,
+)
 from docreconstruct.normalization.fusion_assignment import (
     maximum_cardinality_score_assignment,
     maximum_cardinality_score_sparse_assignment,
@@ -66,6 +73,51 @@ def _page(engine: str, elements: list[Element]) -> Page:
         height=1000,
         elements=elements,
     )
+
+
+def _document(
+    engine: str,
+    text: str,
+    box: tuple[float, float, float, float],
+) -> Document:
+    element = _observation(engine, f"{engine}-1", text, box, kind=ElementType.PARAGRAPH)
+    return Document(id=f"{engine}-document", pages=[_page(engine, [element])])
+
+
+def test_canonical_tiebreak_is_only_serialized_when_a_comparison_needs_it() -> None:
+    """The full-content tiebreak must stay deferred.
+
+    It is the last component of both fusion sort keys and is only consulted
+    when two observations agree on provider, source, reading order, geometry,
+    type, text, and id. Building it eagerly serialized every element on every
+    sort, which dominated fusion on a dense page.
+    """
+
+    builds = 0
+
+    def build() -> str:
+        nonlocal builds
+        builds += 1
+        return "payload"
+
+    key = fusion_clustering.DeferredKey(build)
+    assert builds == 0
+    assert key.value == "payload"
+    assert key.value == "payload"
+    assert builds == 1
+
+    # Ordering matches the string it defers.
+    low = fusion_clustering.DeferredKey(lambda: "a")
+    high = fusion_clustering.DeferredKey(lambda: "b")
+    assert low < high
+    assert high > low
+    assert low != high
+    assert (1, low) < (1, high)
+    # An earlier differing component short-circuits before the tiebreak is built.
+    exploding = fusion_clustering.DeferredKey(
+        lambda: pytest.fail("tiebreak must not be built")  # type: ignore[arg-type,return-value]
+    )
+    assert (0, exploding) < (1, exploding)
 
 
 def test_tied_sort_keys_use_complete_content_and_preserve_all_fields() -> None:
@@ -263,6 +315,113 @@ def test_cross_page_relationships_are_remapped_after_document_fusion() -> None:
     }
 
 
+def test_source_ids_in_the_fused_namespace_still_resolve_through_the_audit_map() -> None:
+    """A re-fused document must not keep an id that now names something else.
+
+    Fused ids are minted as `page-{n}-element-{k}`, so any earlier fusion or
+    `analyze` output reloaded through the `json` provider arrives already using
+    that namespace. Because clustering re-numbers elements by fused reading
+    order, treating such an id as already-final pointed a split table's
+    `continued_to` at whatever ended up in that slot.
+    """
+
+    def element(
+        engine: str,
+        element_id: str,
+        text: str,
+        box: tuple[float, float, float, float],
+        *,
+        order: int,
+        relationships: Relationship | None = None,
+    ) -> Element:
+        return _observation(
+            engine,
+            element_id,
+            text,
+            box,
+            kind=ElementType.TABLE,
+            relationships=relationships,
+        ).model_copy(update={"reading_order": order})
+
+    # A prior fusion output: its own ids already look like fused ids.
+    prior = Document(
+        id="prior-fusion",
+        pages=[
+            Page(
+                id="page-1",
+                number=1,
+                width=600,
+                height=800,
+                elements=[
+                    element(
+                        "json",
+                        "page-1-element-1",
+                        "Table part one",
+                        (50, 600, 550, 760),
+                        order=0,
+                        relationships=Relationship(continued_to="page-2-element-1"),
+                    )
+                ],
+            ),
+            Page(
+                id="page-2",
+                number=2,
+                width=600,
+                height=800,
+                elements=[
+                    element(
+                        "json",
+                        "page-2-element-1",
+                        "Table part two",
+                        (50, 60, 550, 220),
+                        order=1,
+                        relationships=Relationship(continued_from="page-1-element-1"),
+                    ),
+                    element(
+                        "json",
+                        "page-2-element-2",
+                        "Unrelated header table",
+                        (50, 10, 550, 50),
+                        order=0,
+                    ),
+                ],
+            ),
+        ],
+    )
+    # A second engine sees the same three tables under its own ids.
+    other = Document(
+        id="mineru-document",
+        pages=[
+            Page(
+                id="mineru-page-1",
+                number=1,
+                width=600,
+                height=800,
+                elements=[element("mineru", "m-1", "Table part one", (50, 600, 550, 760), order=0)],
+            ),
+            Page(
+                id="mineru-page-2",
+                number=2,
+                width=600,
+                height=800,
+                elements=[
+                    element("mineru", "m-2", "Table part two", (50, 60, 550, 220), order=1),
+                    element("mineru", "m-3", "Unrelated header table", (50, 10, 550, 50), order=0),
+                ],
+            ),
+        ],
+    )
+
+    fused = fuse_documents([prior, other])
+    by_id = {element.id: element for page in fused.pages for element in page.elements}
+    continuation = by_id["page-1-element-1"].relationships.continued_to
+
+    # Reading order puts the header first, so the continuation moved slots.
+    assert by_id["page-2-element-1"].text == "Unrelated header table"
+    assert continuation is not None
+    assert by_id[continuation].text == "Table part two"
+
+
 def test_unknown_missing_text_predicate_is_symmetric_against_text() -> None:
     unknown = _observation(
         "unknown-engine",
@@ -311,6 +470,39 @@ def test_sequence_similarity_score_is_symmetric_for_order_sensitive_inputs() -> 
     )
 
     assert forward == reverse
+
+
+@pytest.mark.parametrize(
+    ("left_form", "right_form"),
+    list(itertools.product(("NFC", "NFD"), repeat=2)),
+)
+def test_providers_disagreeing_on_unicode_composition_still_corroborate(
+    left_form: str,
+    right_form: str,
+) -> None:
+    """One reading in two composition forms must fuse, not duplicate.
+
+    Providers do not agree on Unicode composition, and Vietnamese carries a
+    diacritic on most syllables, so a decomposed reading is 76 code points
+    where the precomposed one is 58.  Comparing the raw strings scored the
+    identical reading at 0.69 and split it into two elements, which both
+    duplicated the paragraph in the rendered document and destroyed the
+    cross-provider corroboration the fusion stage exists to produce.
+    """
+
+    heading = "Cộng hòa xã hội chủ nghĩa Việt Nam Độc lập Tự do Hạnh phúc"
+    box = (50.0, 50.0, 550.0, 80.0)
+    left = _document("paddleocr", unicodedata.normalize(left_form, heading), box)
+    right = _document("mineru", unicodedata.normalize(right_form, heading), box)
+
+    fused = fuse_documents([left, right])
+
+    (element,) = fused.pages[0].elements
+    assert element.text is not None
+    assert unicodedata.normalize("NFC", element.text) == unicodedata.normalize("NFC", heading)
+    assert element.provenance is not None
+    contributors = sorted(record.engine for record in element.provenance.contributors)
+    assert contributors == ["mineru", "paddleocr"]
 
 
 def test_missing_provenance_identity_uses_document_but_not_page_id() -> None:
@@ -452,17 +644,52 @@ def test_cardinality_assignment_rejects_ragged_score_rows() -> None:
         maximum_cardinality_score_assignment([[float("nan")]])
 
 
-def test_oversized_different_text_is_safely_split_without_quadratic_match() -> None:
-    left = _page(
-        "a",
-        [_observation("a", "left", "x" * 3_000 + "a", (0, 0, 100, 20))],
-    )
-    right = _page(
-        "b",
-        [_observation("b", "right", "x" * 3_000 + "b", (0, 0, 100, 20))],
-    )
+def test_oversized_different_text_is_safely_split_without_quadratic_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long text that really differs is rejected without a quadratic compare.
+
+    The previous fixture used `"x" * 3000 + "a"` against `"x" * 3000 + "b"`,
+    which are 99.97% identical and should fuse; it passed only because any text
+    over the cap was rejected on length alone. Two genuinely different
+    transcriptions share almost no characters, so the cheap character-overlap
+    bound rejects the pair and `SequenceMatcher` is never reached.
+    """
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("oversized dissimilar text must not reach SequenceMatcher")
+
+    monkeypatch.setattr(fusion_clustering, "SequenceMatcher", forbidden)
+    left = _page("a", [_observation("a", "left", "a" * 3_000, (0, 0, 100, 20))])
+    right = _page("b", [_observation("b", "right", "b" * 3_000, (0, 0, 100, 20))])
 
     assert len(fuse_pages([left, right]).elements) == 2
+
+
+def test_two_transcriptions_of_one_long_page_still_fuse() -> None:
+    """The comparison must be driven by content, not by length.
+
+    Rejecting any text over 2,048 characters made the outcome a cliff: the same
+    two provider readings of one full page fused at 2,000 characters and were
+    emitted twice at 2,049, so a dense page lost all cross-provider
+    corroboration and duplicated its whole transcription.
+    """
+
+    base = " ".join(f"Section {index} carries ordinary prose." for index in range(140))
+    assert len(base) > 2_048
+    # An ordinary OCR confusion every few hundred characters.
+    variant = base.replace("carries", "carties").replace("Section 7 ", "Section 7  ")
+
+    left = _page("a", [_observation("olmocr", "left", base, (0, 0, 100, 20))])
+    right = _page("b", [_observation("mistral_ocr", "right", variant, (0, 0, 100, 20))])
+
+    (fused,) = fuse_pages([left, right]).elements
+
+    assert fused.provenance is not None
+    assert sorted(record.engine for record in fused.provenance.contributors) == [
+        "mistral_ocr",
+        "olmocr",
+    ]
 
 
 def test_all_permutations_of_ambiguous_assignment_are_stable() -> None:
@@ -474,3 +701,61 @@ def test_all_permutations_of_ambiguous_assignment_are_stable() -> None:
     expected = fuse_pages(pages).model_dump_json()
     for permutation in itertools.permutations(pages):
         assert fuse_pages(permutation).model_dump_json() == expected
+
+
+def test_providers_reporting_different_coordinate_frames_are_reconciled() -> None:
+    """A points page and a pixels page describe the same paper.
+
+    Nothing reconciled their units, so overlap was measured across mismatched
+    frames: two readings of the same paragraph never intersected and were both
+    emitted, and the fused page took the median of the differing dimensions,
+    leaving one box a third of the way outside its own page.
+    """
+
+    def document(engine: str, width: float, height: float, kind: SourceType) -> Document:
+        return Document(
+            id=f"{engine}-document",
+            pages=[
+                Page(
+                    id="page-1",
+                    number=1,
+                    width=width,
+                    height=height,
+                    source_type=kind,
+                    elements=[
+                        _observation(
+                            engine,
+                            f"{engine}-1",
+                            "The same paragraph seen twice.",
+                            (width * 0.1, height * 0.1, width * 0.9, height * 0.9),
+                            kind=ElementType.PARAGRAPH,
+                        )
+                    ],
+                )
+            ],
+        )
+
+    native = document("native_pdf", 612, 792, SourceType.NATIVE)
+    scanned = document("paddleocr", 1700, 2200, SourceType.SCANNED)
+
+    fused = fuse_documents([native, scanned])
+    page = fused.pages[0]
+    (element,) = page.elements
+
+    # The native points frame is authoritative and is adopted whole.
+    assert (page.width, page.height) == (612.0, 792.0)
+    assert element.bbox.x1 <= page.width
+    assert element.bbox.y1 <= page.height
+    assert element.provenance is not None
+    assert sorted(record.engine for record in element.provenance.contributors) == [
+        "native_pdf",
+        "paddleocr",
+    ]
+    reference = page.metadata["fusion"]["reference_frame"]
+    assert (reference["width"], reference["height"]) == (612.0, 792.0)
+    assert len(reference["rescaled"]) == 1
+
+    # The choice must not depend on the order the providers were passed.
+    forward = fuse_documents([native, scanned]).model_dump_json()
+    reverse = fuse_documents([scanned, native]).model_dump_json()
+    assert forward == reverse

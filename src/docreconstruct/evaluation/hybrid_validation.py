@@ -91,6 +91,24 @@ _NARY_SOURCE = re.compile(r"\\(?P<command>oint|int|sum|prod)(?![A-Za-z])")
 _INTEGRAL_SOURCE = re.compile(r"\\(?:oint|int)(?![A-Za-z])(?P<limits>\s*\\limits(?![A-Za-z]))?")
 _NATIVE_DELIMITER_SOURCE = re.compile(r"\\(?:left|bigl|Bigl|biggl|Biggl)\b")
 _BODY_COLUMNS_CAPTION = re.compile(r"^docreconstruct:body-columns-(?P<count>\d+)$")
+
+
+def _is_layout_furniture(table: ElementTree.Element) -> bool:
+    """Report whether a table is this renderer's own layout scaffolding.
+
+    The renderer builds borderless tables to place a split masthead or a
+    multi-column body, and tags them.  They carry no Markdown table, so
+    counting them towards the content tables let a document whose real tables
+    had all degraded into paragraphs still satisfy the gate.
+    """
+
+    caption = table.find(f"{_WORD}tblPr/{_WORD}tblCaption")
+    if caption is None:
+        return False
+    value = caption.get(_WORD + "val", "")
+    return value == "docreconstruct:split-masthead" or bool(_BODY_COLUMNS_CAPTION.fullmatch(value))
+
+
 _BODY_FOREGROUND_MIN_RATIO = 0.30
 _SOURCE_VISUAL_SLOT_MIN_COVERAGE = 0.85
 _NARY_SYMBOLS = {"int": "∫", "oint": "∮", "sum": "∑", "prod": "∏"}
@@ -198,9 +216,18 @@ def _inline_projection(value: str) -> str:
     )
 
 
-def _markdown_projection(content: MarkdownContent) -> str:
+def _markdown_projection(
+    content: MarkdownContent,
+    *,
+    only: set[str] | None = None,
+    exclude: set[str] | None = None,
+) -> str:
     parts: list[str] = []
     for block in content.blocks:
+        if only is not None and block.id not in only:
+            continue
+        if exclude is not None and block.id in exclude:
+            continue
         if block.kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.RULE}:
             continue
         if block.kind is MarkdownBlockKind.TABLE:
@@ -1044,7 +1071,7 @@ def _expected_layout_furniture(
     content: MarkdownContent,
     layout: ScanDocumentLayout,
     plan: HybridLayoutPlan,
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], set[str]]:
     # Keep structural QA on the exact same generic footer classifier as the
     # renderer.  The local import avoids coupling module initialization while
     # remaining cycle-safe (hybrid_docx does not import the evaluator).
@@ -1058,6 +1085,7 @@ def _expected_layout_furniture(
     }
     expected_mastheads = 0
     expected_footers: list[str] = []
+    footer_block_ids: set[str] = set()
     for page, page_plan in zip(layout.pages, plan.pages, strict=False):
         page_blocks = [blocks[placement.block_id] for placement in page_plan.placements]
         section_index = next(
@@ -1077,7 +1105,8 @@ def _expected_layout_furniture(
             expected_mastheads += 1
         _body, footer = _partition_source_footer(page_blocks, placements, page)
         expected_footers.extend(block.text for block in footer)
-    return expected_mastheads, expected_footers
+        footer_block_ids.update(block.id for block in footer)
+    return expected_mastheads, expected_footers, footer_block_ids
 
 
 def _body_flow_metrics(
@@ -1637,7 +1666,11 @@ def validate_hybrid(
             for node in relationships.iter(f"{{{_RELATIONSHIPS}}}Relationship")
         )
     cjk_runs, cjk_mapped_runs = _cjk_font_coverage(root)
-    expected_mastheads, expected_footers = _expected_layout_furniture(markdown, scan, plan)
+    expected_mastheads, expected_footers, footer_block_ids = _expected_layout_furniture(
+        markdown,
+        scan,
+        plan,
+    )
     footer_projection = "\n".join(_docx_projection(footer) for footer in footer_roots)
     candidate_projection = _normalized(
         "\n".join(value for value in (_docx_projection(root), footer_projection) if value)
@@ -1651,15 +1684,27 @@ def validate_hybrid(
         and int(page.metadata["column_count"]) >= 2
         for page in scan.pages
     )
-    content_projection_matches = (
-        source_bag == candidate_bag
-        if furniture_reorders_content or native_columns_reorder_content
-        else source_projection == candidate_projection
-    )
+    if not furniture_reorders_content and not native_columns_reorder_content:
+        content_projection_matches = source_projection == candidate_projection
+    elif not expected_mastheads and not native_columns_reorder_content:
+        # Relocating a footer is the only permutation here, and exactly which
+        # blocks moved is known.  Collapsing the whole document to a token
+        # multiset for that one reason stopped checking body order at all: a
+        # DOCX with every body paragraph reversed passed with score 1.0 while
+        # the gate's own evidence recorded two different ordered digests.  The
+        # body is compared in order and the relocated footers as a multiset.
+        body_source = _markdown_projection(markdown, exclude=footer_block_ids)
+        footer_source = _markdown_projection(markdown, only=footer_block_ids)
+        content_projection_matches = _normalized(_docx_projection(root)) == body_source and Counter(
+            re.findall(r"\S+", _normalized(footer_projection))
+        ) == Counter(re.findall(r"\S+", footer_source))
+    else:
+        content_projection_matches = source_bag == candidate_bag
     tagged_mastheads = sum(
         node.get(_WORD + "val") == "docreconstruct:split-masthead"
         for node in root.iter(_WORD + "tblCaption")
     )
+    content_tables = sum(not _is_layout_furniture(table) for table in root.iter(_WORD + "tbl"))
     footer_text = _normalized(footer_projection)
     body_text = _docx_projection(root)
     footer_blocks_native = all(
@@ -1915,9 +1960,14 @@ def validate_hybrid(
         ),
         HybridValidationGate(
             name="native_tables",
-            passed=len(list(root.iter(_WORD + "tbl"))) >= len(markdown.table_blocks),
+            passed=content_tables >= len(markdown.table_blocks),
             expected=f">={len(markdown.table_blocks)}",
-            actual=len(list(root.iter(_WORD + "tbl"))),
+            actual=content_tables,
+            detail=(
+                "Tagged masthead and body-column scaffolding is excluded; untagged "
+                "borderless layout wrappers are still counted, so this stays a "
+                "lower bound rather than an exact match."
+            ),
         ),
         HybridValidationGate(
             name="native_split_mastheads",

@@ -427,7 +427,14 @@ def _page_from_tsv(
 ) -> Page:
     lines: OrderedDict[tuple[int, int, int, int], _LineAccumulator] = OrderedDict()
     try:
-        rows = csv.DictReader(io.StringIO(payload), delimiter="\t")
+        # Tesseract's TSV writer neither quotes nor escapes the recognized
+        # text, and `text` is the last column.  With the csv module's default
+        # quoting, a word that merely begins with `"` — an opening double quote
+        # in ordinary prose — puts the reader into a quoted field, where it
+        # swallows every following tab and newline to the end of the file.  The
+        # surviving row still parses, so nothing raises and the rest of the page
+        # is silently gone.
+        rows = csv.DictReader(io.StringIO(payload), delimiter="\t", quoting=csv.QUOTE_NONE)
         for row in rows:
             if row.get("level") != "5":
                 continue

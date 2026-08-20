@@ -36,6 +36,8 @@ from docreconstruct.providers import (
     get_registry,
     registry,
 )
+from docreconstruct.providers._utils import text_from
+from docreconstruct.reconstruction.evidence_matching import _orthogonal_page_box
 
 
 def test_builtin_registry_and_custom_registry() -> None:
@@ -279,6 +281,46 @@ def test_paddleocr_vl_ordered_page_envelopes_preserve_four_pages() -> None:
     )
 
 
+def test_inline_spans_join_without_injected_line_breaks() -> None:
+    """Spans are fragments within one visual line, not separate lines.
+
+    Joining them with a newline split a single line into several and inserted
+    whitespace the document does not contain — which the matcher then normalizes
+    into a space, so an inline equation or a CJK run never aligned. Adjacent
+    duplicate removal is wrong at that level too: "1", "0", "0" is 100.
+    """
+
+    line_with_equation = {
+        "type": "text",
+        "bbox": [0, 0, 100, 20],
+        "lines": [
+            {
+                "spans": [
+                    {"type": "text", "content": "The value is "},
+                    {"type": "inline_equation", "content": "x^{2}"},
+                    {"type": "text", "content": " meters."},
+                ]
+            }
+        ],
+    }
+
+    assert text_from(line_with_equation) == "The value is x^{2} meters."
+    assert (
+        text_from({"lines": [{"spans": [{"content": "汉字"}, {"content": "文本"}]}]}) == "汉字文本"
+    )
+    assert text_from({"lines": [{"spans": [{"content": c} for c in "100"]}]}) == "100"
+    # Separate lines still separate.
+    assert (
+        text_from(
+            {"lines": [{"spans": [{"content": "First"}]}, {"spans": [{"content": "Second"}]}]}
+        )
+        == "First\nSecond"
+    )
+    # An Azure/Textract-style offset span list carries no text and must stay inert.
+    assert text_from({"content": "abc", "spans": [{"offset": 0, "length": 3}]}) == "abc"
+    assert text_from({"spans": [{"offset": 0, "length": 3}]}) is None
+
+
 def test_mineru_middle_json_and_content_list_shapes() -> None:
     middle_json = {
         "pdf_info": [
@@ -365,6 +407,55 @@ def test_native_pdf_preserves_embedded_image_bytes_when_pymupdf_is_available() -
     assert image.metadata["image"]["bytes"].startswith(b"\x89PNG")
     assert image.metadata["image"]["mime_type"] == "image/png"
     assert Document.model_validate_json(document.model_dump_json()) == document
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_native_pdf_page_frame_matches_its_span_coordinates(rotation: int) -> None:
+    """Page dimensions and element boxes must share one coordinate frame.
+
+    PyMuPDF's `page.rect` is already rotated but `get_text` reports every bbox
+    in the unrotated frame, and the IR pairs unrotated page dimensions with
+    `Page.rotation`. Reporting the rotated rect mixed the two, so on a quarter
+    turn every box was reflected about the wrong axis and the declared page
+    size was the transpose of the real one.
+    """
+
+    fitz = pytest.importorskip("pymupdf")
+    pdf = fitz.open()
+    pdf_page = pdf.new_page(width=200, height=400)
+    pdf_page.insert_text((20, 30), "Native text", fontsize=12)
+    if rotation:
+        pdf_page.set_rotation(rotation)
+    pdf_bytes = pdf.tobytes()
+    pdf.close()
+
+    # PyMuPDF's own transform is the reference for display space.
+    with fitz.open(stream=pdf_bytes, filetype="pdf") as reference:
+        reference_page = reference[0]
+        raw = next(
+            block["bbox"]
+            for block in reference_page.get_text("dict")["blocks"]
+            if block.get("type") == 0
+        )
+        mapped = fitz.Rect(raw) * reference_page.rotation_matrix
+        expected_box = (
+            min(mapped.x0, mapped.x1),
+            min(mapped.y0, mapped.y1),
+            max(mapped.x0, mapped.x1),
+            max(mapped.y0, mapped.y1),
+        )
+        expected_frame = (reference_page.rect.width, reference_page.rect.height)
+
+    page = NativePDFProvider().parse(pdf_bytes).document.pages[0]
+    element = next(item for item in page.elements if item.text)
+    projected = _orthogonal_page_box(page, element.bbox)
+
+    assert projected is not None
+    box, frame_width, frame_height = projected
+    assert (page.width, page.height) == (200.0, 400.0)
+    assert page.rotation == float(rotation)
+    assert (frame_width, frame_height) == pytest.approx(expected_frame)
+    assert (box.x0, box.y0, box.x1, box.y1) == pytest.approx(expected_box, abs=1e-3)
 
 
 @pytest.mark.parametrize("provider", [PaddleOCRProvider(), MinerUProvider(), OlmOCRProvider()])

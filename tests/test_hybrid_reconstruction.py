@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 from docx import Document as WordDocument
 from PIL import Image
 
+from docreconstruct.evaluation.hybrid_validation import validate_hybrid
 from docreconstruct.exceptions import UnsupportedInputError
 from docreconstruct.reconstruction import (
     finalize_hybrid_reconstruction,
@@ -26,11 +28,15 @@ from docreconstruct.reconstruction.asset_matching import (
     resolve_markdown_asset,
 )
 from docreconstruct.reconstruction.hybrid_docx import (
+    _add_native_table,
     _balanced_editable_column_streams,
     _dialogue_story_boundary,
+    _duplicate_figure_annotation_ids,
     _new_paragraph,
+    _render_image_table_pair,
     _source_column_ink_capacities,
     _source_figure_bytes,
+    _wrap_column_blocks,
     render_hybrid_docx,
 )
 from docreconstruct.reconstruction.hybrid_planner import (
@@ -47,6 +53,7 @@ from docreconstruct.reconstruction.markdown_content import (
     MarkdownContent,
     parse_markdown_content,
 )
+from docreconstruct.reconstruction.markdown_inline import parse_markdown_inline
 from docreconstruct.reconstruction.math_omml import build_omml
 from docreconstruct.reconstruction.scan_layout import (
     PixelBox,
@@ -242,11 +249,18 @@ def test_tinted_paper_becomes_native_word_background_not_a_page_scan(tmp_path: P
     payload = render_hybrid_docx(content, scan, plan, [])
     with zipfile.ZipFile(io.BytesIO(payload)) as package:
         root = ElementTree.fromstring(package.read("word/document.xml"))
+        settings = ElementTree.fromstring(package.read("word/settings.xml"))
         assert not any(name.startswith("word/media/") for name in package.namelist())
     word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     background = root.find(f"{word}background")
     assert background is not None
     assert background.get(f"{word}color") == color
+    # `w:background` is inert on its own; Word only paints it when settings.xml
+    # enables background shapes, so the colour was recorded and never shown.
+    assert settings.find(f"{word}displayBackgroundShape") is not None
+    # settings.xml is an xsd:sequence, so the flag has to sit in the right place.
+    order = [child.tag.split("}")[-1] for child in settings]
+    assert order.index("displayBackgroundShape") < order.index("proofState")
 
 
 def test_saved_figure_with_wrong_aspect_recrops_authoritative_source_box(
@@ -385,6 +399,62 @@ def test_markdown_parser_retains_solution_groups_lists_and_display_math(tmp_path
     assert content.blocks[2].group_id == content.blocks[1].group_id
     assert content.blocks[4].starts_group
     assert content.blocks[4].group_id != content.blocks[1].group_id
+
+
+def test_consecutive_list_items_stay_separate_blocks(tmp_path: Path) -> None:
+    """Each marker starts its own block instead of one run-on paragraph.
+
+    Every list line used to fall through to the paragraph buffer, which joined
+    them with spaces, so a four-item list reached the renderer as one justified
+    Word paragraph classified by its first marker alone.
+    """
+
+    markdown = tmp_path / "lists.md"
+    markdown.write_text(
+        "- First item\n"
+        "- Second item\n"
+        "  wrapped onto another line\n"
+        "  - Nested item\n"
+        "- Third item\n"
+        "\n"
+        "1. Numbered one\n"
+        "2. Numbered two\n",
+        encoding="utf-8",
+    )
+
+    blocks = parse_markdown_content(markdown).blocks
+
+    assert [block.text for block in blocks] == [
+        "- First item",
+        "- Second item wrapped onto another line",
+        "- Nested item",
+        "- Third item",
+        "1. Numbered one",
+        "2. Numbered two",
+    ]
+    assert all(block.kind is MarkdownBlockKind.LIST_ITEM for block in blocks[:4])
+    # Consecutive numbered items each open their own group; merging them left
+    # only the first number visible to `_group_label`.
+    assert blocks[4].starts_group
+    assert blocks[5].starts_group
+    assert blocks[4].group_id != blocks[5].group_id
+
+
+def test_prose_around_a_list_is_not_absorbed_into_it(tmp_path: Path) -> None:
+    markdown = tmp_path / "mixed.md"
+    markdown.write_text(
+        "Intro prose.\n- Only item\nBack to prose.\n\n3.14159 stays prose.\n",
+        encoding="utf-8",
+    )
+
+    blocks = parse_markdown_content(markdown).blocks
+
+    assert [(block.kind, block.text) for block in blocks] == [
+        (MarkdownBlockKind.PARAGRAPH, "Intro prose."),
+        (MarkdownBlockKind.LIST_ITEM, "- Only item"),
+        (MarkdownBlockKind.PARAGRAPH, "Back to prose."),
+        (MarkdownBlockKind.PARAGRAPH, "3.14159 stays prose."),
+    ]
 
 
 def test_latex_math_becomes_editable_office_math() -> None:
@@ -1949,6 +2019,370 @@ def test_scan_analysis_recovers_dense_lines_and_split_masthead(tmp_path: Path) -
     assert len(page.text_lines) >= 20
     assert len(page.line_bands) == len(page.text_lines)
     assert page.regions == []
+
+
+# ECMA-376 child order for the property containers this renderer writes into.
+_PROPERTY_SEQUENCES = {
+    "w:pPr": (
+        "w:pStyle",
+        "w:keepNext",
+        "w:keepLines",
+        "w:pageBreakBefore",
+        "w:framePr",
+        "w:widowControl",
+        "w:numPr",
+        "w:suppressLineNumbers",
+        "w:pBdr",
+        "w:shd",
+        "w:tabs",
+        "w:suppressAutoHyphens",
+        "w:kinsoku",
+        "w:wordWrap",
+        "w:overflowPunct",
+        "w:topLinePunct",
+        "w:autoSpaceDE",
+        "w:autoSpaceDN",
+        "w:bidi",
+        "w:adjustRightInd",
+        "w:snapToGrid",
+        "w:spacing",
+        "w:ind",
+        "w:contextualSpacing",
+        "w:mirrorIndents",
+        "w:suppressOverlap",
+        "w:jc",
+        "w:textDirection",
+        "w:textAlignment",
+        "w:textboxTightWrap",
+        "w:outlineLvl",
+        "w:divId",
+        "w:cnfStyle",
+        "w:rPr",
+        "w:sectPr",
+        "w:pPrChange",
+    ),
+    "w:tcPr": (
+        "w:cnfStyle",
+        "w:tcW",
+        "w:gridSpan",
+        "w:hMerge",
+        "w:vMerge",
+        "w:tcBorders",
+        "w:shd",
+        "w:noWrap",
+        "w:tcMar",
+        "w:textDirection",
+        "w:tcFitText",
+        "w:vAlign",
+        "w:hideMark",
+        "w:headers",
+        "w:cellIns",
+        "w:cellDel",
+        "w:cellMerge",
+        "w:tcPrChange",
+    ),
+    "w:tblPr": (
+        "w:tblStyle",
+        "w:tblpPr",
+        "w:tblOverlap",
+        "w:bidiVisual",
+        "w:tblStyleRowBandSize",
+        "w:tblStyleColBandSize",
+        "w:tblW",
+        "w:jc",
+        "w:tblCellSpacing",
+        "w:tblInd",
+        "w:tblBorders",
+        "w:shd",
+        "w:tblLayout",
+        "w:tblCellMar",
+        "w:tblLook",
+        "w:tblCaption",
+        "w:tblDescription",
+        "w:tblPrChange",
+    ),
+}
+
+
+def test_generated_property_containers_follow_the_ooxml_child_order(tmp_path: Path) -> None:
+    """Word's strict parser rejects an out-of-sequence property container.
+
+    `w:pPr`, `w:tcPr` and `w:tblPr` are `xsd:sequence`, so appending a border or
+    a shading element after python-docx has written a later-ordered sibling
+    makes the document invalid. Word reports "unreadable content" and repairs it
+    by discarding the property, so the thematic rule loses its line and table
+    borders and header shading disappear. LibreOffice is lenient, which is why a
+    rendered comparison does not catch it.
+    """
+
+    pytest.importorskip("numpy")
+    markdown = tmp_path / "ruled.md"
+    markdown.write_text(
+        "Intro paragraph text here.\n\n---\n\n"
+        "<table><tr><td>Head A</td><td>Head B</td></tr>"
+        "<tr><td>one</td><td>two</td></tr></table>\n\nTail paragraph.\n",
+        encoding="utf-8",
+    )
+    from PIL import ImageDraw
+
+    image = Image.new("RGB", (620, 877), "white")
+    draw = ImageDraw.Draw(image)
+    for index in range(8):
+        top = 60 + index * 70
+        draw.rectangle((55, top, 500, top + 28), fill="black")
+    layout = tmp_path / "ruled.png"
+    image.save(layout)
+    output = tmp_path / "ruled.docx"
+
+    reconstruct_hybrid(markdown, layout, output=output)
+
+    with zipfile.ZipFile(output) as package:
+        document_xml = package.read("word/document.xml").decode("utf-8")
+
+    inspected = 0
+    for container, sequence in _PROPERTY_SEQUENCES.items():
+        for match in re.finditer(rf"<{container}>(.*?)</{container}>", document_xml, re.S):
+            present = [
+                tag for tag in re.findall(r"<(w:[A-Za-z]+)", match.group(1)) if tag in sequence
+            ]
+            inspected += 1
+            assert present == sorted(present, key=sequence.index), (
+                f"{container} children out of schema order: {present}"
+            )
+    assert inspected >= 3
+    # CT_Shd requires w:val; "clear" is the plain solid fill.
+    assert 'w:val="clear"' in document_xml
+
+
+def test_column_wrapping_never_breaks_a_protected_inline_span() -> None:
+    """A hard wrap must not split inline math, code, or a URL.
+
+    Every construct `parse_markdown_inline` protects is anchored to a single
+    line, so a break inside one destroys it: the formula becomes literal dollar
+    signs and a fragment of it is promoted to an unrelated equation. Plain prose
+    must still wrap, otherwise the two-column layout loses its line budget.
+    """
+
+    def block(text: str) -> MarkdownBlock:
+        return MarkdownBlock(id="md-1", index=0, kind=MarkdownBlockKind.PARAGRAPH, text=text)
+
+    def math_of(text: str) -> list[str]:
+        return [segment.value for segment in parse_markdown_inline(text) if segment.is_math]
+
+    formula = r"Total energy is $E = mc^2 + \frac{1}{2} m v^2$ everywhere in the derivation."
+    wrapped = _wrap_column_blocks([block(formula)], characters_per_line=28)[0]
+
+    assert wrapped.text == formula
+    assert math_of(wrapped.text) == math_of(formula)
+    assert math_of(formula) == [r"E = mc^2 + \frac{1}{2} m v^2"]
+
+    # A code span too long to fit one line, whose contents would otherwise be
+    # re-read as TeX once a break lands inside it, is protected too.
+    code = "Run `x_{1} and y_{2} and z_{3} and w_{4} here` now to finish the line."
+    assert math_of(code) == []
+    assert _wrap_column_blocks([block(code)], characters_per_line=28)[0].text == code
+
+    prose = (
+        "This is ordinary prose that is long enough to be wrapped across "
+        "several lines by the column layout."
+    )
+    wrapped_prose = _wrap_column_blocks([block(prose)], characters_per_line=28)[0]
+
+    assert "\n" in wrapped_prose.text
+    assert wrapped_prose.text.replace("\n", " ") == prose
+
+
+def test_merged_table_cells_become_native_word_merges(tmp_path: Path) -> None:
+    """A spanned source cell must not become a grid of boxed empties.
+
+    The HTML parser resolved `colspan`/`rowspan` into a rectangular text grid
+    and then discarded the spans, so the renderer emitted a fully gridded table:
+    a header meant to span three columns sat in a narrow box beside two empty
+    boxed cells, and a row-spanning label had an empty boxed cell beneath it.
+    """
+
+    markdown = tmp_path / "spans.md"
+    markdown.write_text(
+        "<table><tr><th colspan='3'>Quarterly results</th></tr>"
+        "<tr><td rowspan='2'>North</td><td>Q1</td><td>10</td></tr>"
+        "<tr><td>Q2</td><td>12</td></tr></table>\n",
+        encoding="utf-8",
+    )
+    block = parse_markdown_content(markdown).blocks[0]
+
+    assert block.table_rows == [
+        ["Quarterly results", "", ""],
+        ["North", "Q1", "10"],
+        ["", "Q2", "12"],
+    ]
+    assert block.table_spans == [
+        [(3, 1), (0, 0), (0, 0)],
+        [(1, 2), (1, 1), (1, 1)],
+        [(0, 0), (1, 1), (1, 1)],
+    ]
+
+    document = WordDocument()
+    _add_native_table(document, block, available_width=6.0, size=11.0, line_height=13.0)
+
+    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    table = next(iter(ElementTree.fromstring(document.element.xml).iter(f"{namespace}tbl")))
+    rows = list(table.iter(f"{namespace}tr"))
+
+    # The spanning header is one cell, not three.
+    assert len(list(rows[0].iter(f"{namespace}tc"))) == 1
+    header = next(iter(rows[0].iter(f"{namespace}tc")))
+    grid_span = header.find(f"./{namespace}tcPr/{namespace}gridSpan")
+    assert grid_span is not None
+    assert grid_span.get(f"{namespace}val") == "3"
+
+    # The row-spanning label is a vertical merge, not a label over an empty box.
+    anchor = next(iter(rows[1].iter(f"{namespace}tc")))
+    continuation = next(iter(rows[2].iter(f"{namespace}tc")))
+    assert anchor.find(f"./{namespace}tcPr/{namespace}vMerge") is not None
+    assert anchor.find(f"./{namespace}tcPr/{namespace}vMerge").get(f"{namespace}val") == "restart"
+    assert continuation.find(f"./{namespace}tcPr/{namespace}vMerge") is not None
+
+
+def test_plain_table_without_spans_is_rendered_exactly_as_before(tmp_path: Path) -> None:
+    markdown = tmp_path / "plain.md"
+    markdown.write_text(
+        "<table><tr><th>A</th><th>B</th></tr><tr><td>C</td><td>D</td></tr></table>\n",
+        encoding="utf-8",
+    )
+    block = parse_markdown_content(markdown).blocks[0]
+
+    assert block.table_spans == [[(1, 1), (1, 1)], [(1, 1), (1, 1)]]
+
+    document = WordDocument()
+    _add_native_table(document, block, available_width=6.0, size=11.0, line_height=13.0)
+    xml = document.element.xml
+
+    assert "gridSpan" not in xml
+    assert "vMerge" not in xml
+
+
+def test_image_table_pair_keeps_the_other_visuals_in_its_group() -> None:
+    """A third figure in the group must still reach the document.
+
+    The surviving flow was rebuilt by excluding every block whose kind is an
+    image or a table, not just the two the pair renders, so any additional
+    figure or table was absent from the pair, from `pre` and from `post`, and
+    disappeared. No gate catches it: content projection skips image blocks, and
+    visual slot coverage is measured on the plan rather than the render.
+    """
+
+    page = ScanPageLayout(
+        number=1,
+        width=1000,
+        height=1400,
+        pdf_width=612,
+        pdf_height=792,
+        content_bbox=PixelBox(x0=50, y0=50, x1=950, y1=1350),
+        line_pitch=20.0,
+        image=Image.new("RGB", (1000, 1400), "white"),
+        metadata={"source_kind": "pdf"},
+    )
+    layout = ScanDocumentLayout(source="layout.pdf", pages=[page])
+    kinds = [MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE, MarkdownBlockKind.IMAGE]
+    blocks = [
+        MarkdownBlock(
+            id=f"md-{index + 1}",
+            index=index,
+            kind=kind,
+            text="",
+            table_rows=[["a", "b"], ["c", "d"]] if kind is MarkdownBlockKind.TABLE else [],
+        )
+        for index, kind in enumerate(kinds)
+    ]
+    # The first figure and the table sit side by side; the second figure is below.
+    boxes = {
+        "md-1": PixelBox(x0=60, y0=100, x1=480, y1=400),
+        "md-2": PixelBox(x0=520, y0=100, x1=940, y1=400),
+        "md-3": PixelBox(x0=60, y0=500, x1=480, y1=800),
+    }
+    placements = {
+        block.id: HybridBlockPlacement(
+            block_id=block.id,
+            block_index=block.index,
+            page_number=1,
+            source_bbox=boxes[block.id],
+        )
+        for block in blocks
+    }
+
+    document = WordDocument()
+    rendered = _render_image_table_pair(
+        document,
+        blocks,
+        placements,
+        width=6.0,
+        size=11.0,
+        line_height=1.15,
+        asset_bytes={},
+        layout=layout,
+    )
+
+    assert rendered
+    assert document.element.xml.count("<pic:pic") == 2
+
+
+def _text_only_exam(tmp_path: Path) -> tuple[Path, Path]:
+    """A Vietnamese exam with no figure anywhere, as reviewed Markdown + scan."""
+
+    from PIL import ImageDraw
+
+    markdown = tmp_path / "exam.md"
+    markdown.write_text(
+        "Câu 5: Tính giá trị của biểu thức sau\n\n"
+        "A. 1\n\nB. 2\n\nC. 3\n\nD. 4\n\n"
+        "Hình 2\n\n"
+        "Câu 6: Cho hàm số y = f(x)\n\n"
+        "A. 5\n\nB. 6\n",
+        encoding="utf-8",
+    )
+    layout = tmp_path / "exam.png"
+    image = Image.new("RGB", (620, 877), "white")
+    draw = ImageDraw.Draw(image)
+    for index in range(9):
+        top = 60 + index * 60
+        draw.rectangle((55, top, 515 - (index % 3) * 40, top + 26), fill="black")
+    image.save(layout)
+    return markdown, layout
+
+
+def test_option_labels_survive_when_no_figure_is_rendered(tmp_path: Path) -> None:
+    """Reviewed Markdown must not be deleted on the promise of absent pixels.
+
+    The duplicate-annotation rule assumes a matched figure already carries the
+    label's pixels. A text-only exam matches the same shape — a short
+    unpunctuated line after the last option, before the next question — so the
+    text was deleted with no figure reproducing it, and the
+    `native_content_projection` gate, which still requires that text, failed.
+    """
+
+    pytest.importorskip("numpy")
+    markdown, layout = _text_only_exam(tmp_path)
+    content = parse_markdown_content(markdown)
+    annotation = next(block for block in content.blocks if block.text == "Hình 2")
+
+    # The shape still matches; only the missing figure withholds the deletion.
+    assert _duplicate_figure_annotation_ids(content.blocks, figures_rendered=True) == {
+        annotation.id
+    }
+    assert _duplicate_figure_annotation_ids(content.blocks, figures_rendered=False) == set()
+
+    output = tmp_path / "exam.docx"
+    reconstruct_hybrid(markdown, layout, output=output)
+    with zipfile.ZipFile(output) as package:
+        root = ElementTree.fromstring(package.read("word/document.xml"))
+    namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    visible = "".join(node.text or "" for node in root.iter(f"{namespace}t"))
+
+    assert "Hình 2" in visible
+
+    report = validate_hybrid(markdown, layout, output)
+    projection = next(gate for gate in report.gates if gate.name == "native_content_projection")
+    assert projection.passed
 
 
 def test_structural_roles_and_masthead_rendering_remain_generic(tmp_path: Path) -> None:

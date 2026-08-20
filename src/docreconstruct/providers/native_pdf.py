@@ -258,10 +258,20 @@ class NativePDFProvider(Provider):
                     )
                     reading_order += 1
 
-        rect = pdf_page.rect
+        # `page.rect` is already rotated, but `get_text` reports every bbox in
+        # the unrotated frame, and `Element.bbox` is filled from those. The IR
+        # contract pairs unrotated page dimensions with `Page.rotation`, which
+        # is what `_orthogonal_page_box` applies, so reporting the rotated rect
+        # here mixed two frames: on a `/Rotate 90` page each box was reflected
+        # about the wrong axis and the declared page size was the transpose of
+        # the real one, which then failed the projector's aspect check and
+        # dropped every positioned box.
+        rect = pdf_page.rect * pdf_page.derotation_matrix
+        page_width = abs(float(rect.width))
+        page_height = abs(float(rect.height))
         has_text = any(element.text for element in elements)
         raster_coverage = (
-            image_area / float(rect.width * rect.height) if rect.width and rect.height else 0.0
+            image_area / (page_width * page_height) if page_width and page_height else 0.0
         )
         if has_text and raster_coverage >= 0.25:
             source_type = SourceType.HYBRID
@@ -272,8 +282,8 @@ class NativePDFProvider(Provider):
         return Page(
             id=f"page-{page_number}",
             number=page_number,
-            width=float(rect.width),
-            height=float(rect.height),
+            width=page_width,
+            height=page_height,
             rotation=float(pdf_page.rotation or 0),
             elements=elements,
             source_type=source_type,

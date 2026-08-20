@@ -80,11 +80,22 @@ class _TableHTMLParser(html.parser.HTMLParser):
         if self.in_cell and not self.suppressed:
             self.cell_parts.append(data)
 
-    def grid(self) -> list[list[str]]:
+    def _layout(self) -> tuple[list[list[str]], list[list[tuple[int, int]]]]:
+        """Resolve the rows into a rectangular grid plus each slot's span.
+
+        A slot is either an anchor carrying its own ``(colspan, rowspan)`` — an
+        ordinary cell is ``(1, 1)`` — or a slot covered by an anchor above or to
+        its left, marked ``(0, 0)``. The text grid alone cannot express that:
+        a covered slot and a genuinely empty cell are both ``""``.
+        """
+
         grid: list[list[str]] = []
+        span_grid: list[list[tuple[int, int]]] = []
         active_rowspans: dict[int, int] = {}
         for source_row in self.rows:
             occupied = set(active_rowspans)
+            covered = set(occupied)
+            anchors: dict[int, tuple[int, int]] = {}
             row: list[str] = []
             if occupied:
                 row.extend("" for _ in range(max(occupied) + 1))
@@ -97,12 +108,21 @@ class _TableHTMLParser(html.parser.HTMLParser):
                 if len(row) < required:
                     row.extend("" for _ in range(required - len(row)))
                 row[column] = text
-                for covered in range(column, column + colspan):
-                    occupied.add(covered)
+                anchors[column] = (colspan, rowspan)
+                for offset in range(column, column + colspan):
+                    occupied.add(offset)
+                    if offset != column:
+                        covered.add(offset)
                     if rowspan > 1:
-                        new_spans[covered] = max(new_spans.get(covered, 0), rowspan - 1)
+                        new_spans[offset] = max(new_spans.get(offset, 0), rowspan - 1)
                 column += colspan
             grid.append(row)
+            span_grid.append(
+                [
+                    (0, 0) if index in covered else anchors.get(index, (1, 1))
+                    for index in range(len(row))
+                ]
+            )
             active_rowspans = {
                 column: remaining - 1
                 for column, remaining in active_rowspans.items()
@@ -111,7 +131,16 @@ class _TableHTMLParser(html.parser.HTMLParser):
             for column, remaining in new_spans.items():
                 active_rowspans[column] = max(active_rowspans.get(column, 0), remaining)
         width = max((len(row) for row in grid), default=0)
-        return [row + [""] * (width - len(row)) for row in grid]
+        return (
+            [row + [""] * (width - len(row)) for row in grid],
+            [spans + [(1, 1)] * (width - len(spans)) for spans in span_grid],
+        )
+
+    def grid(self) -> list[list[str]]:
+        return self._layout()[0]
+
+    def span_grid(self) -> list[list[tuple[int, int]]]:
+        return self._layout()[1]
 
 
 def _rows_from_html(source: str) -> list[list[str]]:
@@ -119,6 +148,34 @@ def _rows_from_html(source: str) -> list[list[str]]:
     parser.feed(source)
     parser.close()
     return parser.grid()
+
+
+def rows_and_spans_from_html(source: str) -> tuple[list[list[str]], list[list[tuple[int, int]]]]:
+    """Return the flattened cell text and, alongside it, each slot's span."""
+
+    parser = _TableHTMLParser()
+    parser.feed(source)
+    parser.close()
+    return parser._layout()
+
+
+def table_spans(element: Any) -> list[list[tuple[int, int]]]:
+    """Return each table slot's ``(colspan, rowspan)``, or ``[]`` when unknown.
+
+    Only the HTML source carries spans; a row/cell list has already been
+    flattened by whoever produced it. An empty result means "render every slot
+    as an ordinary cell", which is what the flattened grid already implies.
+    """
+
+    metadata = element_metadata(element)
+    html_source = metadata.get("table_html", metadata.get("html"))
+    if html_source is None and isinstance(metadata.get("table"), Mapping):
+        html_source = metadata["table"].get("html", metadata["table"].get("table_html"))
+    if isinstance(html_source, str) and html_source.strip():
+        rows, spans = rows_and_spans_from_html(html_source)
+        if rows and any(span != (1, 1) for row in spans for span in row):
+            return spans
+    return []
 
 
 def value(obj: Any, name: str, default: Any = None) -> Any:

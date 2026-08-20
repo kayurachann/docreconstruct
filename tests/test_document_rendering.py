@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from docreconstruct.evaluation import document_rendering
 from docreconstruct.evaluation.document_rendering import (
     _version_probe_executable,
     render_docx_pages,
@@ -193,3 +194,53 @@ def test_successful_render_records_reproducible_renderer_and_page_provenance(
     assert conversion[0] == str(renderer.resolve())
     assert "--headless" in conversion
     assert any(item.startswith("-env:UserInstallation=file:") for item in conversion)
+
+
+def test_renderer_identity_is_probed_once_per_binary_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-establishing an unchanged identity costs a second process launch.
+
+    Every rendered page paid for it. The cache is keyed on the SHA-256 of the
+    bytes rather than a path or a timestamp, so a replaced binary is still
+    probed and the identity in the provenance stays byte-exact.
+    """
+
+    launches: list[str] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        launches.append(command[0])
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="LibreOffice 24.2.7.2 abcdef\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(document_rendering.subprocess, "run", fake_run)
+    document_rendering._probed_version.cache_clear()
+
+    for _ in range(3):
+        assert (
+            document_rendering._probed_version("/opt/office/soffice", "digest-a", 30)
+            == "LibreOffice 24.2.7.2 abcdef"
+        )
+    assert len(launches) == 1
+
+    # Different bytes at the same path must be probed again.
+    launches.clear()
+    document_rendering._probed_version("/opt/office/soffice", "digest-b", 30)
+    assert len(launches) == 1
+
+    # A rejected identity is never cached as a success.
+    def rejecting_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        launches.append(command[0])
+        return subprocess.CompletedProcess(command, 1, stdout="some other tool", stderr="")
+
+    monkeypatch.setattr(document_rendering.subprocess, "run", rejecting_run)
+    launches.clear()
+    for _ in range(2):
+        with pytest.raises(document_rendering._IdentityProbeRejected):
+            document_rendering._probed_version("/opt/other/soffice", "digest-c", 30)
+    assert len(launches) == 2
+    document_rendering._probed_version.cache_clear()
