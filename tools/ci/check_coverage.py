@@ -33,7 +33,14 @@ GATES = (
     CoverageGate(
         "evidence fusion",
         80.0,
-        ("src/docreconstruct/normalization/fusion.py",),
+        (
+            "src/docreconstruct/normalization/fusion.py",
+            "src/docreconstruct/normalization/fusion_assignment.py",
+            "src/docreconstruct/normalization/fusion_clustering.py",
+            "src/docreconstruct/normalization/fusion_reduction.py",
+            "src/docreconstruct/normalization/fusion_sources.py",
+            "src/docreconstruct/normalization/fusion_spatial.py",
+        ),
     ),
     CoverageGate(
         "DOCX rendering and validation",

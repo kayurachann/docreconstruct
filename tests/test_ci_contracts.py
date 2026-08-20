@@ -84,3 +84,15 @@ def test_coverage_policy_reports_every_failed_scope() -> None:
     failures = evaluate_coverage(json.loads(json.dumps(payload)))
     assert len(failures) == len(GATES)
     assert all(gate.name in "\n".join(failures) for gate in GATES)
+
+
+def test_coverage_policy_tracks_every_fusion_implementation_module() -> None:
+    fusion_gate = next(gate for gate in GATES if gate.name == "evidence fusion")
+    assert set(fusion_gate.files or ()) == {
+        "src/docreconstruct/normalization/fusion.py",
+        "src/docreconstruct/normalization/fusion_assignment.py",
+        "src/docreconstruct/normalization/fusion_clustering.py",
+        "src/docreconstruct/normalization/fusion_reduction.py",
+        "src/docreconstruct/normalization/fusion_sources.py",
+        "src/docreconstruct/normalization/fusion_spatial.py",
+    }
