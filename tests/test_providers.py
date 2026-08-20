@@ -36,6 +36,7 @@ from docreconstruct.providers import (
     get_registry,
     registry,
 )
+from docreconstruct.providers._utils import text_from
 from docreconstruct.reconstruction.evidence_matching import _orthogonal_page_box
 
 
@@ -278,6 +279,46 @@ def test_paddleocr_vl_ordered_page_envelopes_preserve_four_pages() -> None:
     assert all(
         page.elements[0].metadata["paddle_section"] == "parsing_res_list" for page in document.pages
     )
+
+
+def test_inline_spans_join_without_injected_line_breaks() -> None:
+    """Spans are fragments within one visual line, not separate lines.
+
+    Joining them with a newline split a single line into several and inserted
+    whitespace the document does not contain — which the matcher then normalizes
+    into a space, so an inline equation or a CJK run never aligned. Adjacent
+    duplicate removal is wrong at that level too: "1", "0", "0" is 100.
+    """
+
+    line_with_equation = {
+        "type": "text",
+        "bbox": [0, 0, 100, 20],
+        "lines": [
+            {
+                "spans": [
+                    {"type": "text", "content": "The value is "},
+                    {"type": "inline_equation", "content": "x^{2}"},
+                    {"type": "text", "content": " meters."},
+                ]
+            }
+        ],
+    }
+
+    assert text_from(line_with_equation) == "The value is x^{2} meters."
+    assert (
+        text_from({"lines": [{"spans": [{"content": "汉字"}, {"content": "文本"}]}]}) == "汉字文本"
+    )
+    assert text_from({"lines": [{"spans": [{"content": c} for c in "100"]}]}) == "100"
+    # Separate lines still separate.
+    assert (
+        text_from(
+            {"lines": [{"spans": [{"content": "First"}]}, {"spans": [{"content": "Second"}]}]}
+        )
+        == "First\nSecond"
+    )
+    # An Azure/Textract-style offset span list carries no text and must stay inert.
+    assert text_from({"content": "abc", "spans": [{"offset": 0, "length": 3}]}) == "abc"
+    assert text_from({"spans": [{"offset": 0, "length": 3}]}) is None
 
 
 def test_mineru_middle_json_and_content_list_shapes() -> None:
