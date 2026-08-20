@@ -1818,15 +1818,21 @@ def _extract_with_pypdf(path: Path) -> list[tuple[Image.Image, float, float]]:
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ProviderUnavailableError("pypdf is not installed") from exc
     reader = PdfReader(str(path))
+    page_objects = list(reader.pages)
+    # Establish that every page qualifies before decoding any of them.  Taking
+    # the length only walks the resource dictionary, while indexing decodes the
+    # raster, so a document that fails on its last page used to decode every
+    # earlier page — holding all of them in memory — and then discard the lot
+    # for the PyMuPDF fallback to rasterize again from scratch.
+    for page in page_objects:
+        if len(page.images) != 1:
+            raise ValueError("PDF page does not contain one unambiguous full-page raster")
     pages: list[tuple[Image.Image, float, float]] = []
-    for page in reader.pages:
+    for page in page_objects:
         media_box = page.mediabox
         pdf_width = float(media_box.width)
         pdf_height = float(media_box.height)
-        images = list(page.images)
-        if len(images) != 1:
-            raise ValueError("PDF page does not contain one unambiguous full-page raster")
-        page_image = images[0].image
+        page_image = page.images[0].image
         if page_image is None:
             raise ValueError("PDF page raster could not be decoded")
         image = page_image.convert("RGB")
