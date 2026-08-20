@@ -53,6 +53,57 @@ def test_scan_page_worker_count_is_conservative(monkeypatch: pytest.MonkeyPatch)
             scan_layout._scan_page_worker_count(4, invalid)  # type: ignore[arg-type]
 
 
+def test_unqualified_pdf_is_rejected_before_any_raster_is_decoded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fast path must not decode pages it is about to discard.
+
+    Taking the length of `page.images` only walks the resource dictionary, but
+    indexing it decodes the raster. Checking one page at a time meant a document
+    that fails on its last page decoded every earlier page, held them all in
+    memory, then threw them away for the PyMuPDF fallback to rasterize again.
+    """
+
+    decoded: list[int] = []
+
+    class _Images:
+        def __init__(self, page_index: int, count: int) -> None:
+            self._page_index = page_index
+            self._count = count
+
+        def __len__(self) -> int:
+            return self._count
+
+        def __getitem__(self, index: int) -> Any:
+            decoded.append(self._page_index)
+            raise AssertionError("no raster should be decoded for a rejected document")
+
+    class _Box:
+        width = 612.0
+        height = 792.0
+
+    class _Page:
+        def __init__(self, page_index: int, count: int) -> None:
+            self.mediabox = _Box()
+            self.images = _Images(page_index, count)
+            self.rotation = 0
+
+    class _Reader:
+        def __init__(self, _path: str) -> None:
+            # Nineteen good pages, then one carrying a second XObject.
+            self.pages = [_Page(index, 1) for index in range(19)] + [_Page(19, 2)]
+
+    monkeypatch.setattr("pypdf.PdfReader", _Reader)
+    path = tmp_path / "mixed.pdf"
+    path.write_bytes(b"%PDF-1.7\n")
+
+    with pytest.raises(ValueError, match="unambiguous full-page raster"):
+        scan_layout._extract_with_pypdf(path)
+
+    assert decoded == []
+
+
 def _rotated_scan_pdf(path: Path, rotation: int) -> None:
     """Write a one-raster scan page carrying ``/Rotate``, as scanners emit."""
 
