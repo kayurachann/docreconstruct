@@ -304,7 +304,12 @@ def test_table_html_is_converted_to_native_rows_with_conservative_spans() -> Non
     markdown = MarkdownRenderer().render(document)
     html_output = HTMLRenderer().render(document)
 
+    # GFM has no span syntax, so Markdown keeps the flattened grid.
     assert "| A | B |  |" in markdown
     assert "|  | C | D |" in markdown
     assert "ignored" not in markdown
-    assert "<th>A</th><th>B</th><th></th>" in html_output
+    # HTML can express the real shape, and flattening it produced boxes the
+    # source never had: an empty header cell beside B, an empty cell under A.
+    assert '<th rowspan="2">A</th><th colspan="2">B</th>' in html_output
+    assert "<tr><td>C</td><td>D</td></tr>" in html_output
+    assert "<th></th>" not in html_output

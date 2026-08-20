@@ -867,6 +867,52 @@ def _borderless_table(
     return table
 
 
+def _table_span_grid(
+    block: MarkdownBlock,
+    *,
+    rows: int,
+    columns: int,
+) -> list[list[tuple[int, int]]]:
+    """Return the block's span grid, or an all-ordinary grid when it has none.
+
+    Only an HTML table source carries spans; Markdown pipe tables and
+    provider-supplied row lists arrive already flattened. A grid that does not
+    match the text grid is discarded rather than trusted, so a malformed source
+    degrades to today's behaviour instead of merging the wrong cells.
+    """
+
+    ordinary = [[(1, 1)] * columns for _ in range(rows)]
+    declared = block.table_spans
+    if len(declared) != rows or any(len(row) != columns for row in declared):
+        return ordinary
+    grid: list[list[tuple[int, int]]] = []
+    for row_index, row in enumerate(declared):
+        resolved: list[tuple[int, int]] = []
+        for column_index, span in enumerate(row):
+            colspan, rowspan = int(span[0]), int(span[1])
+            if (colspan, rowspan) == (0, 0):
+                resolved.append((0, 0))
+                continue
+            colspan = max(1, min(colspan, columns - column_index))
+            rowspan = max(1, min(rowspan, rows - row_index))
+            resolved.append((colspan, rowspan))
+        grid.append(resolved)
+    return grid
+
+
+def _merge_anchors(
+    spans: list[list[tuple[int, int]]],
+) -> list[tuple[int, int, int, int]]:
+    """List the ``(row, column, colspan, rowspan)`` slots that need merging."""
+
+    return [
+        (row_index, column_index, colspan, rowspan)
+        for row_index, row in enumerate(spans)
+        for column_index, (colspan, rowspan) in enumerate(row)
+        if colspan > 1 or rowspan > 1
+    ]
+
+
 def _add_native_table(
     parent: WordDocumentType | _Cell,
     block: MarkdownBlock,
@@ -884,7 +930,14 @@ def _add_native_table(
     table = parent.add_table(rows=len(rows), cols=columns)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     _set_table_borders(table, visible=True, size=4)
+    # Widths are per grid column, so they must be written before any merge makes
+    # `table.cell` return one object for several indices.
     _set_table_widths(table, [available_width / columns] * columns)
+    spans = _table_span_grid(block, rows=len(rows), columns=columns)
+    for row_index, column_index, colspan, rowspan in _merge_anchors(spans):
+        table.cell(row_index, column_index).merge(
+            table.cell(row_index + rowspan - 1, column_index + colspan - 1)
+        )
     source_geometry = _placement_geometry_points(
         placement,
         layout,
@@ -902,6 +955,11 @@ def _add_native_table(
             row_properties.append(OxmlElement("w:cantSplit"))
         _set_row_minimum_height(table.rows[row_index], row_floor)
         for column_index in range(columns):
+            # A merged slot resolves to the same cell object as its anchor, so
+            # filling it again would append a second paragraph and inflate the
+            # row.  Only anchors are written.
+            if spans[row_index][column_index] == (0, 0):
+                continue
             cell = table.cell(row_index, column_index)
             _clear_cell(cell, size=size * 0.78, line_height=row_floor)
             value = row[column_index] if column_index < len(row) else ""
