@@ -10,6 +10,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,20 @@ def find_libreoffice(explicit: str | Path | None = None) -> Path | None:
     )
 
 
+def _pixmap_image(image_module: Any, pixmap: Any) -> Any:
+    """Wrap a PyMuPDF pixmap as a Pillow image without a PNG round-trip."""
+
+    if pixmap.n == 3 and not pixmap.alpha and pixmap.stride == pixmap.width * 3:
+        return image_module.frombytes(
+            "RGB",
+            (pixmap.width, pixmap.height),
+            pixmap.samples,
+        )
+    import io
+
+    return image_module.open(io.BytesIO(pixmap.tobytes("png")))
+
+
 def _pdf_pages(
     path: Path,
     target_sizes: list[tuple[int, int]] | None,
@@ -160,15 +175,20 @@ def _pdf_pages(
                     target[1] / max(1.0, float(page.rect.height)),
                 )
             pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-            payload = pixmap.tobytes("png")
             if target is not None and (pixmap.width, pixmap.height) != target:
+                # Resample straight from the pixmap buffer.  Encoding the
+                # full-size page to PNG only to decode it again before resizing
+                # doubled the codec work on every rendered page and threw the
+                # result away.
                 import io
 
-                with Image.open(io.BytesIO(payload)) as opened:
+                with _pixmap_image(Image, pixmap) as opened:
                     resized = opened.resize(target, Image.Resampling.LANCZOS)
                     output = io.BytesIO()
                     resized.save(output, format="PNG")
                     payload = output.getvalue()
+            else:
+                payload = pixmap.tobytes("png")
             pages.append(payload)
     return tuple(pages), tuple(page_sizes_points)
 
