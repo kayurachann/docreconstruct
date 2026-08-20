@@ -91,6 +91,24 @@ _NARY_SOURCE = re.compile(r"\\(?P<command>oint|int|sum|prod)(?![A-Za-z])")
 _INTEGRAL_SOURCE = re.compile(r"\\(?:oint|int)(?![A-Za-z])(?P<limits>\s*\\limits(?![A-Za-z]))?")
 _NATIVE_DELIMITER_SOURCE = re.compile(r"\\(?:left|bigl|Bigl|biggl|Biggl)\b")
 _BODY_COLUMNS_CAPTION = re.compile(r"^docreconstruct:body-columns-(?P<count>\d+)$")
+
+
+def _is_layout_furniture(table: ElementTree.Element) -> bool:
+    """Report whether a table is this renderer's own layout scaffolding.
+
+    The renderer builds borderless tables to place a split masthead or a
+    multi-column body, and tags them.  They carry no Markdown table, so
+    counting them towards the content tables let a document whose real tables
+    had all degraded into paragraphs still satisfy the gate.
+    """
+
+    caption = table.find(f"{_WORD}tblPr/{_WORD}tblCaption")
+    if caption is None:
+        return False
+    value = caption.get(_WORD + "val", "")
+    return value == "docreconstruct:split-masthead" or bool(_BODY_COLUMNS_CAPTION.fullmatch(value))
+
+
 _BODY_FOREGROUND_MIN_RATIO = 0.30
 _SOURCE_VISUAL_SLOT_MIN_COVERAGE = 0.85
 _NARY_SYMBOLS = {"int": "∫", "oint": "∮", "sum": "∑", "prod": "∏"}
@@ -1686,6 +1704,7 @@ def validate_hybrid(
         node.get(_WORD + "val") == "docreconstruct:split-masthead"
         for node in root.iter(_WORD + "tblCaption")
     )
+    content_tables = sum(not _is_layout_furniture(table) for table in root.iter(_WORD + "tbl"))
     footer_text = _normalized(footer_projection)
     body_text = _docx_projection(root)
     footer_blocks_native = all(
@@ -1941,9 +1960,14 @@ def validate_hybrid(
         ),
         HybridValidationGate(
             name="native_tables",
-            passed=len(list(root.iter(_WORD + "tbl"))) >= len(markdown.table_blocks),
+            passed=content_tables >= len(markdown.table_blocks),
             expected=f">={len(markdown.table_blocks)}",
-            actual=len(list(root.iter(_WORD + "tbl"))),
+            actual=content_tables,
+            detail=(
+                "Tagged masthead and body-column scaffolding is excluded; untagged "
+                "borderless layout wrappers are still counted, so this stays a "
+                "lower bound rather than an exact match."
+            ),
         ),
         HybridValidationGate(
             name="native_split_mastheads",
