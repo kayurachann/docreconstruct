@@ -19,3 +19,15 @@ class RendererUnavailableError(DocReconstructError):
 
 class ReconstructionError(DocReconstructError):
     """Raised when an otherwise valid reconstruction cannot be completed."""
+
+
+class LayoutBudgetExceededError(DocReconstructError):
+    """Raised when a layout source would need more pages or pixels than allowed.
+
+    Page rasters are held in memory while they are analyzed, and a small
+    compressed PDF can decode to orders of magnitude more, so an unbounded
+    document is an out-of-memory risk rather than a slow one.  This is
+    deliberately outside the error types the PDF extractors fall back on: a
+    document over budget must be refused, not retried through another backend
+    that would decode the same pages again.
+    """

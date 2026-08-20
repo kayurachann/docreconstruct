@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from PIL import Image, ImageDraw
 
+from docreconstruct.exceptions import LayoutBudgetExceededError
 from docreconstruct.reconstruction import scan_layout
 from docreconstruct.reconstruction.scan_layout import PixelBox, ScanPageLayout
 
@@ -51,6 +52,88 @@ def test_scan_page_worker_count_is_conservative(monkeypatch: pytest.MonkeyPatch)
     for invalid in (0, -1, True, 1.5):
         with pytest.raises(ValueError, match="positive integer"):
             scan_layout._scan_page_worker_count(4, invalid)  # type: ignore[arg-type]
+
+
+def _budget_pdf(path: Path, pages: int) -> None:
+    pymupdf = pytest.importorskip("pymupdf")
+    image = Image.new("RGB", (400, 560), "white")
+    draw = ImageDraw.Draw(image)
+    for index in range(8):
+        top = 40 + index * 60
+        draw.rectangle((30, top, 360, top + 18), fill="black")
+    stream = io.BytesIO()
+    image.save(stream, format="PNG")
+    document = pymupdf.open()
+    try:
+        for _ in range(pages):
+            page = document.new_page(width=306, height=396)
+            page.insert_image(page.rect, stream=stream.getvalue())
+        document.save(path)
+    finally:
+        document.close()
+
+
+def test_a_layout_pdf_over_budget_is_refused_instead_of_decoded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Page rasters are held in memory, so the document has to be bounded.
+
+    A compressed PDF says nothing about how much it decodes to — a few
+    megabytes of scan expands to hundreds of megabytes of RGB — so an unbounded
+    upload was an out-of-memory risk with no ceiling of any kind.
+    """
+
+    path = tmp_path / "many.pdf"
+    _budget_pdf(path, 6)
+
+    assert len(scan_layout.analyze_scan_pdf(path, maximum_workers=1).pages) == 6
+
+    monkeypatch.setenv("DOCRECONSTRUCT_MAX_LAYOUT_PAGES", "3")
+    with pytest.raises(LayoutBudgetExceededError, match="3-page limit"):
+        scan_layout.analyze_scan_pdf(path, maximum_workers=1)
+    monkeypatch.delenv("DOCRECONSTRUCT_MAX_LAYOUT_PAGES")
+
+    monkeypatch.setenv("DOCRECONSTRUCT_MAX_LAYOUT_PIXELS", "100000")
+    with pytest.raises(LayoutBudgetExceededError, match="100000 pixels"):
+        scan_layout.analyze_scan_pdf(path, maximum_workers=1)
+
+
+def test_layout_budget_error_is_not_retried_through_the_other_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document over budget must be refused, not re-decoded by the fallback."""
+
+    path = tmp_path / "many.pdf"
+    _budget_pdf(path, 6)
+    monkeypatch.setenv("DOCRECONSTRUCT_MAX_LAYOUT_PAGES", "3")
+    monkeypatch.setattr(
+        scan_layout,
+        "_extract_with_pymupdf",
+        lambda *_args, **_kwargs: pytest.fail("the fallback must not run"),
+    )
+
+    with pytest.raises(LayoutBudgetExceededError):
+        scan_layout.analyze_scan_pdf(path, maximum_workers=1)
+
+
+def test_page_workers_are_capped_across_concurrent_documents() -> None:
+    """Permits bound the page workers this process runs at once.
+
+    Every request used to build its own pool, so N concurrent documents meant
+    N x workers processes with nothing coordinating them.
+    """
+
+    total = scan_layout._ABSOLUTE_MAX_PAGE_WORKERS
+    with scan_layout._reserved_page_workers(total) as first:
+        assert first == total
+        with scan_layout._reserved_page_workers(4) as second:
+            # Nothing left: the caller falls back to analyzing serially.
+            assert second == 0
+    # Permits are returned once the pool is gone.
+    with scan_layout._reserved_page_workers(total) as again:
+        assert again == total
 
 
 def test_unqualified_pdf_is_rejected_before_any_raster_is_decoded(
@@ -187,7 +270,10 @@ def test_pdf_page_analysis_is_parallel_but_returns_source_order(
     monkeypatch.setattr(scan_layout, "_PAGE_POOL_STARTUP_SECONDS", -1.0)
 
     class ThreadedExecutor:
-        def __init__(self, *, max_workers: int) -> None:
+        def __init__(self, *, max_workers: int, mp_context: object | None = None) -> None:
+            # The production call pins a start method that never forks a live
+            # interpreter; threads ignore it.
+            assert mp_context is not None
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
         def __enter__(self) -> ThreadedExecutor:

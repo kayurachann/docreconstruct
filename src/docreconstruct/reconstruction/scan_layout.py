@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import io
 import math
+import multiprocessing
 import os
+import sys
+import threading
 from collections import deque
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
 from time import perf_counter
@@ -21,17 +26,98 @@ from typing import Any
 from PIL import Image, ImageFilter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from docreconstruct.exceptions import ProviderUnavailableError
+from docreconstruct.exceptions import LayoutBudgetExceededError, ProviderUnavailableError
 from docreconstruct.ir import BBox
 
 _DEFAULT_MAX_PAGE_WORKERS = 4
 _ABSOLUTE_MAX_PAGE_WORKERS = 8
+# `analyze_scan_pdf` runs on a request worker thread under the HTTP API, and the
+# default POSIX start method forks the whole multi-threaded process, which can
+# deadlock a child on a lock another thread held at fork time.  Pin a start
+# method that never forks a live interpreter.  Windows is already spawn-only.
+_PAGE_POOL_CONTEXT = multiprocessing.get_context(
+    "spawn" if sys.platform == "win32" else "forkserver"
+)
+# Each concurrent request used to build its own pool, so N in-flight documents
+# meant N x workers processes with nothing coordinating them.  These permits cap
+# the page workers this process will run at once; a request that cannot get them
+# analyzes serially rather than queueing behind an unbounded fan-out.
+_PAGE_WORKER_PERMITS = threading.BoundedSemaphore(_ABSOLUTE_MAX_PAGE_WORKERS)
+
+
+@contextmanager
+def _reserved_page_workers(count: int) -> Iterator[int]:
+    """Yield how many workers were actually reserved, releasing them on exit."""
+
+    acquired = 0
+    try:
+        while acquired < count and _PAGE_WORKER_PERMITS.acquire(blocking=False):
+            acquired += 1
+        yield acquired
+    finally:
+        for _ in range(acquired):
+            _PAGE_WORKER_PERMITS.release()
+
+
 # Interpreter start-up, re-importing NumPy/Pillow/Pydantic in every child, and
 # shipping page rasters over a pipe cost about a second before a worker pool
 # analyzes anything.  Measured on Windows with warm caches at 0.98 s for two
 # workers and 1.19 s for four, so the figure below stays a little above the
 # observed cost; it is what the projected saving has to beat.
 _PAGE_POOL_STARTUP_SECONDS = 1.5
+# A compressed PDF says nothing about how much memory its pages decode to: a
+# 4.7 MiB, 20-page scan expands to roughly 500 MiB of RGB, so page count and
+# decoded pixels are the quantities that have to be bounded, not upload size.
+# Both ceilings are generous enough for ordinary documents and exist to refuse
+# the pathological ones before the process runs out of memory.
+_DEFAULT_MAX_LAYOUT_PAGES = 400
+_DEFAULT_MAX_LAYOUT_PIXELS = 1_500_000_000
+
+
+def _layout_budget(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _maximum_layout_pages() -> int:
+    return _layout_budget("DOCRECONSTRUCT_MAX_LAYOUT_PAGES", _DEFAULT_MAX_LAYOUT_PAGES)
+
+
+def _maximum_layout_pixels() -> int:
+    return _layout_budget("DOCRECONSTRUCT_MAX_LAYOUT_PIXELS", _DEFAULT_MAX_LAYOUT_PIXELS)
+
+
+def _assert_page_budget(page_count: int) -> None:
+    limit = _maximum_layout_pages()
+    if page_count > limit:
+        raise LayoutBudgetExceededError(
+            f"layout PDF has {page_count} pages, above the {limit}-page limit; "
+            "raise DOCRECONSTRUCT_MAX_LAYOUT_PAGES to allow it"
+        )
+
+
+class _PixelBudget:
+    """Accumulate decoded page pixels and stop before memory is exhausted."""
+
+    __slots__ = ("_limit", "_used")
+
+    def __init__(self) -> None:
+        self._limit = _maximum_layout_pixels()
+        self._used = 0
+
+    def charge(self, width: int, height: int) -> None:
+        self._used += max(0, int(width)) * max(0, int(height))
+        if self._used > self._limit:
+            raise LayoutBudgetExceededError(
+                f"layout PDF decodes to more than {self._limit} pixels; "
+                "raise DOCRECONSTRUCT_MAX_LAYOUT_PIXELS to allow it"
+            )
 
 
 class ScanRegionKind(StrEnum):
@@ -1827,6 +1913,8 @@ def _extract_with_pypdf(path: Path) -> list[tuple[Image.Image, float, float]]:
     for page in page_objects:
         if len(page.images) != 1:
             raise ValueError("PDF page does not contain one unambiguous full-page raster")
+    _assert_page_budget(len(page_objects))
+    budget = _PixelBudget()
     pages: list[tuple[Image.Image, float, float]] = []
     for page in page_objects:
         media_box = page.mediabox
@@ -1835,6 +1923,7 @@ def _extract_with_pypdf(path: Path) -> list[tuple[Image.Image, float, float]]:
         page_image = page.images[0].image
         if page_image is None:
             raise ValueError("PDF page raster could not be decoded")
+        budget.charge(page_image.width, page_image.height)
         image = page_image.convert("RGB")
         # The MediaBox and the stored raster are both in unrotated page space,
         # so a sheet-fed scan saved as a portrait page with `/Rotate 90` would
@@ -1858,8 +1947,11 @@ def _extract_with_pymupdf(path: Path, dpi: int) -> list[tuple[Image.Image, float
         raise ProviderUnavailableError("PyMuPDF is not installed") from exc
     pages: list[tuple[Image.Image, float, float]] = []
     with pymupdf.open(path) as pdf:
+        _assert_page_budget(pdf.page_count)
+        budget = _PixelBudget()
         for page in pdf:
             pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+            budget.charge(pixmap.width, pixmap.height)
             # An `alpha=False` RGB pixmap is already the exact buffer Pillow
             # wants, so wrapping it directly avoids compressing every page to
             # PNG only to decode it again.  Anything else (grayscale, CMYK, a
@@ -1982,11 +2074,23 @@ def analyze_scan_pdf(
                 (perf_counter() - started) / index,
                 worker_count,
             ):
-                with ProcessPoolExecutor(
-                    max_workers=min(worker_count, remaining),
-                ) as executor:
-                    pages.extend(executor.map(_analyze_extracted_pdf_page, work_items[index:]))
-                break
+                with _reserved_page_workers(min(worker_count, remaining)) as reserved:
+                    if reserved > 1:
+                        with ProcessPoolExecutor(
+                            max_workers=reserved,
+                            mp_context=_PAGE_POOL_CONTEXT,
+                        ) as executor:
+                            pages.extend(
+                                executor.map(_analyze_extracted_pdf_page, work_items[index:])
+                            )
+                        break
+                    # Another request holds the page workers; finish on this core
+                    # rather than adding an unbounded second pool beside theirs.
+                    pages.extend(
+                        _analyze_extracted_pdf_page(remaining_item)
+                        for remaining_item in work_items[index:]
+                    )
+                    break
             pages.append(_analyze_extracted_pdf_page(item))
     if not pages:
         raise ValueError("layout PDF contains no pages")
