@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias
 from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -36,6 +36,9 @@ from docreconstruct.reconstruction.scan_layout import (
     ScanPageLayout,
     project_source_box_to_scan,
 )
+
+if TYPE_CHECKING:
+    from docreconstruct.reconstruction.alignment.models import AlignmentReport
 
 
 class _SidecarEvidenceItemLike(Protocol):
@@ -486,6 +489,27 @@ def match_sidecar_evidence(
         if block_contributions:
             matches.append(_fuse_block(block, block_contributions, scan_pages))
     return matches
+
+
+def trace_sidecar_evidence(
+    content: MarkdownContent,
+    layout: ScanDocumentLayout,
+    evidence: EvidenceDocuments,
+    *,
+    matches: Sequence[EvidenceMatch] | None = None,
+    top_n: int = 5,
+) -> AlignmentReport:
+    """Return observation-only per-block traces without changing matcher decisions."""
+
+    from docreconstruct.reconstruction.alignment.diagnostics import build_alignment_report
+
+    return build_alignment_report(
+        content,
+        layout,
+        evidence,
+        matches=matches,
+        top_n=top_n,
+    )
 
 
 def diagnose_sidecar_evidence(
@@ -1890,15 +1914,7 @@ def _span_candidate(
 ) -> _Candidate | None:
     if candidate_text is None:
         candidate_text = " ".join(unit.normalized_text for unit in units)
-    threshold = (
-        0.56
-        if block.kind is MarkdownBlockKind.EQUATION
-        else 0.66
-        if block.kind is MarkdownBlockKind.TABLE
-        else 0.82
-        if len(target) <= 3
-        else 0.62
-    )
+    threshold = _text_threshold(block, target)
     text_score = _text_similarity_at_least(
         target,
         candidate_text,
@@ -1933,6 +1949,20 @@ def _span_candidate(
         element_ids=tuple(unit.element_id for unit in units),
         style=style,
         warnings=tuple(_unique(warning for unit in units for warning in unit.warnings)),
+    )
+
+
+def _text_threshold(block: MarkdownBlock, target: str) -> float:
+    """Return the existing matcher threshold for diagnostics without duplicating policy."""
+
+    return (
+        0.56
+        if block.kind is MarkdownBlockKind.EQUATION
+        else 0.66
+        if block.kind is MarkdownBlockKind.TABLE
+        else 0.82
+        if len(target) <= 3
+        else 0.62
     )
 
 

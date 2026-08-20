@@ -73,6 +73,7 @@ class HybridJobResult:
     generated_markdown: Path | None = None
     extraction_report: Path | None = None
     qa_report: Path | None = None
+    alignment_report: Path | None = None
     phase_seconds: Mapping[str, float] = field(default_factory=dict)
 
 
@@ -179,6 +180,7 @@ def run_hybrid_job(
     minimum_visual_score: float | None = None,
     render_output_dir: str | Path | None = None,
     qa_report: str | Path | None = None,
+    alignment_report: str | Path | None = None,
 ) -> HybridJobResult:
     """Run the project pipeline once with explicit authorities and side effects.
 
@@ -256,6 +258,7 @@ def run_hybrid_job(
         evidence=tuple(combined_evidence),
         evidence_provider_hints=hint_argument,
         strict_evidence=strict_evidence,
+        alignment_report=alignment_report,
         _phase_seconds=phase_seconds,
     )
     prepared_render = prepare_hybrid_render_plan(
@@ -303,6 +306,9 @@ def run_hybrid_job(
             validation.model_dump_json(indent=2),
         )
     phase_seconds["job.total"] = perf_counter() - job_started
+    alignment_path = (
+        Path(alignment_report).expanduser().resolve() if alignment_report is not None else None
+    )
     return HybridJobResult(
         reconstruction=reconstruction,
         validation=validation,
@@ -311,6 +317,7 @@ def run_hybrid_job(
         generated_markdown=generated_markdown,
         extraction_report=extraction_report,
         qa_report=qa_path,
+        alignment_report=alignment_path,
         phase_seconds=dict(phase_seconds),
     )
 

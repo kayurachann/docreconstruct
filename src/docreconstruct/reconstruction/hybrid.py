@@ -569,6 +569,7 @@ def prepare_hybrid_sources(
     evidence: str | Path | Sequence[str | Path] | None = None,
     evidence_provider_hints: (str | Sequence[str | None] | Mapping[str | Path, str] | None) = None,
     strict_evidence: bool = True,
+    alignment_report: str | Path | None = None,
     _phase_seconds: dict[str, float] | None = None,
 ) -> HybridPreparedSources:
     """Decode and align all immutable sources once for one hybrid job.
@@ -581,7 +582,11 @@ def prepare_hybrid_sources(
 
     from docreconstruct.evidence import SidecarEvidenceError, load_sidecar_evidence
     from docreconstruct.providers import ProviderContext
-    from docreconstruct.reconstruction.evidence_matching import match_sidecar_evidence
+    from docreconstruct.reconstruction.alignment.reporting import write_alignment_report
+    from docreconstruct.reconstruction.evidence_matching import (
+        match_sidecar_evidence,
+        trace_sidecar_evidence,
+    )
     from docreconstruct.reconstruction.markdown_content import parse_markdown_content
     from docreconstruct.reconstruction.scan_layout import analyze_scan_source
 
@@ -637,6 +642,18 @@ def prepare_hybrid_sources(
         started = perf_counter()
         evidence_matches = tuple(match_sidecar_evidence(markdown, scan, bundle))
         _record_phase(_phase_seconds, "prepare.evidence_match", started)
+        if alignment_report is not None:
+            started = perf_counter()
+            write_alignment_report(
+                trace_sidecar_evidence(
+                    markdown,
+                    scan,
+                    bundle,
+                    matches=evidence_matches,
+                ),
+                alignment_report,
+            )
+            _record_phase(_phase_seconds, "prepare.alignment_report", started)
         if strict_evidence and not evidence_matches:
             raise SidecarEvidenceError(
                 "saved OCR evidence did not match any Markdown block with safe geometry; "
@@ -663,6 +680,13 @@ def prepare_hybrid_sources(
     elif _phase_seconds is not None:
         _phase_seconds["prepare.evidence_load"] = 0.0
         _phase_seconds["prepare.evidence_match"] = 0.0
+    if not evidence_paths and alignment_report is not None:
+        started = perf_counter()
+        write_alignment_report(
+            trace_sidecar_evidence(markdown, scan, (), matches=()),
+            alignment_report,
+        )
+        _record_phase(_phase_seconds, "prepare.alignment_report", started)
 
     return HybridPreparedSources(
         manifest=manifest,

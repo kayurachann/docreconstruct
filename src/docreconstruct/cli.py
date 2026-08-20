@@ -288,6 +288,14 @@ def hybrid_command(
         "--qa-report",
         help="Optional JSON path for project-native OOXML/layout validation.",
     ),
+    alignment_report: Path | None = typer.Option(
+        None,
+        "--alignment-report",
+        help=(
+            "Optional content-safe JSON trace for every evidence-alignment decision; "
+            "raw text, source paths, page pixels, and provider element IDs are excluded."
+        ),
+    ),
     qa_backend: str = typer.Option(
         "native",
         "--qa-backend",
@@ -391,6 +399,7 @@ def hybrid_command(
             minimum_visual_score=minimum_visual_score,
             render_output_dir=qa_render_dir,
             qa_report=qa_report,
+            alignment_report=alignment_report,
         )
         result = job.reconstruction
         validation = job.validation
@@ -429,6 +438,8 @@ def hybrid_command(
             console.print(f"[green]Wrote[/green] {job.extraction_report}")
     if job.qa_report is not None:
         console.print(f"[green]Wrote[/green] {job.qa_report}")
+    if job.alignment_report is not None:
+        console.print(f"[green]Wrote alignment trace[/green] {job.alignment_report}")
     console.print(
         f"QA gates: {validation.score * 100:.2f}% "
         f"({validation.passed_gates}/{validation.measured_gates} measured gates), "
