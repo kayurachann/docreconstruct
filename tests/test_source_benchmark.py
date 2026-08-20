@@ -18,6 +18,7 @@ from docreconstruct.evaluation import (
     load_source_benchmark_manifest,
     run_source_benchmark,
 )
+from docreconstruct.evaluation.source_benchmark.process import _windows_process_peak_rss_bytes
 
 
 def test_source_benchmark_package_preserves_public_api() -> None:
@@ -45,6 +46,11 @@ def test_source_benchmark_package_preserves_public_api() -> None:
     assert module.load_omnidocbench_cases is load_omnidocbench_cases
     assert module.load_source_benchmark_manifest is load_source_benchmark_manifest
     assert module.run_source_benchmark is run_source_benchmark
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="non-Windows guard regression")
+def test_windows_rss_sampler_is_inert_on_other_platforms() -> None:
+    assert _windows_process_peak_rss_bytes(1) is None
 
 
 def _copy_command() -> list[str]:

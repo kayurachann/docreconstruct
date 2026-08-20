@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-import signal
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from ._common import EMPTY_SHA256, atomic_write, sha256_bytes, sha256_file
 from .models import ProcessOutcome, SourceRunStatus
@@ -24,6 +23,11 @@ _CRASH_PATTERN = re.compile(
     r"(?:segmentation fault|access violation|core dumped|bus error|fatal signal)",
     re.IGNORECASE,
 )
+_POSIX_SIGKILL = 9  # POSIX reserves signal number 9 for unconditional termination.
+
+
+class _KillProcessGroup(Protocol):
+    def __call__(self, process_group_id: int, signal_number: int) -> None: ...
 
 
 def expand_command(command: Sequence[str], replacements: Mapping[str, str]) -> list[str]:
@@ -48,7 +52,12 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
         )
     else:
         with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)  # type: ignore[attr-defined]
+            raw_kill_process_group = vars(os).get("killpg")
+            if raw_kill_process_group is None:
+                process.kill()
+            else:
+                kill_process_group = cast(_KillProcessGroup, raw_kill_process_group)
+                kill_process_group(process.pid, _POSIX_SIGKILL)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
@@ -103,8 +112,14 @@ def _linux_process_tree_rss_bytes(pid: int) -> int | None:
 def _windows_process_peak_rss_bytes(pid: int) -> int | None:
     """Best-effort PeakWorkingSetSize using only the Windows standard library."""
 
+    if os.name != "nt":
+        return None
+
     import ctypes
     from ctypes import wintypes
+
+    class _WindowsDllLoader(Protocol):
+        def __call__(self, name: str, *, use_last_error: bool) -> ctypes.CDLL: ...
 
     class ProcessMemoryCounters(ctypes.Structure):
         _fields_ = [
@@ -120,8 +135,12 @@ def _windows_process_peak_rss_bytes(pid: int) -> int | None:
             ("PeakPagefileUsage", ctypes.c_size_t),
         ]
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    raw_loader = vars(ctypes).get("WinDLL")
+    if raw_loader is None:
+        return None
+    load_windows_dll = cast(_WindowsDllLoader, raw_loader)
+    kernel32 = load_windows_dll("kernel32", use_last_error=True)
+    psapi = load_windows_dll("psapi", use_last_error=True)
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
