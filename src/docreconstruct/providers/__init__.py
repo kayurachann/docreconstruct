@@ -61,6 +61,7 @@ from .selection import (
     recommend_providers,
     select_provider,
 )
+from .tesseract_local import TesseractLocalProvider, TesseractProvider
 
 registry = get_registry()
 for _provider in (
@@ -77,6 +78,7 @@ for _provider in (
     AzureDocumentIntelligenceProvider,
     AWSTextractProvider,
     GoogleDocumentAIProvider,
+    TesseractLocalProvider,
 ):
     if _provider.name not in registry:
         registry.register(_provider)
@@ -141,6 +143,8 @@ __all__ = [
     "PaddleOCRVLServerProvider",
     "PaddleOcrVlServerProvider",
     "TextractProvider",
+    "TesseractLocalProvider",
+    "TesseractProvider",
     "CapabilityRequest",
     "Provider",
     "ProviderCapabilities",

@@ -32,6 +32,7 @@ from docreconstruct.providers import (
     ProviderContext,
     ProviderInferenceUnsupportedError,
     ProviderRegistry,
+    TesseractLocalProvider,
     get_registry,
     registry,
 )
@@ -53,6 +54,7 @@ def test_builtin_registry_and_custom_registry() -> None:
         "paddleocr",
         "paddleocr_official",
         "paddleocr_vl_server",
+        "tesseract_local",
     }
     assert isinstance(registry.get("PaddleOCR"), PaddleOCRProvider)
     assert isinstance(registry.get("PaddleOCR-Official"), PaddleOCROfficialProvider)
@@ -66,6 +68,7 @@ def test_builtin_registry_and_custom_registry() -> None:
         AzureDocumentIntelligenceProvider,
     )
     assert registry.get("native-pdf").name == "native_pdf"
+    assert isinstance(registry.get("tesseract-local"), TesseractLocalProvider)
 
     custom = ProviderRegistry()
     custom.register(JSONProvider)

@@ -78,7 +78,9 @@ def test_recommendation_is_deterministic_and_explains_incompatibility() -> None:
     second = recommend_providers(request, include_incompatible=True)
 
     assert first == second
-    assert all(item.compatible is False for item in first)
+    assert [item.provider for item in first if item.compatible] == ["tesseract_local"]
+    tesseract = next(item for item in first if item.provider == "tesseract_local")
+    assert tesseract.missing == []
     native = next(item for item in first if item.provider == "native_pdf")
     assert native.missing == ["markdown"]
 
