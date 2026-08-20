@@ -117,6 +117,74 @@ analysis remains the largest measured phase. OCR/upload latency, a cold model,
 LibreOffice conversion, more pages, larger images, and an unavailable cache can
 all dominate these local numbers.
 
+### Deterministic speed-ups since those runs
+
+The two tables above predate a round of output-preserving optimization, so they
+now understate the fast path. Every change below was checked to leave results
+byte-identical — the committed showcase pages still serialize to the same
+`ScanDocumentLayout` SHA-256, the evaluator emits the same metrics, and asset
+matching returns the same matches.
+
+The figures come from alternating the two source trees within one session, so
+machine drift cancels between them, and they are still one machine's numbers
+rather than a portable claim.
+
+| Stage | Before | After | Speed-up |
+| --- | ---: | ---: | ---: |
+| Page analysis, `docs/showcases/math-exam` | 0.640 s | 0.365 s | 1.75x |
+| Page analysis, `docs/showcases/vietnamese-exam` | 0.905 s | 0.465 s | 1.95x |
+| PDF page rasterization | 161 ms/page | 24 ms/page | 6.7x |
+| `evaluate_text`, 1,500 words | 80.9 s | 38.0 s | 2.13x |
+| `evaluate()`, 2x90 elements | 59.5 s | 31.8 s | 1.87x |
+| Asset matching, 6 figures over 3 pages | 5.85 s | 3.89 s | 1.50x |
+
+Multi-page reconstruction gains most, because a worker pool is no longer started
+for documents whose pages are too cheap to repay roughly a second of interpreter
+start-up:
+
+| Synthetic case | Before | After | Speed-up |
+| --- | ---: | ---: | ---: |
+| 2 pages, 32 blocks | 1.293 s | 0.139 s | 9.3x |
+| 4 pages, 64 blocks | 1.544 s | 0.254 s | 6.1x |
+| 8 pages, 208 blocks | 1.995 s | 0.665 s | 3.0x |
+| 32 pages, 832 blocks | 5.503 s | 3.360 s | 1.6x |
+
+Genuinely expensive pages still get the pool: the decision compares the observed
+per-page cost against the pool's start-up cost after every page, so a long
+high-resolution document reaches it within one or two pages.
+
+A second round removed superlinear work in the stages that dominate dense
+documents. These figures are measured against the tree above, so they compound
+with it, and each was checked to leave its output unchanged — identical fused
+documents, identical metrics, identical page boundaries, identical confidences.
+
+| Stage | Before | After | Speed-up |
+| --- | ---: | ---: | ---: |
+| `evaluate_layout` + `evaluate_structure`, 20x20 elements of ~500 chars | 25.01 s | 0.32 s | 78x |
+| Layout planner, 24 pages / 1,440 blocks | 29.47 s | 6.72 s | 4.4x |
+| Azure normalization, 3,000 words / 240 paragraphs | 1.103 s | 0.389 s | 2.8x |
+| Evidence fusion, 600+600 elements | 1.221 s | 0.868 s | 1.4x |
+| Rejecting a 20-page PDF the fast path cannot use | 0.393 s | 0.006 s | 65x |
+
+Rendered QA also probes the LibreOffice binary's identity once per binary image
+rather than once per document, keyed on the SHA-256 of its bytes so the recorded
+identity stays byte-exact; that removes an extra process launch, about 0.2 s,
+from every verified render.
+
+The element matcher's edit distance is the largest of these. It is evaluated
+once per candidate pair inside an O(n^2) grid, so the row-at-a-time dynamic
+program made a dense page effectively never finish; Myers' bit-vector
+formulation returns the same integer per pair.
+
+A layout PDF is now also bounded before it is decoded. Page rasters stay
+resident while the document is analyzed and a compressed PDF says nothing about
+how much it expands to — 4.7 MiB of 20-page scan decodes to about 500 MiB of RGB
+— so `DOCRECONSTRUCT_MAX_LAYOUT_PAGES` (default 400) and
+`DOCRECONSTRUCT_MAX_LAYOUT_PIXELS` (default 1.5e9) refuse a document that would
+not fit, and the HTTP API answers 413. Page workers are capped process-wide
+rather than per request, so concurrent uploads can no longer multiply into an
+unbounded number of worker processes.
+
 ## Reproducible reconstruction benchmark
 
 The first [public unfiltered baseline](../benchmark/omnidocbench-demo/README.md)

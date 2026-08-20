@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PIL import Image, ImageDraw
 
 from docreconstruct.ir import BBox
 from docreconstruct.reconstruction.scan_layout import (
     PixelBox,
     ScanPageLayout,
+    ScanTextLine,
     SourceToScanBand,
     SourceToScanMap,
     analyze_scan_image,
@@ -181,6 +183,45 @@ def test_flat_image_analysis_keeps_existing_raster_and_records_dimensions(
     ) == PixelBox(x0=42, y0=59, x1=378, y1=535)
 
 
+@pytest.mark.parametrize(
+    ("sheet_width", "sheet_height"),
+    [(1650, 1275), (1275, 1650), (1754, 1240), (1240, 1754)],
+)
+def test_rectified_page_keeps_the_orientation_of_its_sheet(
+    tmp_path: Path,
+    sheet_width: int,
+    sheet_height: int,
+) -> None:
+    """A landscape sheet must not be rectified into a portrait canvas.
+
+    The candidate paper sizes were portrait-only, so the closest match was
+    always portrait: a landscape sheet was mesh-stretched to a portrait canvas,
+    distorting every glyph before line detection and reporting a portrait page
+    size for a document that is physically wider than it is tall.
+    """
+
+    source = tmp_path / f"sheet-{sheet_width}x{sheet_height}.png"
+    margin_x, margin_y = int(sheet_width * 0.15), int(sheet_height * 0.17)
+    image = Image.new("RGB", (sheet_width + margin_x, sheet_height + margin_y), (35, 38, 42))
+    draw = ImageDraw.Draw(image)
+    left, top = margin_x // 2, margin_y // 2
+    draw.rectangle((left, top, left + sheet_width, top + sheet_height), fill=(252, 252, 250))
+    rows = max(8, sheet_height // 60)
+    for index in range(rows):
+        row_top = top + 60 + index * (sheet_height // (rows + 2))
+        draw.rectangle(
+            (left + 70, row_top, left + sheet_width - 70 - (index % 4) * 60, row_top + 18),
+            fill=(20, 20, 20),
+        )
+    image.save(source)
+
+    page = analyze_scan_image(source).pages[0]
+
+    landscape_sheet = sheet_width > sheet_height
+    assert (page.pdf_width > page.pdf_height) is landscape_sheet
+    assert (page.width > page.height) is landscape_sheet
+
+
 def test_photographed_page_records_compact_forward_row_mapping(tmp_path: Path) -> None:
     source = tmp_path / "photographed-page.png"
     image = Image.new("RGB", (900, 1200), (92, 67, 45))
@@ -223,3 +264,136 @@ def test_photographed_page_records_compact_forward_row_mapping(tmp_path: Path) -
     assert interior_projection is not None
     assert 0 <= interior_projection.x0 < interior_projection.x1 <= page.width
     assert 0 <= interior_projection.y0 < interior_projection.y1 <= page.height
+
+
+def test_dominant_gap_needs_agreement_before_it_overrides_the_page_prior() -> None:
+    """A handful of section breaks is not a line rhythm.
+
+    The 16-60 px window that classifies a gap as a line pitch only describes a
+    page rasterized at roughly 150-200 DPI, so a denser scan or double spacing
+    falls outside it. Reading the gaps is right when they agree, but a
+    photographed page whose bands barely separate yields three gaps that are
+    structural breaks, and their median is not a pitch.
+    """
+
+    from docreconstruct.reconstruction.scan_layout import _dominant_gap
+
+    # A real rhythm: many gaps clustered around one value.
+    assert _dominant_gap([100.0, 99.0, 101.0, 100.5, 100.0, 250.0]) == pytest.approx(100.0, abs=1)
+    # Too few gaps to be evidence of anything.
+    assert _dominant_gap([8.5, 351.0, 431.0]) is None
+    assert _dominant_gap([]) is None
+    # Enough gaps, but no majority agrees on one value.
+    assert _dominant_gap([10.0, 60.0, 140.0, 300.0, 700.0]) is None
+
+
+@pytest.mark.parametrize(
+    ("dpi", "font_points", "leading_points"),
+    [
+        (192, 12.0, 14.0),
+        (192, 12.0, 28.0),
+        (300, 12.0, 24.0),
+        (400, 12.0, 14.0),
+        # Display type: the ink band of one line is far taller than the fixed
+        # 45 px bound, so every band used to be discarded as a merge.
+        (200, 40.0, 50.0),
+        (200, 32.0, 40.0),
+        (150, 44.0, 56.0),
+    ],
+)
+def test_line_pitch_follows_the_page_not_the_pixel_window(
+    dpi: int,
+    font_points: float,
+    leading_points: float,
+) -> None:
+    """The measured pitch must track the real leading at any resolution.
+
+    Outside the hard-coded 16-60 px window the estimate came from page height
+    alone, so a 300 DPI scan of 12pt on 24pt leading reported 11.2 pt where the
+    page is 24 pt — and every downstream body size, line height, and vertical
+    budget is derived from it.
+    """
+
+    pytest.importorskip("numpy")
+    from PIL import ImageFont
+
+    from docreconstruct.reconstruction.scan_layout import analyze_scan_page
+
+    scale = dpi / 72.0
+    width, height = int(612 * scale), int(792 * scale)
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("times.ttf", int(round(font_points * scale)))
+    except OSError:  # pragma: no cover - depends on installed fonts
+        pytest.skip("a scalable serif font is required to render the fixture")
+    pitch = leading_points * scale
+    top = margin = 72.0 * scale
+    while top + pitch < height - margin:
+        draw.text(
+            (margin, top),
+            "The quick brown fox jumps over the lazy dog today.",
+            font=font,
+            fill="black",
+        )
+        top += pitch
+
+    page = analyze_scan_page(
+        image,
+        number=1,
+        pdf_width=612.0,
+        pdf_height=792.0,
+        metadata={"source_kind": "pdf", "rectified": False},
+    )
+
+    assert page.line_pitch == pytest.approx(pitch, rel=0.05)
+
+
+def test_band_ceiling_follows_the_page_instead_of_a_fixed_pixel_bound() -> None:
+    """The band filter rejects merges, so its bound must scale with the type.
+
+    A fixed 45 px ceiling only describes body text at roughly 150-200 DPI.
+    Display type, or any denser scan, produces taller single-line bands and
+    every one of them was discarded, leaving no measured rhythm at all.
+    """
+
+    from docreconstruct.reconstruction.scan_layout import _band_ceiling
+
+    # Ordinary body text keeps the historical floor.
+    assert _band_ceiling([(0, 18), (30, 48), (60, 78)]) == 45.0
+    assert _band_ceiling([]) == 45.0
+    # Display type raises it in proportion to the page's own bands.
+    assert _band_ceiling([(0, 180), (250, 430), (500, 680)]) == pytest.approx(396.0)
+    # A band that merged several lines is still above the bound.
+    ceiling = _band_ceiling([(0, 20), (30, 50), (60, 80), (100, 190)])
+    assert ceiling < 90
+
+
+def test_a_periodic_rhythm_must_be_a_believable_split_of_the_measured_lines() -> None:
+    """Autocorrelation on display type peaks on stroke rhythm, not baselines.
+
+    The override exists to split line boxes that merged two baselines, and no
+    correlation threshold separates that from a spurious peak — a page of 32 pt
+    text scored 0.35 at a 12 px lag. The ratio does separate them: a text line
+    can be two of its own pitches tall, not seven.
+    """
+
+    from docreconstruct.reconstruction.scan_layout import _splits_plausibly
+
+    def lines(height: int) -> list[ScanTextLine]:
+        return [
+            ScanTextLine(
+                bbox=PixelBox(x0=0, y0=index * 40, x1=100, y1=index * 40 + height),
+                ink_density=0.3,
+            )
+            for index in range(5)
+        ]
+
+    # A newspaper rhythm of 13 px under 29 px boxes is a real merge.
+    assert _splits_plausibly(lines(29), 13.0)
+    # 83 px boxes cannot be built from a 12 px pitch.
+    assert not _splits_plausibly(lines(83), 12.0)
+    assert not _splits_plausibly(lines(86), 12.0)
+    # Degenerate inputs never crash and never veto silently.
+    assert _splits_plausibly([], 12.0)
+    assert not _splits_plausibly(lines(29), 0.0)

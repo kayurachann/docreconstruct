@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from statistics import median
 
-from docreconstruct.ir import Document, Element, Page, Provenance, SourceType
+from docreconstruct.ir import BBox, Document, Element, Page, Provenance, SourceType
 
 from .fusion_clustering import FusionPageSource, cluster_page_elements
 from .fusion_reduction import (
@@ -117,6 +117,108 @@ def fuse_pages(
     )
 
 
+_FRAME_TOLERANCE = 1e-3
+
+
+def _reference_frame(
+    page_inputs: Sequence[FusionPageSource],
+) -> tuple[float, float, str]:
+    """Choose the coordinate frame every source is compared in.
+
+    A native PDF page reports true points and is authoritative; otherwise the
+    most confident layout wins.  `page_inputs` is already in canonical order, so
+    the choice never depends on the order the caller passed its providers.
+    """
+
+    def preference(source: FusionPageSource) -> tuple[object, ...]:
+        page = source.page
+        confidences = [
+            element.confidence for element in page.elements if element.confidence is not None
+        ]
+        return (
+            page.source_type is not SourceType.NATIVE,
+            -sum(confidences),
+            source.source_identity,
+        )
+
+    chosen = min(page_inputs, key=preference)
+    return float(chosen.page.width), float(chosen.page.height), chosen.source_identity
+
+
+def _scaled_box(box: BBox, horizontal: float, vertical: float) -> BBox:
+    return BBox(
+        x0=box.x0 * horizontal,
+        y0=box.y0 * vertical,
+        x1=box.x1 * horizontal,
+        y1=box.y1 * vertical,
+    )
+
+
+def _rescaled_sources(
+    page_inputs: Sequence[FusionPageSource],
+    reference_width: float,
+    reference_height: float,
+) -> tuple[list[FusionPageSource], list[str]]:
+    """Bring every source page into the reference frame before clustering.
+
+    Providers report geometry in their own units — a native PDF in points, an
+    OCR engine in raster pixels — and nothing reconciled them.  Overlap was
+    measured across mismatched frames, so two readings of the same paragraph
+    never intersected and were both emitted, and the fused page took the median
+    of the differing dimensions, leaving boxes outside their own page.
+    """
+
+    rescaled: list[FusionPageSource] = []
+    identities: list[str] = []
+    for source in page_inputs:
+        page = source.page
+        if not page.width or not page.height:
+            rescaled.append(source)
+            continue
+        horizontal = reference_width / float(page.width)
+        vertical = reference_height / float(page.height)
+        if abs(horizontal - 1.0) <= _FRAME_TOLERANCE and abs(vertical - 1.0) <= _FRAME_TOLERANCE:
+            rescaled.append(source)
+            continue
+        elements = [
+            element.model_copy(
+                update={
+                    "bbox": _scaled_box(element.bbox, horizontal, vertical),
+                    "polygon": [
+                        point.model_copy(
+                            update={"x": point.x * horizontal, "y": point.y * vertical}
+                        )
+                        for point in element.polygon
+                    ],
+                    # `source_crop` may address a provider's own raster rather
+                    # than the page frame, so it is left untouched.
+                    "style": element.style.model_copy(
+                        update={"font_size": element.style.font_size * horizontal}
+                    )
+                    if element.style.font_size is not None
+                    else element.style,
+                },
+                deep=True,
+            )
+            for element in page.elements
+        ]
+        rescaled.append(
+            FusionPageSource(
+                page=page.model_copy(
+                    update={
+                        "width": reference_width,
+                        "height": reference_height,
+                        "elements": elements,
+                    },
+                    deep=True,
+                ),
+                source_identity=source.source_identity,
+            )
+        )
+        identities.append(source.source_identity)
+    return rescaled, identities
+
+
 def _fuse_page_sources(
     sources: Sequence[FusionPageSource],
     *,
@@ -135,6 +237,13 @@ def _fuse_page_sources(
     _validate_budget("candidate_budget", candidate_budget)
     _validate_budget("comparison_budget", comparison_budget)
     _validate_budget("assignment_budget", assignment_budget)
+
+    reference_width, reference_height, reference_identity = _reference_frame(page_inputs)
+    page_inputs, rescaled_identities = _rescaled_sources(
+        page_inputs,
+        reference_width,
+        reference_height,
+    )
 
     clustering = cluster_page_elements(
         page_inputs,
@@ -199,12 +308,18 @@ def _fuse_page_sources(
         "iou_threshold": iou_threshold,
         "text_similarity_threshold": text_similarity_threshold,
         "clustering": clustering.telemetry.as_dict(),
+        "reference_frame": {
+            "source_identity": reference_identity,
+            "width": reference_width,
+            "height": reference_height,
+            "rescaled": rescaled_identities,
+        },
     }
     return Page(
         id=page_id or min(page.id for page in pages),
         number=number,
-        width=float(median(page.width for page in pages)),
-        height=float(median(page.height for page in pages)),
+        width=reference_width,
+        height=reference_height,
         rotation=float(median(page.rotation for page in pages)),
         elements=fused,
         source_type=_fused_source_type(pages),
@@ -302,13 +417,22 @@ def _remap_document_relationships(pages: Sequence[Page]) -> list[Page]:
             ) -> set[str]:
                 if value is None:
                     return set()
-                if value in fused_ids:
-                    return {value}
-                return {
+                # The audit map is authoritative: a relationship names an
+                # element of its own source document, so its recorded fused
+                # target is the right answer even when the source id happens to
+                # look like a fused one.  Fusion re-numbers elements by reading
+                # order, and a source that already uses the
+                # `page-{n}-element-{k}` namespace — any earlier fusion or
+                # `analyze` output reloaded through the `json` provider — would
+                # otherwise keep a stale id that now names a different element.
+                resolved = {
                     target
                     for identity in source_identities
                     for target in source_targets.get((identity, value), set())
                 }
+                if resolved:
+                    return resolved
+                return {value} if value in fused_ids else set()
 
             def singular(value: str | None) -> str | None:
                 candidates = targets(value)

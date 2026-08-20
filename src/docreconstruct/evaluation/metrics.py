@@ -42,13 +42,9 @@ def _mean(values: Sequence[float], default: float = 1.0) -> float:
     return sum(values) / len(values) if values else default
 
 
-def _distance(reference: Sequence[Any], candidate: Sequence[Any]) -> int:
-    """Memory-efficient Levenshtein edit distance for arbitrary sequences."""
+def _dense_distance(reference: Sequence[Any], candidate: Sequence[Any]) -> int:
+    """Row-at-a-time Levenshtein for sequences whose items are not hashable."""
 
-    if len(reference) < len(candidate):
-        reference, candidate = candidate, reference
-    if not candidate:
-        return len(reference)
     previous = list(range(len(candidate) + 1))
     for row, left in enumerate(reference, start=1):
         current = [row]
@@ -64,15 +60,71 @@ def _distance(reference: Sequence[Any], candidate: Sequence[Any]) -> int:
     return previous[-1]
 
 
-def _error_rate(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
+def _distance(reference: Sequence[Any], candidate: Sequence[Any]) -> int:
+    """Levenshtein edit distance for arbitrary sequences.
+
+    The element matcher evaluates this once per candidate pair inside an
+    O(n^2) grid, so the row-at-a-time dynamic program — one Python loop
+    iteration per matrix cell — dominated evaluation: a page of 20x20
+    paragraphs of ~500 characters spent 22.1 s in 100.5 million cells.
+
+    Myers' bit-vector formulation carries one matrix column per machine word
+    instead, so a whole column advances per iteration.  It returns the same
+    integer, not an approximation, and is used whenever the items can be
+    hashed into the pattern bitmasks; anything else falls back to the dense
+    loop.
+    """
+
+    if len(reference) < len(candidate):
+        reference, candidate = candidate, reference
+    if not candidate:
+        return len(reference)
+    try:
+        equality: dict[Any, int] = {}
+        for index, item in enumerate(candidate):
+            equality[item] = equality.get(item, 0) | (1 << index)
+    except TypeError:  # unhashable items
+        return _dense_distance(reference, candidate)
+    mask = (1 << len(candidate)) - 1
+    top = 1 << (len(candidate) - 1)
+    positive, negative, score = mask, 0, len(candidate)
+    for item in reference:
+        matches = equality.get(item, 0)
+        vertical = matches | negative
+        horizontal = (((matches & positive) + positive) ^ positive) | matches
+        carry_positive = negative | ~(horizontal | positive)
+        carry_negative = positive & horizontal
+        if carry_positive & top:
+            score += 1
+        elif carry_negative & top:
+            score -= 1
+        carry_positive = ((carry_positive << 1) | 1) & mask
+        carry_negative = (carry_negative << 1) & mask
+        positive = (carry_negative | ~(vertical | carry_positive)) & mask
+        negative = carry_positive & vertical
+    return score
+
+
+def _error_rate_of(
+    distance: int,
+    reference: Sequence[Any],
+    candidate: Sequence[Any],
+) -> float:
     if not reference:
         return 0.0 if not candidate else 1.0
-    return _distance(reference, candidate) / len(reference)
+    return distance / len(reference)
+
+
+def _accuracy_of(distance: int, reference: Sequence[Any], candidate: Sequence[Any]) -> float:
+    return _clamp(1.0 - distance / max(len(reference), len(candidate), 1))
+
+
+def _error_rate(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
+    return _error_rate_of(_distance(reference, candidate), reference, candidate)
 
 
 def _accuracy(reference: Sequence[Any], candidate: Sequence[Any]) -> float:
-    denominator = max(len(reference), len(candidate), 1)
-    return _clamp(1.0 - _distance(reference, candidate) / denominator)
+    return _accuracy_of(_distance(reference, candidate), reference, candidate)
 
 
 def extract_text(source: Any) -> str:
@@ -147,11 +199,17 @@ def evaluate_text(reference: Any, candidate: Any) -> TextMetrics:
     candidate_words = re.findall(r"\S+", candidate_text)
     reference_numbers = _numbers(reference_text)
     candidate_numbers = _numbers(candidate_text)
+    # The error rate and the accuracy of one pair are two readings of a single
+    # edit distance.  Asking each helper for its own doubled the whole
+    # `O(len(reference) * len(candidate))` matrix for both the character and the
+    # word comparison on every evaluated case.
+    character_distance = _distance(reference_text, candidate_text)
+    word_distance = _distance(reference_words, candidate_words)
     return TextMetrics(
-        character_error_rate=_error_rate(reference_text, candidate_text),
-        word_error_rate=_error_rate(reference_words, candidate_words),
-        character_accuracy=_accuracy(reference_text, candidate_text),
-        word_accuracy=_accuracy(reference_words, candidate_words),
+        character_error_rate=_error_rate_of(character_distance, reference_text, candidate_text),
+        word_error_rate=_error_rate_of(word_distance, reference_words, candidate_words),
+        character_accuracy=_accuracy_of(character_distance, reference_text, candidate_text),
+        word_accuracy=_accuracy_of(word_distance, reference_words, candidate_words),
         exact_match=float(reference_text == candidate_text),
         numerical_accuracy=_accuracy(reference_numbers, candidate_numbers),
         reference_characters=len(reference_text),
@@ -445,6 +503,16 @@ class LayoutMetrics:
 
 def evaluate_layout(reference: Any, candidate: Any) -> LayoutMetrics:
     pairs, ref_count, cand_count = _match_elements(reference, candidate)
+    return _layout_metrics(reference, candidate, pairs, ref_count, cand_count)
+
+
+def _layout_metrics(
+    reference: Any,
+    candidate: Any,
+    pairs: list[tuple[_ElementRecord, _ElementRecord]],
+    ref_count: int,
+    cand_count: int,
+) -> LayoutMetrics:
     matched = len(pairs)
     precision = matched / cand_count if cand_count else float(ref_count == 0)
     recall = matched / ref_count if ref_count else float(cand_count == 0)
@@ -670,8 +738,14 @@ class StructureMetrics:
 
 def evaluate_structure(reference: Any, candidate: Any) -> StructureMetrics:
     pairs, _, _ = _match_elements(reference, candidate)
-    refs = _records(reference)
-    cands = _records(candidate)
+    return _structure_metrics(pairs, _records(reference), _records(candidate))
+
+
+def _structure_metrics(
+    pairs: list[tuple[_ElementRecord, _ElementRecord]],
+    refs: list[_ElementRecord],
+    cands: list[_ElementRecord],
+) -> StructureMetrics:
     ref_types = Counter(record.type for record in refs)
     cand_types = Counter(record.type for record in cands)
     precision, recall, f1 = _f1_from_counts(ref_types, cand_types)
@@ -686,6 +760,25 @@ def evaluate_structure(reference: Any, candidate: Any) -> StructureMetrics:
         table_topology_accuracy=table_topology,
         table_cell_text_accuracy=table_text,
         table_span_accuracy=table_span,
+    )
+
+
+def evaluate_layout_and_structure(
+    reference: Any,
+    candidate: Any,
+) -> tuple[LayoutMetrics, StructureMetrics]:
+    """Score layout and structure from one element matching.
+
+    `evaluate_layout` and `evaluate_structure` each ran `_match_elements` on the
+    same two documents, and that is the expensive step: a dense cost grid whose
+    every cell is an edit distance, followed by a cubic assignment. A caller
+    that wants both metrics pays for it once here.
+    """
+
+    pairs, ref_count, cand_count = _match_elements(reference, candidate)
+    return (
+        _layout_metrics(reference, candidate, pairs, ref_count, cand_count),
+        _structure_metrics(pairs, _records(reference), _records(candidate)),
     )
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from docreconstruct.renderers._utils import _rows_from_html
+from docreconstruct.renderers._utils import rows_and_spans_from_html
 
 
 class MarkdownBlockKind(StrEnum):
@@ -39,6 +39,9 @@ class MarkdownBlock(BaseModel):
     group_id: str | None = None
     starts_group: bool = False
     table_rows: list[list[str]] = Field(default_factory=list)
+    # Parallel to `table_rows`: each slot's (colspan, rowspan), with a
+    # covered slot marked (0, 0).  Empty when the source has no spans.
+    table_spans: list[list[tuple[int, int]]] = Field(default_factory=list)
     metadata: dict[str, str | int | float | bool] = Field(default_factory=dict)
 
 
@@ -80,6 +83,7 @@ _NUMBERED_GROUP_PATTERN = re.compile(r"^(?P<label>\d{1,4}[.)])\s+")
 _SOLUTION_GROUP_PATTERN = re.compile(r"^(?P<label>[A-Z]\s*[-\u2012-\u2015]\s*\d+)\b")
 _DISPLAY_MATH_PATTERN = re.compile(r"^\$\$\s*(.*?)\s*\$\$$", flags=re.DOTALL)
 _THEMATIC_BREAK_PATTERN = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
+_LIST_ITEM_PATTERN = re.compile(r"^(?:[-*+]|\d{1,4}[.)])\s+\S")
 _OPTION_START = re.compile(r"(?<!\S)(?=[A-D][.)]\s+)")
 _SECTION_START_PATTERN = re.compile(
     r"^(?:phần|phan|part|section)\s+[\wIVXLCDM.-]+\s*[:.)]",
@@ -308,6 +312,7 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
     raw_lines = path.read_text(encoding="utf-8").splitlines()
     tokens: list[tuple[MarkdownBlockKind, str, dict[str, str | int]]] = []
     paragraph: list[str] = []
+    list_indent: int | None = None
     in_code = False
     code_lines: list[str] = []
 
@@ -353,6 +358,8 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             tokens.append((kind, option, dict(metadata or {})))
 
     def flush_paragraph() -> None:
+        nonlocal list_indent
+        list_indent = None
         if not paragraph:
             return
         value = " ".join(line.strip() for line in paragraph)
@@ -437,6 +444,19 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             tokens.append((MarkdownBlockKind.TABLE, "\n".join(table_lines), {}))
             index += 1
             continue
+        # A list marker starts its own block.  Without this every item fell
+        # through to the paragraph buffer, and `flush_paragraph` joined the
+        # whole list into one run-on block whose kind was decided by the first
+        # marker alone — four bullets became a single justified Word paragraph,
+        # and consecutive numbered items could not start their own groups.
+        indent = len(line) - len(line.lstrip())
+        if _LIST_ITEM_PATTERN.match(stripped):
+            flush_paragraph()
+            list_indent = indent
+        elif list_indent is not None and indent <= list_indent:
+            # Only a more-indented line continues the open item; anything at or
+            # left of the marker has left the list.
+            flush_paragraph()
         paragraph.append(stripped)
         index += 1
     flush_paragraph()
@@ -460,7 +480,9 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             current_group = f"section-{section}:{label}"
         source_reference = str(metadata.get("source")) if "source" in metadata else None
         level = int(metadata.get("level", 1)) if kind is MarkdownBlockKind.HEADING else None
-        rows = _rows_from_html(text) if kind is MarkdownBlockKind.TABLE else []
+        rows, spans = (
+            rows_and_spans_from_html(text) if kind is MarkdownBlockKind.TABLE else ([], [])
+        )
         block_metadata = {
             "section": section,
             **{key: value for key, value in metadata.items() if key not in {"source", "level"}},
@@ -476,6 +498,7 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
                 group_id=current_group,
                 starts_group=starts_group,
                 table_rows=rows,
+                table_spans=spans,
                 metadata=block_metadata,
             )
         )

@@ -10,21 +10,117 @@ from __future__ import annotations
 
 import io
 import math
+import multiprocessing
 import os
+import sys
+import threading
 from collections import deque
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from PIL import Image, ImageFilter
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from docreconstruct.exceptions import ProviderUnavailableError
+from docreconstruct.exceptions import LayoutBudgetExceededError, ProviderUnavailableError
 from docreconstruct.ir import BBox
 
 _DEFAULT_MAX_PAGE_WORKERS = 4
 _ABSOLUTE_MAX_PAGE_WORKERS = 8
+# `analyze_scan_pdf` runs on a request worker thread under the HTTP API, and the
+# default POSIX start method forks the whole multi-threaded process, which can
+# deadlock a child on a lock another thread held at fork time.  Pin a start
+# method that never forks a live interpreter.  Windows is already spawn-only.
+_PAGE_POOL_CONTEXT = multiprocessing.get_context(
+    "spawn" if sys.platform == "win32" else "forkserver"
+)
+# Each concurrent request used to build its own pool, so N in-flight documents
+# meant N x workers processes with nothing coordinating them.  These permits cap
+# the page workers this process will run at once; a request that cannot get them
+# analyzes serially rather than queueing behind an unbounded fan-out.
+_PAGE_WORKER_PERMITS = threading.BoundedSemaphore(_ABSOLUTE_MAX_PAGE_WORKERS)
+
+
+@contextmanager
+def _reserved_page_workers(count: int) -> Iterator[int]:
+    """Yield how many workers were actually reserved, releasing them on exit."""
+
+    acquired = 0
+    try:
+        while acquired < count and _PAGE_WORKER_PERMITS.acquire(blocking=False):
+            acquired += 1
+        yield acquired
+    finally:
+        for _ in range(acquired):
+            _PAGE_WORKER_PERMITS.release()
+
+
+# Interpreter start-up, re-importing NumPy/Pillow/Pydantic in every child, and
+# shipping page rasters over a pipe cost about a second before a worker pool
+# analyzes anything.  Measured on Windows with warm caches at 0.98 s for two
+# workers and 1.19 s for four, so the figure below stays a little above the
+# observed cost; it is what the projected saving has to beat.
+_PAGE_POOL_STARTUP_SECONDS = 1.5
+# How many times its own candidate pitch a measured text line may be before that
+# candidate stops being a believable split of it.
+_MAXIMUM_PERIODIC_SPLIT = 3.5
+# A compressed PDF says nothing about how much memory its pages decode to: a
+# 4.7 MiB, 20-page scan expands to roughly 500 MiB of RGB, so page count and
+# decoded pixels are the quantities that have to be bounded, not upload size.
+# Both ceilings are generous enough for ordinary documents and exist to refuse
+# the pathological ones before the process runs out of memory.
+_DEFAULT_MAX_LAYOUT_PAGES = 400
+_DEFAULT_MAX_LAYOUT_PIXELS = 1_500_000_000
+
+
+def _layout_budget(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _maximum_layout_pages() -> int:
+    return _layout_budget("DOCRECONSTRUCT_MAX_LAYOUT_PAGES", _DEFAULT_MAX_LAYOUT_PAGES)
+
+
+def _maximum_layout_pixels() -> int:
+    return _layout_budget("DOCRECONSTRUCT_MAX_LAYOUT_PIXELS", _DEFAULT_MAX_LAYOUT_PIXELS)
+
+
+def _assert_page_budget(page_count: int) -> None:
+    limit = _maximum_layout_pages()
+    if page_count > limit:
+        raise LayoutBudgetExceededError(
+            f"layout PDF has {page_count} pages, above the {limit}-page limit; "
+            "raise DOCRECONSTRUCT_MAX_LAYOUT_PAGES to allow it"
+        )
+
+
+class _PixelBudget:
+    """Accumulate decoded page pixels and stop before memory is exhausted."""
+
+    __slots__ = ("_limit", "_used")
+
+    def __init__(self) -> None:
+        self._limit = _maximum_layout_pixels()
+        self._used = 0
+
+    def charge(self, width: int, height: int) -> None:
+        self._used += max(0, int(width)) * max(0, int(height))
+        if self._used > self._limit:
+            raise LayoutBudgetExceededError(
+                f"layout PDF decodes to more than {self._limit} pixels; "
+                "raise DOCRECONSTRUCT_MAX_LAYOUT_PIXELS to allow it"
+            )
 
 
 class ScanRegionKind(StrEnum):
@@ -461,20 +557,26 @@ def _require_numpy() -> Any:
 
 
 def _runs(values: Any) -> list[tuple[int, int]]:
-    """Return inclusive-exclusive runs of truthy values."""
+    """Return inclusive-exclusive runs of truthy values.
 
-    indices = [int(item) for item in _require_numpy().flatnonzero(values)]
-    if not indices:
+    Scan analysis calls this thousands of times per page on full-width row and
+    column projections, so the boundaries are located with a single vectorized
+    neighbour comparison instead of a Python loop over every truthy index.
+    Sentinel padding makes the first and last run fall out of the same
+    comparison, which keeps the transition indices strictly alternating
+    start/end.
+    """
+
+    np = _require_numpy()
+    mask = np.asarray(values, dtype=bool).ravel()
+    padded = np.empty(mask.size + 2, dtype=bool)
+    padded[0] = False
+    padded[-1] = False
+    padded[1:-1] = mask
+    edges = np.flatnonzero(padded[1:] != padded[:-1])
+    if edges.size == 0:
         return []
-    result: list[tuple[int, int]] = []
-    start = previous = indices[0]
-    for index in indices[1:]:
-        if index != previous + 1:
-            result.append((start, previous + 1))
-            start = index
-        previous = index
-    result.append((start, previous + 1))
-    return result
+    return list(zip(edges[::2].tolist(), edges[1::2].tolist(), strict=True))
 
 
 def _merge_runs(runs: list[tuple[int, int]], gap: int) -> list[tuple[int, int]]:
@@ -490,17 +592,87 @@ def _merge_runs(runs: list[tuple[int, int]], gap: int) -> list[tuple[int, int]]:
     return merged
 
 
+def _splits_plausibly(text_lines: list[ScanTextLine], candidate_pitch: float) -> bool:
+    """Report whether a candidate rhythm could be the real pitch of these lines.
+
+    The measured line boxes may each hold two merged baselines, which is what
+    this override is for, but they cannot hold seven. Comparing the observed
+    line height against the candidate separates a genuine merge from an
+    autocorrelation peak that landed on stroke rhythm.
+    """
+
+    if candidate_pitch <= 0:
+        return False
+    heights = [line.bbox.y1 - line.bbox.y0 for line in text_lines]
+    if not heights:
+        return True
+    typical = float(_require_numpy().median(heights))
+    return typical <= candidate_pitch * _MAXIMUM_PERIODIC_SPLIT
+
+
+def _band_ceiling(bands: list[tuple[int, int]]) -> float:
+    """Return the tallest band height that can still be a single text line.
+
+    The bound used to be a fixed 45 pixels, which only describes body type
+    rasterized at roughly 150-200 DPI. Display type, or any page scanned
+    denser, produces taller bands and every one of them was discarded, leaving
+    no measured rhythm at all. What the filter is really for is rejecting a
+    band that merged several lines, so it is derived from the page's own bands:
+    a line that is more than twice the typical height is a merge. The 45-pixel
+    floor keeps ordinary body text behaving exactly as before.
+    """
+
+    heights = [band[1] - band[0] for band in bands if band[1] - band[0] >= 3]
+    if not heights:
+        return 45.0
+    return max(45.0, float(_require_numpy().median(heights)) * 2.2)
+
+
+def _dominant_gap(gaps: list[float]) -> float | None:
+    """Return the repeated baseline gap, or ``None`` when there is not one.
+
+    The 16-60 px window that classifies a gap as a line pitch only describes a
+    page rasterized at roughly 150-200 DPI; a 300 DPI scan or double spacing
+    falls outside it, and the estimate then came from page height alone. A gap
+    list can still show the real rhythm — but only when a majority of gaps
+    agree. A page whose bands barely separate yields a handful of gaps that are
+    section breaks, and their median is not a line pitch, so the caller keeps
+    its page-height prior instead.
+    """
+
+    if len(gaps) < 4:
+        return None
+    best: list[float] = []
+    for candidate in gaps:
+        tolerance = max(2.25, candidate * 0.08)
+        neighbors = [gap for gap in gaps if abs(gap - candidate) <= tolerance]
+        if len(neighbors) > len(best):
+            best = neighbors
+    if len(best) < 4 or len(best) * 2 < len(gaps):
+        return None
+    return float(_require_numpy().median(best))
+
+
 def _estimate_line_pitch(ink: Any, content: PixelBox) -> tuple[float, list[tuple[int, int]]]:
     np = _require_numpy()
     cropped = ink[content.y0 : content.y1, content.x0 : content.x1]
     row_ink = np.count_nonzero(cropped, axis=1)
     threshold = max(3, int(content.width * 0.002))
     bands = _runs(row_ink >= threshold)
-    useful = [band for band in bands if 3 <= band[1] - band[0] <= 45]
+    # The band-height and gap bounds are raw pixels, which only describe a page
+    # rasterized at roughly 150-200 DPI.  A 300 DPI scan, a phone photo, or
+    # double spacing puts the true rhythm outside them entirely, and the page
+    # then fell back to `content.height / 55` — a guess unrelated to the
+    # document.  The window is kept as a preference so no page that already
+    # lands inside it moves; the difference is what happens when nothing does.
+    useful = [band for band in bands if 3 <= band[1] - band[0] <= _band_ceiling(bands)]
     centers = [(start + end) / 2 for start, end in useful]
     gaps = [right - left for left, right in zip(centers, centers[1:], strict=False)]
     plausible = [gap for gap in gaps if 16 <= gap <= 60]
-    pitch = float(np.median(plausible)) if plausible else max(18.0, content.height / 55.0)
+    if plausible:
+        pitch = float(np.median(plausible))
+    else:
+        pitch = _dominant_gap(gaps) or max(18.0, content.height / 55.0)
     return pitch, [(start + content.y0, end + content.y0) for start, end in useful]
 
 
@@ -600,7 +772,9 @@ def _detect_text_lines(
         neighbors = [gap for gap in plausible if abs(gap - cluster) <= 2.25]
         refined_pitch = float(np.median(neighbors))
     else:
-        refined_pitch = initial_pitch
+        # Same reasoning as `_estimate_line_pitch`: a rhythm outside the window
+        # is still a measurement when enough gaps agree on it.
+        refined_pitch = _dominant_gap(gaps) or initial_pitch
     return lines, refined_pitch
 
 
@@ -980,6 +1154,7 @@ def _segment_column_layout(
         "column_boxes": [[box.x0, box.y0, box.x1, box.y1] for box in boxes],
         "column_confidence": float(round(min(0.99, 0.62 + support_ratio * 0.42), 4)),
         "periodic_line_pitch": min((item[0] for item in periodic), default=None),
+        "periodic_line_score": max((item[1] for item in periodic), default=None),
         "column_content_bottoms": [content_bottom(box) for box in boxes],
     }
 
@@ -1080,8 +1255,30 @@ def _detect_column_layout(
             round(min(0.99, 0.58 + (1.0 - smoothed[center] / baseline) * 0.36), 4)
         ),
         "periodic_line_pitch": min((item[0] for item in periodic), default=None),
+        "periodic_line_score": max((item[1] for item in periodic), default=None),
         "column_content_bottoms": [content_bottom(left_box), content_bottom(right_box)],
     }
+
+
+def ink_mask(gray_image: Image.Image) -> Any:
+    """Threshold ink against a locally blurred background.
+
+    Local illumination normalization handles photographed paper shadows while
+    retaining the deterministic fixed-threshold behaviour of clean scans.  The
+    layout planner needs the same mask, so both read this one definition.
+
+    ``background - grayscale`` is bounded by ``[-255, 255]`` for the uint8
+    rasters this receives, so int16 holds it exactly; widening both operands to
+    the platform int instead cost three eight-byte-per-pixel temporaries to
+    decide the same comparison.
+    """
+
+    np = _require_numpy()
+    grayscale = np.asarray(gray_image)
+    radius = max(7.0, min(gray_image.size) / 42.0)
+    background = np.asarray(gray_image.filter(ImageFilter.GaussianBlur(radius=radius)))
+    difference = background.astype(np.int16) - grayscale.astype(np.int16)
+    return (difference > 17) | (grayscale < 72)
 
 
 def _content_bbox(ink: Any) -> PixelBox:
@@ -1116,33 +1313,47 @@ def _coarse_components(mask: Any) -> list[tuple[int, int, int, int, int]]:
 
     np = _require_numpy()
     rows, columns = mask.shape
-    visited = np.zeros(mask.shape, dtype=bool)
+    # Scalar element access on a NumPy array costs far more than on a Python
+    # list, and this walks every set cell of a page-sized coarse mask.  One
+    # flat list serves as both the mask and the visited set — a cell is cleared
+    # when it is queued — and `flatnonzero` supplies the same row-major seed
+    # order as the original nested scan while skipping the empty background.
+    remaining: list[bool] = mask.reshape(-1).tolist()
     result: list[tuple[int, int, int, int, int]] = []
-    for row in range(rows):
-        for column in range(columns):
-            if not mask[row, column] or visited[row, column]:
-                continue
-            queue: deque[tuple[int, int]] = deque([(row, column)])
-            visited[row, column] = True
-            min_row = max_row = row
-            min_column = max_column = column
-            count = 0
-            while queue:
-                current_row, current_column = queue.popleft()
-                count += 1
-                min_row = min(min_row, current_row)
-                max_row = max(max_row, current_row)
-                min_column = min(min_column, current_column)
-                max_column = max(max_column, current_column)
-                for delta_row, delta_column in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    next_row = current_row + delta_row
-                    next_column = current_column + delta_column
-                    if not (0 <= next_row < rows and 0 <= next_column < columns):
-                        continue
-                    if mask[next_row, next_column] and not visited[next_row, next_column]:
-                        visited[next_row, next_column] = True
-                        queue.append((next_row, next_column))
-            result.append((min_column, min_row, max_column + 1, max_row + 1, count))
+    for origin in np.flatnonzero(mask).tolist():
+        if not remaining[origin]:
+            continue
+        remaining[origin] = False
+        queue: deque[int] = deque([origin])
+        row, column = divmod(origin, columns)
+        min_row = max_row = row
+        min_column = max_column = column
+        count = 0
+        while queue:
+            index = queue.popleft()
+            count += 1
+            current_row, current_column = divmod(index, columns)
+            if current_row < min_row:
+                min_row = current_row
+            elif current_row > max_row:
+                max_row = current_row
+            if current_column < min_column:
+                min_column = current_column
+            elif current_column > max_column:
+                max_column = current_column
+            if current_row and remaining[index - columns]:
+                remaining[index - columns] = False
+                queue.append(index - columns)
+            if current_row + 1 < rows and remaining[index + columns]:
+                remaining[index + columns] = False
+                queue.append(index + columns)
+            if current_column and remaining[index - 1]:
+                remaining[index - 1] = False
+                queue.append(index - 1)
+            if current_column + 1 < columns and remaining[index + 1]:
+                remaining[index + 1] = False
+                queue.append(index + 1)
+        result.append((min_column, min_row, max_column + 1, max_row + 1, count))
     return result
 
 
@@ -1274,17 +1485,26 @@ def _near_axis_rule_count(
 
     np = _require_numpy()
     primary = ink if horizontal else ink.T
-    span = primary.shape[1]
+    rows, span = primary.shape
     tolerance = max(2, round(line_pitch * 0.35))
     bridge = max(2, round(line_pitch * 0.12))
+    minimum_span = span * 0.52
+    # An accepted run needs both `right - left >= minimum_span` and a fill ratio
+    # of at least 0.70, so a row whose whole dilated projection holds fewer than
+    # `0.70 * minimum_span` pixels can never contain one.  Testing that
+    # necessary condition first skips run extraction on ordinary text rows
+    # without changing which rows are accepted.
+    minimum_fill = 0.70 * minimum_span
     active: list[tuple[int, int]] = []
-    for index in range(primary.shape[0]):
+    for index in range(rows):
         start = max(0, index - tolerance)
-        end = min(primary.shape[0], index + tolerance + 1)
+        end = min(rows, index + tolerance + 1)
         projection = np.any(primary[start:end], axis=0)
+        if float(np.count_nonzero(projection)) < minimum_fill:
+            continue
         runs = _merge_runs(_runs(projection), gap=bridge)
         if any(
-            right - left >= span * 0.52
+            right - left >= minimum_span
             and float(np.count_nonzero(projection[left:right])) / max(1, right - left) >= 0.70
             for left, right in runs
         ):
@@ -1417,15 +1637,9 @@ def analyze_scan_page(
 ) -> ScanPageLayout:
     """Recover layout evidence from a page image without OCR."""
 
-    np = _require_numpy()
     rgb = image.convert("RGB")
     gray_image = rgb.convert("L")
-    grayscale = np.asarray(gray_image)
-    # Local illumination normalization handles photographed paper shadows while
-    # retaining the deterministic fixed-threshold behaviour of clean scans.
-    radius = max(7.0, min(rgb.size) / 42.0)
-    background = np.asarray(gray_image.filter(ImageFilter.GaussianBlur(radius=radius)))
-    ink = (grayscale.astype(int) + 17 < background.astype(int)) | (grayscale < 72)
+    ink = ink_mask(gray_image)
     content = _content_bbox(ink)
     line_pitch, line_bands = _estimate_line_pitch(ink, content)
     text_lines, refined_pitch = _detect_text_lines(ink, content, line_pitch)
@@ -1434,7 +1648,22 @@ def analyze_scan_page(
         line_bands = [(line.bbox.y0, line.bbox.y1) for line in text_lines]
     column_metadata = _detect_column_layout(ink, content, text_lines, line_pitch)
     periodic_pitch = column_metadata.get("periodic_line_pitch")
-    if isinstance(periodic_pitch, (int, float)) and periodic_pitch >= 12:
+    # This override exists to split bands that merged two baselines, so the
+    # candidate rhythm has to be a plausible fraction of the ink already
+    # measured.  Autocorrelation on display type peaks on glyph stroke rhythm
+    # instead: a page of 32 pt text whose line boxes are 83 px tall scored 0.35
+    # at a lag of 12 px, which no correlation threshold separates from a real
+    # 13 px newspaper rhythm under 29 px boxes.  The ratio does separate them —
+    # 6.9 against 2.2 — because a text line cannot be seven of its own pitches
+    # tall.
+    if (
+        isinstance(periodic_pitch, (int, float))
+        and periodic_pitch >= 12
+        and _splits_plausibly(
+            text_lines,
+            float(periodic_pitch),
+        )
+    ):
         periodic_value = float(periodic_pitch)
         # A dense masthead or display title can make the first global pass
         # merge every second body baseline.  Once repeated column rhythm gives
@@ -1501,16 +1730,29 @@ def _estimate_paper_color(image: Image.Image, ink: Any, frame: PixelBox) -> str:
     """Estimate a flat editable page colour while rejecting ink and shadows."""
 
     np = _require_numpy()
-    pixels = np.asarray(image.convert("RGB"), dtype=np.float32)[
+    # Widen to float32 only for the retained non-ink samples.  Converting the
+    # whole page first allocated four bytes per channel for every pixel,
+    # including the ink and the area outside the frame that is discarded on the
+    # next line; the sample values themselves are unchanged because uint8 is
+    # represented exactly in float32.
+    pixels = np.asarray(image if image.mode == "RGB" else image.convert("RGB"))[
         frame.y0 : frame.y1,
         frame.x0 : frame.x1,
     ]
     non_ink = ~ink[frame.y0 : frame.y1, frame.x0 : frame.x1]
-    samples = pixels[non_ink]
+    samples = pixels[non_ink].astype(np.float32, copy=False)
     if len(samples) < 64:
         return "FFFFFF"
-    luminance = samples[:, 0] * 0.299 + samples[:, 1] * 0.587 + samples[:, 2] * 0.114
-    chroma = samples.max(axis=1) - samples.min(axis=1)
+    red_channel = samples[:, 0]
+    green_channel = samples[:, 1]
+    blue_channel = samples[:, 2]
+    luminance = red_channel * 0.299 + green_channel * 0.587 + blue_channel * 0.114
+    # Reducing across axis 1 of an (N, 3) array gathers with a stride of three
+    # per output element.  Comparing the three channel views instead reads each
+    # one contiguously for the same result.
+    chroma = np.maximum(np.maximum(red_channel, green_channel), blue_channel) - np.minimum(
+        np.minimum(red_channel, green_channel), blue_channel
+    )
     # Reject deep page-edge shadows and saturated figures.  The median of the
     # remaining paper pixels preserves off-white/blue paper without embedding
     # the photographed page as a raster background.
@@ -1629,15 +1871,27 @@ def _rectify_photographed_page(image: Image.Image) -> tuple[Image.Image, dict[st
         (595.28, 841.89, "a4"),
         (612.0, 792.0, "letter"),
     ]
-    if observed_ratio < 0.64:
+    if min(observed_ratio, 1.0 / max(observed_ratio, 1e-6)) < 0.64:
         standards.append((612.0, 1008.0, "legal"))
+    # Every paper size exists in both orientations.  Offering only the portrait
+    # ones made the closest match portrait for any page, so a landscape sheet
+    # was mesh-stretched into a portrait canvas — the glyphs analyzed after that
+    # are geometrically distorted, and the emitted section was portrait for a
+    # document that is physically wider than it is tall.
+    oriented = [
+        (width, height, name if index == 0 else f"{name}-landscape")
+        for name_width, name_height, name in standards
+        for index, (width, height) in enumerate(
+            ((name_width, name_height), (name_height, name_width))
+        )
+    ]
     pdf_width, pdf_height, page_standard = min(
-        standards,
+        oriented,
         key=lambda item: abs(math.log(max(0.1, observed_ratio) / (item[0] / item[1]))),
     )
     target_ratio = pdf_width / pdf_height
     target_width = max(720, min(1800, round(span_source)))
-    target_height = max(960, round(target_width / target_ratio))
+    target_height = max(round(960 * min(1.0, target_ratio)), round(target_width / target_ratio))
     bands = max(12, min(48, round((bottom - top) / 12)))
     mesh: list[tuple[tuple[int, int, int, int], tuple[float, ...]]] = []
     mapping_bands: list[SourceToScanBand] = []
@@ -1742,18 +1996,38 @@ def _extract_with_pypdf(path: Path) -> list[tuple[Image.Image, float, float]]:
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ProviderUnavailableError("pypdf is not installed") from exc
     reader = PdfReader(str(path))
+    page_objects = list(reader.pages)
+    # Establish that every page qualifies before decoding any of them.  Taking
+    # the length only walks the resource dictionary, while indexing decodes the
+    # raster, so a document that fails on its last page used to decode every
+    # earlier page — holding all of them in memory — and then discard the lot
+    # for the PyMuPDF fallback to rasterize again from scratch.
+    for page in page_objects:
+        if len(page.images) != 1:
+            raise ValueError("PDF page does not contain one unambiguous full-page raster")
+    _assert_page_budget(len(page_objects))
+    budget = _PixelBudget()
     pages: list[tuple[Image.Image, float, float]] = []
-    for page in reader.pages:
+    for page in page_objects:
         media_box = page.mediabox
         pdf_width = float(media_box.width)
         pdf_height = float(media_box.height)
-        images = list(page.images)
-        if len(images) != 1:
-            raise ValueError("PDF page does not contain one unambiguous full-page raster")
-        page_image = images[0].image
+        page_image = page.images[0].image
         if page_image is None:
             raise ValueError("PDF page raster could not be decoded")
+        budget.charge(page_image.width, page_image.height)
         image = page_image.convert("RGB")
+        # The MediaBox and the stored raster are both in unrotated page space,
+        # so a sheet-fed scan saved as a portrait page with `/Rotate 90` would
+        # otherwise be analyzed sideways against a portrait page size while the
+        # PyMuPDF fallback reported the same file as landscape.  Bring both into
+        # display space, which is the orientation every downstream consumer and
+        # every rotation-aware provider assumes.
+        rotation = page.rotation % 360
+        if rotation:
+            image = image.rotate(-rotation, expand=True)
+            if rotation % 180:
+                pdf_width, pdf_height = pdf_height, pdf_width
         pages.append((image, pdf_width, pdf_height))
     return pages
 
@@ -1765,9 +2039,23 @@ def _extract_with_pymupdf(path: Path, dpi: int) -> list[tuple[Image.Image, float
         raise ProviderUnavailableError("PyMuPDF is not installed") from exc
     pages: list[tuple[Image.Image, float, float]] = []
     with pymupdf.open(path) as pdf:
+        _assert_page_budget(pdf.page_count)
+        budget = _PixelBudget()
         for page in pdf:
             pixmap = page.get_pixmap(dpi=dpi, alpha=False)
-            image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
+            budget.charge(pixmap.width, pixmap.height)
+            # An `alpha=False` RGB pixmap is already the exact buffer Pillow
+            # wants, so wrapping it directly avoids compressing every page to
+            # PNG only to decode it again.  Anything else (grayscale, CMYK, a
+            # padded stride) still goes through the general encoder.
+            if pixmap.n == 3 and not pixmap.alpha and pixmap.stride == pixmap.width * 3:
+                image = Image.frombytes(
+                    "RGB",
+                    (pixmap.width, pixmap.height),
+                    pixmap.samples,
+                )
+            else:
+                image = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGB")
             pages.append((image, float(page.rect.width), float(page.rect.height)))
     return pages
 
@@ -1794,6 +2082,30 @@ def _scan_page_worker_count(page_count: int, maximum_workers: int | None) -> int
     return min(page_count, cpu_count, requested, _ABSOLUTE_MAX_PAGE_WORKERS)
 
 
+def _page_workers_are_worthwhile(
+    remaining_pages: int,
+    measured_page_seconds: float,
+    worker_count: int,
+) -> bool:
+    """Decide whether a worker pool can repay its own start-up cost.
+
+    Spreading ``remaining_pages`` over ``worker_count`` workers can save at
+    most the serial projection minus the parallel projection.  A pool is only
+    used when that saving exceeds :data:`_PAGE_POOL_STARTUP_SECONDS`, so a short
+    document is no longer charged more than a second of interpreter start-up to
+    parallelize work that finishes sooner than that on one core.
+    """
+
+    if remaining_pages < 1 or worker_count < 2:
+        return False
+    workers = min(worker_count, remaining_pages)
+    if workers < 2:
+        return False
+    projected_serial = measured_page_seconds * remaining_pages
+    saving = projected_serial - projected_serial / workers
+    return saving > _PAGE_POOL_STARTUP_SECONDS
+
+
 def _analyze_extracted_pdf_page(
     work_item: tuple[int, Image.Image, float, float],
 ) -> ScanPageLayout:
@@ -1815,9 +2127,12 @@ def analyze_scan_pdf(
 ) -> ScanDocumentLayout:
     """Extract and analyze every PDF page using installed local backends only.
 
-    Independent page analyses use bounded worker processes for multi-page inputs.
-    The returned pages always retain source order regardless of completion order.
-    Set ``maximum_workers=1`` for serial analysis.
+    Independent page analyses use bounded worker processes when the remaining
+    pages are slow enough to repay interpreter start-up.  The first page is
+    always analyzed in-process and times itself, so the decision reflects this
+    machine and this document instead of the page count alone.  The returned
+    pages always retain source order regardless of completion order.  Set
+    ``maximum_workers=1`` for serial analysis.
     """
 
     path = Path(source).expanduser().resolve()
@@ -1834,15 +2149,41 @@ def analyze_scan_pdf(
         for index, (image, pdf_width, pdf_height) in enumerate(extracted, start=1)
     ]
     worker_count = _scan_page_worker_count(len(work_items), maximum_workers)
+    pages: list[ScanPageLayout] = []
     if worker_count == 1:
         pages = [_analyze_extracted_pdf_page(item) for item in work_items]
     elif worker_count > 1:
-        with ProcessPoolExecutor(
-            max_workers=worker_count,
-        ) as executor:
-            pages = list(executor.map(_analyze_extracted_pdf_page, work_items))
-    else:
-        pages = []
+        # Analyze serially while the observed per-page cost is too low to fund a
+        # worker pool, and hand the rest over as soon as it is not.  Re-checking
+        # after every page keeps a cheap cover page from condemning a long,
+        # expensive document to one core, and bounds the serial work spent
+        # deciding by roughly the start-up cost itself.
+        started = perf_counter()
+        for index, item in enumerate(work_items):
+            remaining = len(work_items) - index
+            if index and _page_workers_are_worthwhile(
+                remaining,
+                (perf_counter() - started) / index,
+                worker_count,
+            ):
+                with _reserved_page_workers(min(worker_count, remaining)) as reserved:
+                    if reserved > 1:
+                        with ProcessPoolExecutor(
+                            max_workers=reserved,
+                            mp_context=_PAGE_POOL_CONTEXT,
+                        ) as executor:
+                            pages.extend(
+                                executor.map(_analyze_extracted_pdf_page, work_items[index:])
+                            )
+                        break
+                    # Another request holds the page workers; finish on this core
+                    # rather than adding an unbounded second pool beside theirs.
+                    pages.extend(
+                        _analyze_extracted_pdf_page(remaining_item)
+                        for remaining_item in work_items[index:]
+                    )
+                    break
+            pages.append(_analyze_extracted_pdf_page(item))
     if not pages:
         raise ValueError("layout PDF contains no pages")
     return ScanDocumentLayout(source=str(path), pages=pages)

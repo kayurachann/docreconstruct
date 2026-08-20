@@ -50,7 +50,7 @@ from docreconstruct.reconstruction.markdown_content import (
 )
 from docreconstruct.reconstruction.markdown_inline import parse_markdown_inline
 from docreconstruct.reconstruction.math_omml import append_omml, equation_row_count
-from docreconstruct.reconstruction.scan_layout import PixelBox, ScanDocumentLayout
+from docreconstruct.reconstruction.scan_layout import PixelBox, ScanDocumentLayout, ScanRegionKind
 
 _FONT = "Times New Roman"
 _HAN_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -135,7 +135,13 @@ def _document_paper_color(layout: ScanDocumentLayout) -> str:
 
 
 def _set_native_page_background(document: WordDocumentType, color: str) -> None:
-    """Set editable Word page colour; never insert a full-page scan image."""
+    """Set editable Word page colour; never insert a full-page scan image.
+
+    `w:background` alone is inert: Word and LibreOffice only paint it when
+    `w:displayBackgroundShape` is present in settings.xml, so the detected paper
+    colour was recorded in the package and then never shown. The flag is set
+    from the same early return as the colour, so the two cannot drift apart.
+    """
 
     if color.upper() == "FFFFFF":
         return
@@ -145,6 +151,12 @@ def _set_native_page_background(document: WordDocumentType, color: str) -> None:
         background = OxmlElement("w:background")
         root.insert(0, background)
     background.set(qn("w:color"), color.upper())
+    settings = document.settings.element
+    if settings.find(qn("w:displayBackgroundShape")) is None:
+        settings.insert_element_before(
+            OxmlElement("w:displayBackgroundShape"),
+            *_DISPLAY_BACKGROUND_SUCCESSORS,
+        )
 
 
 def _placement_geometry_points(
@@ -711,12 +723,103 @@ def _set_cell_margins(cell: _Cell, *, value: int = 32) -> None:
         node.set(qn("w:type"), "dxa")
 
 
+# WordprocessingML property containers are `xsd:sequence`, so a property placed
+# after a later-ordered sibling makes the document invalid.  Word's strict
+# parser answers that with "unreadable content" and repairs the file by dropping
+# the offending property, which silently removes rules, borders, and shading;
+# LibreOffice is lenient, so a rendered check does not see it.  python-docx has
+# no accessor for these three elements, so their ECMA-376 successors are named
+# here and the elements are inserted ahead of whichever one is already present.
+_PARAGRAPH_BORDER_SUCCESSORS = (
+    "w:shd",
+    "w:tabs",
+    "w:suppressAutoHyphens",
+    "w:kinsoku",
+    "w:wordWrap",
+    "w:overflowPunct",
+    "w:topLinePunct",
+    "w:autoSpaceDE",
+    "w:autoSpaceDN",
+    "w:bidi",
+    "w:adjustRightInd",
+    "w:snapToGrid",
+    "w:spacing",
+    "w:ind",
+    "w:contextualSpacing",
+    "w:mirrorIndents",
+    "w:suppressOverlap",
+    "w:jc",
+    "w:textDirection",
+    "w:textAlignment",
+    "w:textboxTightWrap",
+    "w:outlineLvl",
+    "w:divId",
+    "w:cnfStyle",
+    "w:rPr",
+    "w:sectPr",
+    "w:pPrChange",
+)
+_CELL_SHADING_SUCCESSORS = (
+    "w:noWrap",
+    "w:tcMar",
+    "w:textDirection",
+    "w:tcFitText",
+    "w:vAlign",
+    "w:hideMark",
+    "w:headers",
+    "w:cellIns",
+    "w:cellDel",
+    "w:cellMerge",
+    "w:tcPrChange",
+)
+_TABLE_BORDER_SUCCESSORS = (
+    "w:shd",
+    "w:tblLayout",
+    "w:tblCellMar",
+    "w:tblLook",
+    "w:tblCaption",
+    "w:tblDescription",
+    "w:tblPrChange",
+)
+_DISPLAY_BACKGROUND_SUCCESSORS = (
+    "w:printPostScriptOverText",
+    "w:printFractionalCharacterWidth",
+    "w:printFormsData",
+    "w:embedTrueTypeFonts",
+    "w:embedSystemFonts",
+    "w:saveSubsetFonts",
+    "w:saveFormsData",
+    "w:mirrorMargins",
+    "w:alignBordersAndEdges",
+    "w:bordersDoNotSurroundHeader",
+    "w:bordersDoNotSurroundFooter",
+    "w:gutterAtTop",
+    "w:hideSpellingErrors",
+    "w:hideGrammaticalErrors",
+    "w:activeWritingStyle",
+    "w:proofState",
+    "w:formsDesign",
+    "w:attachedTemplate",
+    "w:linkStyles",
+    "w:defaultTabStop",
+    "w:characterSpacingControl",
+    "w:savePreviewPicture",
+    "w:compat",
+    "w:rsids",
+    "m:mathPr",
+    "w:themeFontLang",
+    "w:clrSchemeMapping",
+    "w:decimalSymbol",
+    "w:listSeparator",
+)
+
+
 def _set_table_borders(table: Table, *, visible: bool, size: int = 5) -> None:
     properties = table._tbl.tblPr
     borders = properties.first_child_found_in("w:tblBorders")
     if borders is None:
         borders = OxmlElement("w:tblBorders")
-        properties.append(borders)
+        properties.insert_element_before(borders, *_TABLE_BORDER_SUCCESSORS)
     for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
         node = borders.find(qn(f"w:{edge}"))
         if node is None:
@@ -807,6 +910,52 @@ def _borderless_table(
     return table
 
 
+def _table_span_grid(
+    block: MarkdownBlock,
+    *,
+    rows: int,
+    columns: int,
+) -> list[list[tuple[int, int]]]:
+    """Return the block's span grid, or an all-ordinary grid when it has none.
+
+    Only an HTML table source carries spans; Markdown pipe tables and
+    provider-supplied row lists arrive already flattened. A grid that does not
+    match the text grid is discarded rather than trusted, so a malformed source
+    degrades to today's behaviour instead of merging the wrong cells.
+    """
+
+    ordinary = [[(1, 1)] * columns for _ in range(rows)]
+    declared = block.table_spans
+    if len(declared) != rows or any(len(row) != columns for row in declared):
+        return ordinary
+    grid: list[list[tuple[int, int]]] = []
+    for row_index, row in enumerate(declared):
+        resolved: list[tuple[int, int]] = []
+        for column_index, span in enumerate(row):
+            colspan, rowspan = int(span[0]), int(span[1])
+            if (colspan, rowspan) == (0, 0):
+                resolved.append((0, 0))
+                continue
+            colspan = max(1, min(colspan, columns - column_index))
+            rowspan = max(1, min(rowspan, rows - row_index))
+            resolved.append((colspan, rowspan))
+        grid.append(resolved)
+    return grid
+
+
+def _merge_anchors(
+    spans: list[list[tuple[int, int]]],
+) -> list[tuple[int, int, int, int]]:
+    """List the ``(row, column, colspan, rowspan)`` slots that need merging."""
+
+    return [
+        (row_index, column_index, colspan, rowspan)
+        for row_index, row in enumerate(spans)
+        for column_index, (colspan, rowspan) in enumerate(row)
+        if colspan > 1 or rowspan > 1
+    ]
+
+
 def _add_native_table(
     parent: WordDocumentType | _Cell,
     block: MarkdownBlock,
@@ -824,7 +973,14 @@ def _add_native_table(
     table = parent.add_table(rows=len(rows), cols=columns)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     _set_table_borders(table, visible=True, size=4)
+    # Widths are per grid column, so they must be written before any merge makes
+    # `table.cell` return one object for several indices.
     _set_table_widths(table, [available_width / columns] * columns)
+    spans = _table_span_grid(block, rows=len(rows), columns=columns)
+    for row_index, column_index, colspan, rowspan in _merge_anchors(spans):
+        table.cell(row_index, column_index).merge(
+            table.cell(row_index + rowspan - 1, column_index + colspan - 1)
+        )
     source_geometry = _placement_geometry_points(
         placement,
         layout,
@@ -842,6 +998,11 @@ def _add_native_table(
             row_properties.append(OxmlElement("w:cantSplit"))
         _set_row_minimum_height(table.rows[row_index], row_floor)
         for column_index in range(columns):
+            # A merged slot resolves to the same cell object as its anchor, so
+            # filling it again would append a second paragraph and inflate the
+            # row.  Only anchors are written.
+            if spans[row_index][column_index] == (0, 0):
+                continue
             cell = table.cell(row_index, column_index)
             _clear_cell(cell, size=size * 0.78, line_height=row_floor)
             value = row[column_index] if column_index < len(row) else ""
@@ -857,8 +1018,10 @@ def _add_native_table(
                     run.bold = True
                 properties = cell._tc.get_or_add_tcPr()
                 shading = OxmlElement("w:shd")
+                # `w:val` is required by CT_Shd; "clear" is the plain solid fill.
+                shading.set(qn("w:val"), "clear")
                 shading.set(qn("w:fill"), "F2F2F2")
-                properties.append(shading)
+                properties.insert_element_before(shading, *_CELL_SHADING_SUCCESSORS)
     return table
 
 
@@ -1129,7 +1292,7 @@ def _add_thematic_rule(
     bottom.set(qn("w:space"), "1")
     bottom.set(qn("w:color"), "000000")
     borders.append(bottom)
-    properties.append(borders)
+    properties.insert_element_before(borders, *_PARAGRAPH_BORDER_SUCCESSORS)
 
 
 def _render_linear(
@@ -1429,16 +1592,13 @@ def _render_image_table_pair(
     if image_center >= midpoint or table_center <= midpoint:
         return False
     first_visual = min(blocks.index(image), blocks.index(table_block))
-    pre = [
-        block
-        for block in blocks[:first_visual]
-        if block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
-    ]
-    post = [
-        block
-        for block in blocks[first_visual:]
-        if block.kind not in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
-    ]
+    # Exclude the two blocks this pair actually renders, not every visual in the
+    # group.  Filtering by kind dropped any third figure or table from `pre`,
+    # from `post`, and from the pair itself, so it reached neither
+    # `_render_linear` nor `_add_picture` and vanished from the document.
+    paired = {image.id, table_block.id}
+    pre = [block for block in blocks[:first_visual] if block.id not in paired]
+    post = [block for block in blocks[first_visual:] if block.id not in paired]
     _render_linear(
         parent,
         pre,
@@ -1916,7 +2076,21 @@ def _compact_empty_paragraphs_in_cells(document: WordDocumentType) -> None:
             spacing.set(qn("w:line"), "20")
 
 
-def _duplicate_figure_annotation_ids(blocks: Sequence[MarkdownBlock]) -> set[str]:
+def _places_figure_pixels(content: MarkdownContent, layout: ScanDocumentLayout) -> bool:
+    """Report whether this job renders any original figure pixels at all."""
+
+    if any(block.kind is MarkdownBlockKind.IMAGE for block in content.blocks):
+        return True
+    return any(
+        region.kind is not ScanRegionKind.TABLE for page in layout.pages for region in page.regions
+    )
+
+
+def _duplicate_figure_annotation_ids(
+    blocks: Sequence[MarkdownBlock],
+    *,
+    figures_rendered: bool,
+) -> set[str]:
     """Find OCR labels interleaved between options and already present in figures.
 
     OCR-to-Markdown tools sometimes emit short labels from a nearby figure in
@@ -1924,9 +2098,18 @@ def _duplicate_figure_annotation_ids(blocks: Sequence[MarkdownBlock]) -> set[str
     contains those pixels, so rendering the labels again would duplicate and
     misplace them.  This structural rule is document-agnostic and never alters
     ordinary prose or a complete option.
+
+    That justification only holds when some figure is actually placed.  A
+    text-only exam still matches the surrounding shape — a short unpunctuated
+    line after the final option, before the next question — so without
+    ``figures_rendered`` the rule deleted reviewed Markdown that no raster
+    reproduced, and the ``native_content_projection`` gate, which still counts
+    that text as required, then failed the job.
     """
 
     duplicate_ids: set[str] = set()
+    if not figures_rendered:
+        return duplicate_ids
     index = 1
     while index < len(blocks) - 1:
         if blocks[index - 1].kind is not MarkdownBlockKind.OPTION:
@@ -2188,6 +2371,15 @@ def _render_header_blocks(
     return consumed
 
 
+def _inline_shape(text: str) -> list[tuple[str, bool]]:
+    """Reduce text to its inline segmentation, ignoring where lines break."""
+
+    return [
+        (" ".join(segment.value.split()), segment.is_math)
+        for segment in parse_markdown_inline(text)
+    ]
+
+
 def _wrap_column_blocks(
     blocks: Sequence[MarkdownBlock],
     *,
@@ -2207,7 +2399,17 @@ def _wrap_column_blocks(
             break_long_words=False,
             break_on_hyphens=False,
         )
-        result.append(block.model_copy(update={"text": "\n".join(lines)}))
+        wrapped = "\n".join(lines)
+        # Every construct `parse_markdown_inline` protects — `$...$`, `<eq>`,
+        # code spans, URLs — is anchored to one line, so a break placed inside
+        # one destroys it: a formula turns back into literal dollar signs and a
+        # fragment of it is promoted to an unrelated equation.  Re-reading the
+        # wrapped text and keeping the break only when the segmentation is
+        # unchanged covers all of them without restating the delimiters here.
+        if _inline_shape(wrapped) != _inline_shape(block.text):
+            result.append(block)
+            continue
+        result.append(block.model_copy(update={"text": wrapped}))
     return result
 
 
@@ -2883,7 +3085,7 @@ def _render_masthead_cell(
             borders = properties.find(qn("w:pBdr"))
             if borders is None:
                 borders = OxmlElement("w:pBdr")
-                properties.append(borders)
+                properties.insert_element_before(borders, *_PARAGRAPH_BORDER_SUCCESSORS)
             for edge in ("top", "left", "bottom", "right"):
                 border = borders.find(qn(f"w:{edge}"))
                 if border is None:
@@ -3211,7 +3413,10 @@ def render_hybrid_docx(
     asset_match_by_id = {match.block_id: match for match in asset_matches}
     prepared_asset_mode = asset_payloads is not None
     asset_bytes: dict[str, bytes] = dict(asset_payloads or {})
-    duplicate_figure_annotations = _duplicate_figure_annotation_ids(content.blocks)
+    duplicate_figure_annotations = _duplicate_figure_annotation_ids(
+        content.blocks,
+        figures_rendered=_places_figure_pixels(content, layout),
+    )
     markdown_directory = Path(content.source).parent
     for block in () if prepared_asset_mode else content.image_blocks:
         if block.id in asset_bytes:

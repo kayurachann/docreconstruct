@@ -279,7 +279,23 @@ def element_type(value: Any, *, default: ElementType = ElementType.TEXT) -> Elem
     return default
 
 
-def text_from(value: Any) -> str | None:
+# How each container joins its children.  `spans` are the fragments *within*
+# one visual line — a styled run, an inline equation, a CJK segment — so joining
+# them with a newline split a single line into several and injected whitespace
+# that is not in the document.  The structured MinerU path already joins inline
+# spans with "".  Adjacent-duplicate removal is also wrong at that level: three
+# spans reading "1", "0", "0" are the number 100, not a repeat.
+_CONTAINER_SEPARATORS: tuple[tuple[str, str], ...] = (
+    ("lines", "\n"),
+    ("spans", ""),
+    ("children", "\n"),
+    ("blocks", "\n"),
+    ("content", "\n"),
+    ("res", "\n"),
+)
+
+
+def text_from(value: Any, *, separator: str = "\n") -> str | None:
     """Extract readable text from common block/span response shapes."""
 
     if isinstance(value, str):
@@ -290,16 +306,22 @@ def text_from(value: Any) -> str | None:
             if isinstance(candidate, str):
                 return candidate
         pieces: list[str] = []
-        for key in ("lines", "spans", "children", "blocks", "content", "res"):
+        for key, key_separator in _CONTAINER_SEPARATORS:
             if key in value:
-                candidate = text_from(value[key])
+                candidate = text_from(value[key], separator=key_separator)
                 if candidate:
                     pieces.append(candidate)
-        return "\n".join(_dedupe_adjacent(pieces)) or None
+        return _join_pieces(pieces, separator) or None
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        pieces = [piece for item in value if (piece := text_from(item))]
-        return "\n".join(_dedupe_adjacent(pieces)) or None
+        pieces = [piece for item in value if (piece := text_from(item, separator=separator))]
+        return _join_pieces(pieces, separator) or None
     return None
+
+
+def _join_pieces(pieces: list[str], separator: str) -> str:
+    if separator:
+        pieces = _dedupe_adjacent(pieces)
+    return separator.join(pieces)
 
 
 def _dedupe_adjacent(values: list[str]) -> list[str]:
