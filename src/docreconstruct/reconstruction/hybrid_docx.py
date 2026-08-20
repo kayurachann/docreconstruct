@@ -2270,6 +2270,15 @@ def _render_header_blocks(
     return consumed
 
 
+def _inline_shape(text: str) -> list[tuple[str, bool]]:
+    """Reduce text to its inline segmentation, ignoring where lines break."""
+
+    return [
+        (" ".join(segment.value.split()), segment.is_math)
+        for segment in parse_markdown_inline(text)
+    ]
+
+
 def _wrap_column_blocks(
     blocks: Sequence[MarkdownBlock],
     *,
@@ -2289,7 +2298,17 @@ def _wrap_column_blocks(
             break_long_words=False,
             break_on_hyphens=False,
         )
-        result.append(block.model_copy(update={"text": "\n".join(lines)}))
+        wrapped = "\n".join(lines)
+        # Every construct `parse_markdown_inline` protects — `$...$`, `<eq>`,
+        # code spans, URLs — is anchored to one line, so a break placed inside
+        # one destroys it: a formula turns back into literal dollar signs and a
+        # fragment of it is promoted to an unrelated equation.  Re-reading the
+        # wrapped text and keeping the break only when the segmentation is
+        # unchanged covers all of them without restating the delimiters here.
+        if _inline_shape(wrapped) != _inline_shape(block.text):
+            result.append(block)
+            continue
+        result.append(block.model_copy(update={"text": wrapped}))
     return result
 
 
