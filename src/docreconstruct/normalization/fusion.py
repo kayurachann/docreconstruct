@@ -302,13 +302,22 @@ def _remap_document_relationships(pages: Sequence[Page]) -> list[Page]:
             ) -> set[str]:
                 if value is None:
                     return set()
-                if value in fused_ids:
-                    return {value}
-                return {
+                # The audit map is authoritative: a relationship names an
+                # element of its own source document, so its recorded fused
+                # target is the right answer even when the source id happens to
+                # look like a fused one.  Fusion re-numbers elements by reading
+                # order, and a source that already uses the
+                # `page-{n}-element-{k}` namespace — any earlier fusion or
+                # `analyze` output reloaded through the `json` provider — would
+                # otherwise keep a stale id that now names a different element.
+                resolved = {
                     target
                     for identity in source_identities
                     for target in source_targets.get((identity, value), set())
                 }
+                if resolved:
+                    return resolved
+                return {value} if value in fused_ids else set()
 
             def singular(value: str | None) -> str | None:
                 candidates = targets(value)

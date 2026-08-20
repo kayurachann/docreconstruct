@@ -273,6 +273,113 @@ def test_cross_page_relationships_are_remapped_after_document_fusion() -> None:
     }
 
 
+def test_source_ids_in_the_fused_namespace_still_resolve_through_the_audit_map() -> None:
+    """A re-fused document must not keep an id that now names something else.
+
+    Fused ids are minted as `page-{n}-element-{k}`, so any earlier fusion or
+    `analyze` output reloaded through the `json` provider arrives already using
+    that namespace. Because clustering re-numbers elements by fused reading
+    order, treating such an id as already-final pointed a split table's
+    `continued_to` at whatever ended up in that slot.
+    """
+
+    def element(
+        engine: str,
+        element_id: str,
+        text: str,
+        box: tuple[float, float, float, float],
+        *,
+        order: int,
+        relationships: Relationship | None = None,
+    ) -> Element:
+        return _observation(
+            engine,
+            element_id,
+            text,
+            box,
+            kind=ElementType.TABLE,
+            relationships=relationships,
+        ).model_copy(update={"reading_order": order})
+
+    # A prior fusion output: its own ids already look like fused ids.
+    prior = Document(
+        id="prior-fusion",
+        pages=[
+            Page(
+                id="page-1",
+                number=1,
+                width=600,
+                height=800,
+                elements=[
+                    element(
+                        "json",
+                        "page-1-element-1",
+                        "Table part one",
+                        (50, 600, 550, 760),
+                        order=0,
+                        relationships=Relationship(continued_to="page-2-element-1"),
+                    )
+                ],
+            ),
+            Page(
+                id="page-2",
+                number=2,
+                width=600,
+                height=800,
+                elements=[
+                    element(
+                        "json",
+                        "page-2-element-1",
+                        "Table part two",
+                        (50, 60, 550, 220),
+                        order=1,
+                        relationships=Relationship(continued_from="page-1-element-1"),
+                    ),
+                    element(
+                        "json",
+                        "page-2-element-2",
+                        "Unrelated header table",
+                        (50, 10, 550, 50),
+                        order=0,
+                    ),
+                ],
+            ),
+        ],
+    )
+    # A second engine sees the same three tables under its own ids.
+    other = Document(
+        id="mineru-document",
+        pages=[
+            Page(
+                id="mineru-page-1",
+                number=1,
+                width=600,
+                height=800,
+                elements=[element("mineru", "m-1", "Table part one", (50, 600, 550, 760), order=0)],
+            ),
+            Page(
+                id="mineru-page-2",
+                number=2,
+                width=600,
+                height=800,
+                elements=[
+                    element("mineru", "m-2", "Table part two", (50, 60, 550, 220), order=1),
+                    element("mineru", "m-3", "Unrelated header table", (50, 10, 550, 50), order=0),
+                ],
+            ),
+        ],
+    )
+
+    fused = fuse_documents([prior, other])
+    by_id = {element.id: element for page in fused.pages for element in page.elements}
+    continuation = by_id["page-1-element-1"].relationships.continued_to
+
+    # Reading order puts the header first, so the continuation moved slots.
+    assert by_id["page-2-element-1"].text == "Unrelated header table"
+    assert continuation is not None
+    assert by_id[continuation].text == "Table part two"
+
+
 def test_unknown_missing_text_predicate_is_symmetric_against_text() -> None:
     unknown = _observation(
         "unknown-engine",
