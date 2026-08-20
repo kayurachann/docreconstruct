@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -900,6 +901,172 @@ def benchmark_source_command(
         _fail(exc)
 
 
+@cli.command("convert-omnidocbench")
+def convert_omnidocbench_command(
+    dataset_root: Path = typer.Option(
+        ...,
+        "--dataset-root",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Private OmniDocBench checkout or downloaded dataset root.",
+    ),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        file_okay=False,
+        help="Directory for canonical JSON sidecars and the conversion report.",
+    ),
+    manifest: Path | None = typer.Option(
+        None,
+        "--manifest",
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Optional corpus lock containing the pinned revision and input SHA-256.",
+    ),
+    annotations: Path | None = typer.Option(
+        None,
+        "--annotations",
+        help="Annotation JSON path, absolute or relative to --dataset-root.",
+    ),
+    images_directory: Path | None = typer.Option(
+        None,
+        "--images",
+        "--images-directory",
+        help="Raster directory, absolute or relative to --dataset-root.",
+    ),
+    dataset_revision: str | None = typer.Option(
+        None,
+        "--dataset-revision",
+        help="Immutable dataset revision; may instead come from --manifest.",
+    ),
+    report: Path | None = typer.Option(
+        None,
+        "--report",
+        help="Report path; defaults to OUTPUT/conversion-report.json.",
+    ),
+) -> None:
+    """Project private OmniDocBench annotations into audited canonical JSON."""
+
+    try:
+        from docreconstruct import evaluation
+
+        root = dataset_root.expanduser().resolve()
+        manifest_payload: Mapping[str, Any] = {}
+        upstream: Mapping[str, Any] = {}
+        expected_annotations_sha256: str | None = None
+        expected_image_sha256: dict[str, str] = {}
+        manifest_annotation_path: str | None = None
+        manifest_revision: str | None = None
+        if manifest is not None:
+            loaded_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+            if not isinstance(loaded_manifest, dict):
+                raise ValueError("--manifest root must be a JSON object")
+            manifest_payload = loaded_manifest
+            upstream_value = manifest_payload.get("upstream", {})
+            if not isinstance(upstream_value, dict):
+                raise ValueError("--manifest upstream must be a JSON object")
+            upstream = upstream_value
+            revision_value = upstream.get("revision")
+            if isinstance(revision_value, str) and revision_value.strip():
+                manifest_revision = revision_value.strip()
+            annotation_value = upstream.get("annotation_file", {})
+            if isinstance(annotation_value, dict):
+                path_value = annotation_value.get("path")
+                sha_value = annotation_value.get("sha256")
+                if isinstance(path_value, str) and path_value.strip():
+                    manifest_annotation_path = path_value
+                if isinstance(sha_value, str) and sha_value.strip():
+                    expected_annotations_sha256 = sha_value.strip().casefold()
+            cases_value = manifest_payload.get("cases", [])
+            if isinstance(cases_value, list):
+                for case in cases_value:
+                    if not isinstance(case, dict):
+                        continue
+                    image_name = case.get("upstream_image")
+                    image_value = case.get("image")
+                    image_sha = image_value.get("sha256") if isinstance(image_value, dict) else None
+                    if isinstance(image_name, str) and isinstance(image_sha, str):
+                        expected_image_sha256[Path(image_name).name] = image_sha.casefold()
+
+        selected_revision = (dataset_revision or manifest_revision or "").strip()
+        if not selected_revision:
+            raise ValueError("provide --dataset-revision or a manifest with upstream.revision")
+        if (
+            dataset_revision is not None
+            and manifest_revision is not None
+            and dataset_revision.strip() != manifest_revision
+        ):
+            raise ValueError("--dataset-revision does not match --manifest upstream.revision")
+
+        annotation_value = annotations or (
+            Path(manifest_annotation_path) if manifest_annotation_path else None
+        )
+        if annotation_value is not None:
+            annotation_path = (
+                annotation_value if annotation_value.is_absolute() else root / annotation_value
+            ).resolve()
+        else:
+            candidates = [
+                root / "OmniDocBench.json",
+                root / "OmniDocBench_demo.json",
+                root / "demo_data" / "omnidocbench_demo" / "OmniDocBench_demo.json",
+            ]
+            existing = [candidate.resolve() for candidate in candidates if candidate.is_file()]
+            if len(existing) != 1:
+                raise ValueError("could not select exactly one annotation JSON; pass --annotations")
+            annotation_path = existing[0]
+        if not annotation_path.is_file():
+            raise ValueError(f"annotation JSON does not exist: {annotation_path}")
+
+        if images_directory is not None:
+            images_path = (
+                images_directory if images_directory.is_absolute() else root / images_directory
+            ).resolve()
+        else:
+            image_candidates = [annotation_path.parent / "images", root / "images"]
+            existing_image_directories = list(
+                dict.fromkeys(
+                    candidate.resolve() for candidate in image_candidates if candidate.is_dir()
+                )
+            )
+            if len(existing_image_directories) != 1:
+                raise ValueError("could not select exactly one raster directory; pass --images")
+            images_path = existing_image_directories[0]
+        if not images_path.is_dir():
+            raise ValueError(f"raster directory does not exist: {images_path}")
+
+        destination = output.expanduser().resolve()
+        destination_report = (
+            report.expanduser().resolve()
+            if report is not None
+            else destination / "conversion-report.json"
+        )
+        conversion_report = evaluation.convert_omnidocbench_oracle_dataset(
+            annotation_path,
+            images_directory=images_path,
+            output_directory=destination,
+            dataset_revision=selected_revision,
+            report_path=destination_report,
+            expected_annotations_sha256=expected_annotations_sha256,
+            expected_image_sha256=expected_image_sha256,
+        )
+        console.print(f"[green]Wrote[/green] {destination_report}")
+        console.print(
+            f"pages: {conversion_report.page_count}; annotations: "
+            f"{conversion_report.annotation_count}; projected: "
+            f"{conversion_report.projected_element_count}; ignored but audited: "
+            f"{conversion_report.ignored_count}; warnings: "
+            f"{conversion_report.warning_count}"
+        )
+    except (ImportError, RuntimeError, TypeError, ValueError, OSError) as exc:
+        _fail(exc)
+
+
 @cli.command("benchmark-reconstruction")
 def benchmark_reconstruction_command(
     dataset: Path = typer.Argument(
@@ -1122,6 +1289,7 @@ _COMMANDS = {
     "formats",
     "schema",
     "compare",
+    "convert-omnidocbench",
     "benchmark",
     "benchmark-ocr",
     "benchmark-source",
