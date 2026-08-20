@@ -27,9 +27,10 @@ from docreconstruct.ir import BBox
 _DEFAULT_MAX_PAGE_WORKERS = 4
 _ABSOLUTE_MAX_PAGE_WORKERS = 8
 # Interpreter start-up, re-importing NumPy/Pillow/Pydantic in every child, and
-# shipping page rasters over a pipe cost well over a second before a worker pool
-# analyzes anything.  Measured locally at 1.26 s for two workers and 1.44 s for
-# four; the conservative figure below is what the projected saving has to beat.
+# shipping page rasters over a pipe cost about a second before a worker pool
+# analyzes anything.  Measured on Windows with warm caches at 0.98 s for two
+# workers and 1.19 s for four, so the figure below stays a little above the
+# observed cost; it is what the projected saving has to beat.
 _PAGE_POOL_STARTUP_SECONDS = 1.5
 
 
