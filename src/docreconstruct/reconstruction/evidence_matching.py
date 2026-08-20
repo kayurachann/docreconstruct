@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import difflib
 import html
+import math
 import re
 import unicodedata
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any, Literal, Protocol, TypeAlias
 from urllib.parse import unquote, urlsplit
@@ -66,6 +68,40 @@ _IGNORED_COORDINATE_SYSTEMS = {
     "synthetic_reading_order_only",
     "unavailable",
 }
+
+
+class EvidenceAlignmentReason(StrEnum):
+    """Stable reason codes for a failed or degraded evidence alignment."""
+
+    MATCHED = "matched"
+    NO_EVIDENCE_DOCUMENTS = "no_evidence_documents"
+    NO_MARKDOWN_BLOCKS = "no_markdown_blocks"
+    NO_LAYOUT_PAGES = "no_layout_pages"
+    NO_BOUND_EVIDENCE_PAGES = "no_bound_evidence_pages"
+    PROJECTION_ASPECT_MISMATCH = "projection_aspect_mismatch"
+    PROJECTION_REJECTED = "projection_rejected"
+    NO_SAFE_TEXT_CANDIDATES = "no_safe_text_candidates"
+
+
+class EvidenceAlignmentDiagnostics(BaseModel):
+    """Counted, non-mutating explanation of one strict alignment attempt."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason_codes: tuple[EvidenceAlignmentReason, ...]
+    markdown_blocks: int = Field(ge=0)
+    evidence_documents: int = Field(ge=0)
+    evidence_pages: int = Field(ge=0)
+    bound_pages: int = Field(ge=0)
+    eligible_elements: int = Field(ge=0)
+    textual_elements: int = Field(ge=0)
+    visual_elements: int = Field(ge=0)
+    boxes_outside_declared_page: int = Field(ge=0)
+    projection_aspect_mismatches: int = Field(ge=0)
+    projection_rejections: int = Field(ge=0)
+    projected_units: int = Field(ge=0)
+    aligned_candidates: int = Field(ge=0)
+    matched_blocks: int = Field(ge=0)
 
 
 def _reject_coerced_pixel_box(value: Any) -> None:
@@ -450,6 +486,177 @@ def match_sidecar_evidence(
         if block_contributions:
             matches.append(_fuse_block(block, block_contributions, scan_pages))
     return matches
+
+
+def diagnose_sidecar_evidence(
+    content: MarkdownContent,
+    layout: ScanDocumentLayout,
+    evidence: EvidenceDocuments,
+) -> EvidenceAlignmentDiagnostics:
+    """Explain strict alignment without changing candidates or acceptance rules.
+
+    The regular matcher intentionally drops geometry it cannot project safely.
+    This companion API counts where that happened.  It is suitable for
+    benchmark failure ledgers: callers receive stable reason codes instead of
+    having to infer a root cause from the final empty match list.
+    """
+
+    sources = _document_sources(evidence)
+    scan_pages = {page.number: page for page in layout.pages}
+    workspace = _MatchWorkspace.create()
+    evidence_pages = sum(len(source.document.pages) for source in sources)
+    bound_pages = 0
+    eligible_elements = 0
+    textual_elements = 0
+    visual_elements = 0
+    outside = 0
+    aspect_mismatches = 0
+    projection_rejections = 0
+    projected_units = 0
+    aligned_candidates = 0
+
+    for source in sources:
+        bindings = _bind_document_pages(source.document, scan_pages)
+        bound_pages += len(bindings)
+        for binding in bindings:
+            page = binding.page
+            scan_page = binding.scan_page
+            if _coordinate_system(page.metadata) in _IGNORED_COORDINATE_SYSTEMS:
+                continue
+            elements_by_id = {element.id: element for element in page.elements}
+            for element in page.elements:
+                if _redundant_child(element, elements_by_id):
+                    continue
+                if _coordinate_system(element.metadata) in _IGNORED_COORDINATE_SYSTEMS:
+                    continue
+                text = _element_text(element)
+                normalized = workspace.normalize(
+                    text,
+                    formula=element.type is ElementType.FORMULA,
+                )
+                is_visual = element.type in _VISUAL_TYPES
+                if not normalized and not is_visual:
+                    continue
+                eligible_elements += 1
+                if is_visual:
+                    visual_elements += 1
+                else:
+                    textual_elements += 1
+                if (
+                    element.bbox.x0 < 0
+                    or element.bbox.y0 < 0
+                    or element.bbox.x1 > page.width
+                    or element.bbox.y1 > page.height
+                ):
+                    outside += 1
+                projected = _project_page_box(scan_page, page, element.bbox)
+                if (
+                    projected is not None
+                    and projected.x1 > projected.x0
+                    and projected.y1 > projected.y0
+                ):
+                    projected_units += 1
+                    continue
+                projection_rejections += 1
+                mapping = scan_page.metadata.get("source_to_scan_map")
+                normalized_coordinates = (
+                    abs(page.width - 1.0) <= 1e-6 and abs(page.height - 1.0) <= 1e-6
+                )
+                if mapping is None and not normalized_coordinates:
+                    aspect_error = abs(
+                        math.log((page.width / page.height) / (scan_page.width / scan_page.height))
+                    )
+                    if aspect_error > 0.06:
+                        aspect_mismatches += 1
+                elif isinstance(mapping, Mapping) and not normalized_coordinates:
+                    source_width = mapping.get("source_width")
+                    source_height = mapping.get("source_height")
+                    target_width = mapping.get("target_width")
+                    target_height = mapping.get("target_height")
+                    dimensions = (
+                        source_width,
+                        source_height,
+                        target_width,
+                        target_height,
+                    )
+                    numeric_dimensions = [
+                        float(value)
+                        for value in dimensions
+                        if isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and value > 0
+                    ]
+                    if len(numeric_dimensions) == 4:
+                        source_width_value, source_height_value = numeric_dimensions[:2]
+                        target_width_value, target_height_value = numeric_dimensions[2:]
+                        source_error = abs(
+                            math.log(
+                                (page.width / page.height)
+                                / (source_width_value / source_height_value)
+                            )
+                        )
+                        target_error = abs(
+                            math.log(
+                                (page.width / page.height)
+                                / (target_width_value / target_height_value)
+                            )
+                        )
+                        if min(source_error, target_error) > 0.06:
+                            aspect_mismatches += 1
+
+        units = _evidence_units(source, scan_pages, workspace)
+        if units and content.blocks:
+            candidate_index = _TextCandidateIndex(content.blocks, units, workspace)
+            aligned = _align_source(content.blocks, units, candidate_index, workspace)
+            if not candidate_index.alignment_respects_anchors(aligned):
+                aligned = _align_source(
+                    content.blocks,
+                    units,
+                    candidate_index,
+                    workspace,
+                    exhaustive=True,
+                )
+            aligned_candidates += len(aligned)
+
+    matches = (
+        match_sidecar_evidence(content, layout, evidence)
+        if sources and content.blocks and layout.pages
+        else []
+    )
+    reasons: list[EvidenceAlignmentReason] = []
+    if not sources:
+        reasons.append(EvidenceAlignmentReason.NO_EVIDENCE_DOCUMENTS)
+    if not content.blocks:
+        reasons.append(EvidenceAlignmentReason.NO_MARKDOWN_BLOCKS)
+    if not layout.pages:
+        reasons.append(EvidenceAlignmentReason.NO_LAYOUT_PAGES)
+    if sources and layout.pages and bound_pages == 0:
+        reasons.append(EvidenceAlignmentReason.NO_BOUND_EVIDENCE_PAGES)
+    if aspect_mismatches:
+        reasons.append(EvidenceAlignmentReason.PROJECTION_ASPECT_MISMATCH)
+    if projection_rejections > aspect_mismatches:
+        reasons.append(EvidenceAlignmentReason.PROJECTION_REJECTED)
+    if sources and content.blocks and layout.pages and not matches and projected_units:
+        reasons.append(EvidenceAlignmentReason.NO_SAFE_TEXT_CANDIDATES)
+    if matches:
+        reasons.append(EvidenceAlignmentReason.MATCHED)
+
+    return EvidenceAlignmentDiagnostics(
+        reason_codes=tuple(reasons),
+        markdown_blocks=len(content.blocks),
+        evidence_documents=len(sources),
+        evidence_pages=evidence_pages,
+        bound_pages=bound_pages,
+        eligible_elements=eligible_elements,
+        textual_elements=textual_elements,
+        visual_elements=visual_elements,
+        boxes_outside_declared_page=outside,
+        projection_aspect_mismatches=aspect_mismatches,
+        projection_rejections=projection_rejections,
+        projected_units=projected_units,
+        aligned_candidates=aligned_candidates,
+        matched_blocks=len({match.block_id for match in matches}),
+    )
 
 
 def _document_sources(evidence: EvidenceDocuments) -> list[_DocumentSource]:

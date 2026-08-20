@@ -25,7 +25,9 @@ from docreconstruct.ir import (
 )
 from docreconstruct.providers.markdown import MarkdownEvidenceProvider
 from docreconstruct.reconstruction.evidence_matching import (
+    EvidenceAlignmentReason,
     EvidenceMatch,
+    diagnose_sidecar_evidence,
     match_sidecar_evidence,
 )
 from docreconstruct.reconstruction.markdown_content import (
@@ -166,6 +168,54 @@ def _bundle(provider: str, document: Document) -> SidecarEvidenceBundle:
             ),
         )
     )
+
+
+def test_diagnostics_distinguish_projection_metadata_from_matcher_failure() -> None:
+    content = _content((MarkdownBlockKind.PARAGRAPH, "精确文本", None))
+    layout = _layout(width=1000, height=2000)
+    element = _element(
+        "paragraph-1",
+        "精确文本",
+        (100, 200, 500, 300),
+        provider="oracle",
+    )
+    wrong_dimensions = _document(
+        "oracle",
+        [element],
+        width=2000,
+        height=1000,
+    )
+
+    rejected = diagnose_sidecar_evidence(
+        content,
+        layout,
+        _bundle("oracle", wrong_dimensions),
+    )
+
+    assert rejected.reason_codes == (EvidenceAlignmentReason.PROJECTION_ASPECT_MISMATCH,)
+    assert rejected.eligible_elements == 1
+    assert rejected.projection_aspect_mismatches == 1
+    assert rejected.projection_rejections == 1
+    assert rejected.projected_units == 0
+    assert rejected.aligned_candidates == 0
+    assert rejected.matched_blocks == 0
+
+    corrected_dimensions = _document(
+        "oracle",
+        [element],
+        width=1000,
+        height=2000,
+    )
+    accepted = diagnose_sidecar_evidence(
+        content,
+        layout,
+        _bundle("oracle", corrected_dimensions),
+    )
+
+    assert accepted.reason_codes == (EvidenceAlignmentReason.MATCHED,)
+    assert accepted.projected_units == 1
+    assert accepted.aligned_candidates == 1
+    assert accepted.matched_blocks == 1
 
 
 def test_bundle_geometry_maps_and_clips_to_scan_pixels_with_typed_style() -> None:
