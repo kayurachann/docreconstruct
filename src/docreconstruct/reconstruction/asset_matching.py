@@ -378,13 +378,30 @@ def _require_numpy() -> Any:
     return np
 
 
-def _ncc_map(page: Any, template: Any) -> Any:
+@dataclass(frozen=True)
+class _PreparedPage:
+    """A reduced page raster with the summed-area tables it will be scored against."""
+
+    array: Any
+    integral: Any
+    integral_square: Any
+
+
+def _prepare_page(image: Image.Image, *, width: int, height: int) -> _PreparedPage:
+    np = _require_numpy()
+    array = _gray_array(image, width=width, height=height).astype(np.float64, copy=False)
+    return _PreparedPage(array, _integral(array), _integral(np.square(array)))
+
+
+def _ncc_map(page: _PreparedPage, template: Any) -> Any:
     """FFT-backed normalized cross correlation for every valid placement."""
 
     np = _require_numpy()
-    page = page.astype(np.float64, copy=False)
+    integral = page.integral
+    integral_square = page.integral_square
+    raster = page.array.astype(np.float64, copy=False)
     template = template.astype(np.float64, copy=False)
-    page_height, page_width = page.shape
+    page_height, page_width = raster.shape
     template_height, template_width = template.shape
     if template_height > page_height or template_width > page_width:
         return np.empty((0, 0), dtype=np.float64)
@@ -394,15 +411,13 @@ def _ncc_map(page: Any, template: Any) -> Any:
         return np.empty((0, 0), dtype=np.float64)
     fft_shape = (page_height + template_height - 1, page_width + template_width - 1)
     convolution = np.fft.irfft2(
-        np.fft.rfft2(page, fft_shape) * np.fft.rfft2(np.flip(centered, axis=(0, 1)), fft_shape),
+        np.fft.rfft2(raster, fft_shape) * np.fft.rfft2(np.flip(centered, axis=(0, 1)), fft_shape),
         fft_shape,
     )
     numerator = convolution[
         template_height - 1 : page_height,
         template_width - 1 : page_width,
     ]
-    integral = _integral(page)
-    integral_square = _integral(np.square(page))
     patch_sum = _window_sums(integral, template_height, template_width)
     patch_square = _window_sums(integral_square, template_height, template_width)
     count = float(template_height * template_width)
@@ -426,17 +441,27 @@ def _match_asset_to_pages(
     layout: ScanDocumentLayout,
     *,
     first_page: int,
+    prepared_pages: dict[int, _PreparedPage] | None = None,
 ) -> tuple[int, PixelBox, float] | None:
     np = _require_numpy()
     best: tuple[int, PixelBox, float] | None = None
     scales = (0.72, 0.80, 0.88, 0.94, 1.0, 1.06, 1.14, 1.24)
+    cache = prepared_pages if prepared_pages is not None else {}
     for page in layout.pages:
         if page.number < first_page:
             continue
         reduction = max(1.0, page.width / 520.0)
         reduced_width = max(1, int(round(page.width / reduction)))
         reduced_height = max(1, int(round(page.height / reduction)))
-        page_array = _gray_array(page.image, width=reduced_width, height=reduced_height)
+        # The reduced raster and its summed-area tables depend only on the page,
+        # so they were being rebuilt once per template scale and once per
+        # Markdown image, when every asset scores against the same eight scales
+        # of the same pages.
+        prepared = cache.get(page.number)
+        if prepared is None:
+            prepared = _prepare_page(page.image, width=reduced_width, height=reduced_height)
+            cache[page.number] = prepared
+        page_array = prepared
         for scale in scales:
             template_width = int(round(asset.image.width * scale / reduction))
             template_height = int(round(asset.image.height * scale / reduction))
@@ -531,6 +556,9 @@ def match_markdown_assets(
     directory = Path(content.source).parent
     matches: list[AssetMatch] = []
     first_page = 1
+    # Every image scores against the same reduced page rasters, so they and
+    # their summed-area tables are prepared once for the whole document.
+    prepared_pages: dict[int, _PreparedPage] = {}
     for block in content.image_blocks:
         source = (block.source or "").strip()
         hint = _source_bbox_hint(source, layout, first_page=first_page)
@@ -545,7 +573,12 @@ def match_markdown_assets(
                 raise
             asset = None
         matched = (
-            _match_asset_to_pages(asset, layout, first_page=first_page)
+            _match_asset_to_pages(
+                asset,
+                layout,
+                first_page=first_page,
+                prepared_pages=prepared_pages,
+            )
             if asset is not None
             else None
         )
