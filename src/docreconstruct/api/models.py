@@ -68,6 +68,19 @@ class AnalyzeOptions(BaseModel):
         """Keep upload clients from selecting arbitrary server-side files."""
 
         blocked_names = {
+            "access_key",
+            "access_token",
+            "allow_custom_endpoint",
+            "allow_remote",
+            "api_key",
+            "app_id",
+            "app_key",
+            "authorization",
+            "base_url",
+            "client_secret",
+            "credential",
+            "credentials",
+            "endpoint",
             "file",
             "filename",
             "input_file",
@@ -76,12 +89,24 @@ class AnalyzeOptions(BaseModel):
             "output_file",
             "output_path",
             "path",
+            "password",
+            "pdf_endpoint",
+            "processor_id",
+            "processor_version",
+            "project_id",
             "provider_sources",
+            "quota_project_id",
+            "server_token",
+            "secret",
             "source_file",
             "source_path",
+            "subscription_key",
             "template_file",
             "template_path",
+            "text_endpoint",
+            "token",
         }
+        secret_suffixes = ("_api_key", "_password", "_secret", "_token")
 
         def inspect(value: Any, location: str) -> None:
             if isinstance(value, dict):
@@ -90,14 +115,16 @@ class AnalyzeOptions(BaseModel):
                     nested_location = f"{location}.{key}" if location else str(key)
                     if (
                         normalized in blocked_names
+                        or normalized.endswith(secret_suffixes)
+                        or normalized.endswith("_endpoint")
                         or normalized.endswith("_directory")
                         or normalized.endswith("_dir")
                         or normalized.endswith("_file")
                         or normalized.endswith("_path")
                     ):
                         raise ValueError(
-                            f"local file option `{nested_location}` is not allowed "
-                            "by the upload API"
+                            f"provider option `{nested_location}` is managed by the server "
+                            "and is not allowed by the upload API"
                         )
                     inspect(nested, nested_location)
             elif isinstance(value, list):
@@ -159,7 +186,7 @@ class CompareOptions(BaseModel):
 
 
 class HybridOptions(BaseModel):
-    """Safe options for Markdown + layout + optional JSON reconstruction."""
+    """Safe options for Markdown + layout + mandatory JSON evidence."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -169,9 +196,19 @@ class HybridOptions(BaseModel):
     quality: HybridQuality = HybridQuality.FAST
     minimum_visual_score: float | None = Field(default=None, ge=0.0, le=1.0)
     output_filename: str | None = Field(default=None, max_length=240)
+    ocr_provider: str | None = Field(default=None, max_length=80)
+    ocr_languages: list[str] = Field(default_factory=list, max_length=16)
+    ocr_handwriting: bool = False
+    ocr_formulas: bool = True
+    ocr_tables: bool = True
+    ocr_charts: bool = False
+    ocr_distorted_photo: bool = False
+    ocr_dewarping: bool = False
+    # Deprecated compatibility switch. New clients should use
+    # ``ocr_provider='paddleocr_vl_server'`` after discovery.
     use_paddleocr_vl: bool = False
 
-    @field_validator("evidence_provider")
+    @field_validator("evidence_provider", "ocr_provider")
     @classmethod
     def normalize_evidence_provider(cls, value: str | None) -> str | None:
         if value is None:
@@ -180,7 +217,21 @@ class HybridOptions(BaseModel):
         if not normalized:
             return None
         if any(character in normalized for character in ("/", "\\", "=", ":")):
-            raise ValueError("evidence_provider must be a registered provider name")
+            raise ValueError("provider must be a registered provider name")
+        return normalized.casefold().replace("-", "_")
+
+    @field_validator("ocr_languages")
+    @classmethod
+    def normalize_ocr_languages(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            language = value.strip()
+            if not language:
+                continue
+            if len(language) > 40 or any(character in language for character in ("/", "\\", "=")):
+                raise ValueError("ocr_languages must contain short language names or codes")
+            if language not in normalized:
+                normalized.append(language)
         return normalized
 
     @field_validator("output_filename")
@@ -199,6 +250,12 @@ class HybridOptions(BaseModel):
     def validate_quality_options(self) -> HybridOptions:
         if self.quality is HybridQuality.FAST and self.minimum_visual_score is not None:
             raise ValueError("minimum_visual_score requires quality='verified'")
+        if (
+            self.use_paddleocr_vl
+            and self.ocr_provider is not None
+            and self.ocr_provider != "paddleocr_vl_server"
+        ):
+            raise ValueError("use_paddleocr_vl cannot be combined with a different ocr_provider")
         return self
 
 
@@ -217,6 +274,32 @@ class ProviderInfo(BaseModel):
 
 class ProvidersResponse(BaseModel):
     providers: list[ProviderInfo]
+
+
+class HostedOCRProviderInfo(BaseModel):
+    """Public, non-secret description of an operator-enabled OCR service."""
+
+    name: str
+    label: str
+    available: bool
+    cost: str
+    privacy: str
+    supported_inputs: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    reason: str | None = None
+
+
+class HybridCapabilitiesResponse(BaseModel):
+    """Browser-safe contract for the best-quality reconstruction flow."""
+
+    evidence_required: bool = True
+    evidence_modes: list[str] = Field(default_factory=lambda: ["upload_json"])
+    server_generates_json: bool = False
+    browser_credentials_accepted: bool = False
+    verified_available: bool = False
+    remote_assets_available: bool = False
+    maximum_upload_mb: int
+    hosted_ocr_providers: list[HostedOCRProviderInfo] = Field(default_factory=list)
 
 
 class FormatInfo(BaseModel):

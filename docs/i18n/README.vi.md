@@ -18,18 +18,20 @@ trên GPU; kho mã nguồn này cũng không cung cấp máy chủ xử lý côn
 miễn phí không giới hạn.
 
 Để sử dụng giao diện, người dùng phải chọn máy chủ do một đơn vị mà mình tin cậy
-vận hành. Trước khi gửi, giao diện sẽ yêu cầu xác nhận việc tải tệp Markdown đã
-rà soát, PDF hoặc ảnh gốc và tệp JSON tùy chọn lên máy chủ đó. Nếu bật
-PaddleOCR-VL, máy chủ có thể chuyển tiếp bản gốc đến dịch vụ OCR mà đơn vị vận
-hành đã cấu hình.
+vận hành. Chế độ chất lượng cao cần đủ tệp Markdown đã rà soát, PDF hoặc ảnh gốc
+và JSON có thông tin vị trí. Người dùng có thể tải JSON đã có lên, hoặc chủ động
+chọn một dịch vụ OCR trực tuyến để tạo JSON. Trước khi bất kỳ tệp nào rời khỏi
+thiết bị, giao diện sẽ nêu rõ nơi nhận và yêu cầu người dùng xác nhận.
+
 Khi thay đổi địa chỉ máy chủ hoặc lựa chọn OCR, người dùng phải xác nhận lại.
 Chính sách lưu giữ, quyền riêng tư, nơi xử lý dữ liệu, hạn mức và chi phí đều do
 đơn vị vận hành quyết định. Xem thêm [hướng dẫn về hiệu năng và triển khai](../PERFORMANCE.md).
 
 ## Bộ đầu vào cho kết quả tốt nhất
 
-Kết quả thường chính xác nhất khi có đủ ba loại đầu vào bổ trợ lẫn nhau. Mỗi
-loại giữ một vai trò riêng và không thể thay thế hoàn toàn cho hai loại còn lại:
+Chế độ chất lượng cao chỉ bắt đầu khi có đủ ba loại đầu vào bổ trợ lẫn nhau.
+Mỗi loại giữ một vai trò riêng và không thể thay thế hoàn toàn cho hai loại còn
+lại:
 
 | Đầu vào | Vai trò trong quá trình tái tạo |
 | --- | --- |
@@ -41,8 +43,37 @@ Trước khi tổng hợp, dự án chuẩn hóa và đối chiếu riêng từn
 thể giúp xác định bố cục và cấu trúc, nhưng không được ghi đè câu chữ trong
 Markdown. PDF hoặc ảnh gốc vẫn là căn cứ cuối cùng về hình thức và kích thước
 trang. Tệp JSON không liên quan hoặc mâu thuẫn sẽ bị từ chối hoặc được nêu rõ
-trong báo cáo QA. Nếu thiếu một trong ba nguồn, dự án vẫn có thể xử lý, nhưng sẽ
-đối chiếu được ít yếu tố hơn và kết quả cần được xem là có độ tin cậy thấp hơn.
+trong báo cáo QA. JSON chỉ chứa văn bản rời rạc là chưa đủ: mỗi khối phải gắn với
+trang, kích thước trang và khung hoặc đa giác tọa độ. Nếu thiếu một trong ba
+nguồn, dự án vẫn có thể xử lý theo chế độ ước lượng, nhưng kết quả phải được xem
+là có độ tin cậy thấp hơn, không phải kết quả chất lượng cao.
+
+### Chưa có JSON vị trí?
+
+Người dùng có thể mở trang chính thức để tự xuất tệp, hoặc dùng tài khoản và
+khóa riêng với máy chủ đáng tin cậy. Không được đặt khóa dùng chung trong mã
+JavaScript của GitHub Pages. Hạn mức, giá và chính sách có thể thay đổi; hãy đọc
+trang chính thức ngay trước khi tải tài liệu lên.
+
+| Lựa chọn | Phù hợp với | Điều cần biết trước khi dùng |
+| --- | --- | --- |
+| [API chính thức / AI Studio của PaddleOCR](https://www.paddleocr.ai/latest/en/version3.x/inference_deployment/serving/paddleocr_official_api/overview.html) | Bản quét đa ngôn ngữ, ảnh chụp méo, bảng và công thức; có thể xuất Markdown cùng JSON | Dùng quyền truy cập AI Studio của chính người dùng. [Tài liệu hạn mức hiện tại](https://ai.baidu.com/ai-doc/AISTUDIO/pmjcld5qm) ghi 3.000 trang mỗi ngày cho mỗi mô hình và mỗi người dùng, đồng thời chỉ xử lý 100 trang đầu của tệp dài hơn. Đây không phải cam kết thời gian hoạt động. Tài liệu API được dẫn không nêu thời hạn lưu riêng cho PaddleOCR, vì vậy không nên gửi tài liệu nhạy cảm trước khi đọc chính sách hiện hành của Baidu. |
+| [Mistral OCR](https://docs.mistral.ai/api/endpoint/ocr) | Trang phức tạp, Markdown có cấu trúc và dữ liệu vị trí | Cần khóa riêng và tải tệp lên Mistral. [Bảng giá](https://mistral.ai/pricing/api/) tính theo trang; hạn mức thử nghiệm phụ thuộc từng tài khoản, không phải năng lực miễn phí được bảo đảm. [Không lưu dữ liệu](https://help.mistral.ai/en/articles/347612-can-i-activate-zero-data-retention-zdr) chỉ dành cho gói trả phí đủ điều kiện và không bao phủ mọi cách tải tệp hoặc xử lý theo lô. |
+| [Mathpix](https://docs.mathpix.com/) | Công thức toán, tài liệu khoa học và chữ viết tay | [Không có bản dùng thử miễn phí](https://website.mathpix.com/docs/convert/billing) và có phí thiết lập, phí sử dụng. Mathpix yêu cầu [không để khóa bí mật trong mã phía trình duyệt](https://docs.mathpix.com/reference/authentication), nên PDF cần máy chủ đáng tin cậy. [Chính sách lưu giữ](https://docs.mathpix.com/concepts/data-retention) hiện nêu tối đa 30 ngày cho ảnh nguồn và 90 ngày cho văn bản nhận dạng. |
+| [Azure Document Intelligence](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/prebuilt/layout?view=doc-intel-4.0.0) | Biểu mẫu, bảng, thứ tự đọc, Markdown và đa giác tọa độ | Cần tài nguyên Azure và thông tin xác thực của người dùng. [Gói F0](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/service-limits?view=doc-intel-4.0.0) hiện cho 500 trang mỗi tháng nhưng chỉ đọc hai trang đầu của mỗi yêu cầu. Microsoft cho biết dữ liệu phân tích được lưu tạm trong vùng đã chọn và [xóa trong vòng 24 giờ](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/faq?view=doc-intel-4.0.0). |
+| [Google Document AI](https://docs.cloud.google.com/document-ai/docs/overview) | Nhận dạng tài liệu doanh nghiệp, biểu mẫu và dữ liệu tọa độ chi tiết | Cần dự án Google Cloud, bộ xử lý, thanh toán và quyền OAuth. [Bảng giá](https://cloud.google.com/products/document-ai/pricing) hiện miễn phí 1.000 trang Enterprise Document OCR đầu tiên mỗi tháng cho mỗi tài khoản rồi tính theo mức sử dụng. Google cho biết [không dùng tài liệu và kết quả dự đoán của khách hàng để huấn luyện](https://docs.cloud.google.com/document-ai/docs/security). Dự án phải tự chuyển JSON trả về thành Markdown. |
+| [OCR.space](https://ocr.space/ocrapi) | Tệp ngắn, không nhạy cảm, cần gọi trực tiếp từ trình duyệt | Gói miễn phí hiện giới hạn 500 yêu cầu mỗi ngày cho mỗi địa chỉ IP, 25.000 yêu cầu mỗi tháng, 1 MB mỗi tệp và ba trang PDF, không có cam kết thời gian hoạt động. Hãy dùng khóa riêng của người dùng vì khóa trong trình duyệt vẫn có thể bị sao chép và dùng hết hạn mức. Nhà cung cấp cho biết không lưu tệp nguồn và văn bản OCR. |
+| [olmOCR](https://github.com/allenai/olmocr) | PDF khó, chữ viết tay, toán, bảng và bố cục nhiều cột | Mã nguồn Apache-2.0 không đồng nghĩa có máy chủ miễn phí. Chạy tại máy cần GPU phù hợp; nhà cung cấp suy luận từ xa tính phí riêng. [Bản trình diễn](https://olmocr.allenai.org/) chỉ để thử, không có API sản xuất hay cam kết thời gian hoạt động được công bố. |
+| [Bản trình diễn trên Hugging Face Spaces](https://huggingface.co/spaces/PaddlePaddle/PaddleOCR-VL-1.6_Online_Demo) | Thử mô hình trước khi chọn cách triển khai | [ZeroGPU](https://huggingface.co/docs/hub/main/spaces-zerogpu) có số phút GPU mỗi ngày tùy loại tài khoản, có hàng đợi và giới hạn thời gian chạy; [máy chủ suy luận chuyên dụng](https://huggingface.co/docs/inference-endpoints/en/pricing) là dịch vụ trả phí. Không dùng bản trình diễn công cộng làm máy chủ mặc định của dự án. |
+
+Trong dự án, `paddleocr_official` dùng `PADDLEOCR_ACCESS_TOKEN` để gửi công việc
+bất đồng bộ tới AI Studio theo [bộ công cụ chính thức](https://www.paddleocr.ai/latest/en/version3.x/inference_deployment/serving/paddleocr_official_api/python.html).
+Nó khác với `paddleocr_vl_server`, vốn trỏ tới máy chủ PaddleOCR-VL do đơn vị vận
+hành tự chọn và quản lý. Đơn vị vận hành có thể cho phép công khai một danh sách
+nhỏ bằng `DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS`. Điểm
+`/v1/hybrid/capabilities` chỉ liệt kê tên trong danh sách cho phép và chỉ đánh
+dấu có thể dùng khi máy chủ đã cấu hình đủ; nó không trả về khóa, mã truy cập
+hay địa chỉ dịch vụ bí mật.
 
 Theo mặc định, nhãn số trang phải khớp chính xác. Dự án chỉ ghép lại theo thứ tự
 khi cả hai dãy trang đều đầy đủ, liên tiếp và có cùng số lượng — chẳng hạn các

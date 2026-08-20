@@ -22,13 +22,15 @@ cannot run Python, LibreOffice, Triton, vLLM, or GPU OCR. This repository does
 **not** include a public backend or an unlimited free GPU endpoint.
 
 Before submitting a document, the user must choose a backend operated by an
-organization they trust and explicitly consent to uploading the Markdown,
-original PDF/image, and optional JSON evidence to that operator. If
-PaddleOCR-VL is enabled, the backend may forward the original to its configured
-OCR service. Retention, privacy, region, quota, and charges are governed by
-those operators, not by GitHub Pages or this repository. The client blocks
-submission until that disclosure is accepted and asks for consent again when
-the backend or OCR choice changes. See
+organization they trust. The high-fidelity workflow requires reviewed
+Markdown, the original PDF/image, and positioned JSON evidence. That JSON can
+be uploaded as a saved OCR result or created by a hosted OCR service that the
+user explicitly selects. The user must consent before any of these files leave
+the device. If hosted OCR is enabled, the backend may forward the original to
+the selected OCR operator. Retention, privacy, region, quota, and charges are
+governed by those operators, not by GitHub Pages or this repository. The client
+blocks submission until that disclosure is accepted and asks for consent again
+when the backend or OCR choice changes. See
 [Performance and public deployment](docs/PERFORMANCE.md) before publishing or
 using a backend.
 
@@ -79,8 +81,10 @@ pixel-perfect.
 
 ## Best-evidence input: Markdown + JSON + original
 
-Reconstruction normally works best when all three complementary inputs are
-available. They are not interchangeable:
+The high-fidelity workflow requires all three complementary inputs below. They
+are not interchangeable. When positioned JSON is missing, the user must either
+upload it or explicitly ask a hosted OCR provider to create it before
+high-fidelity reconstruction begins:
 
 | Input | Authority retained by the project |
 | --- | --- |
@@ -90,9 +94,29 @@ available. They are not interchangeable:
 
 Each JSON provider is normalized and aligned independently before consensus.
 JSON may improve geometry or structure but cannot replace Markdown wording;
-the original file remains the final pixel and page-geometry authority. A
-missing source can still be processed, but fewer fidelity dimensions can be
-measured and the output should be treated as lower-confidence.
+the original file remains the final pixel and page-geometry authority. A JSON
+file that contains only loose text is not positioned evidence: it must identify
+pages and blocks and include page dimensions plus bounding boxes or polygons.
+A simpler best-effort path may run without one of the three sources, but its
+output must be presented as lower-confidence, not as a high-fidelity result.
+
+### Need positioned JSON? Choose a source
+
+These are integration choices, not a quality ranking. Limits and prices can
+change; follow the linked official page and the terms shown in the user's own
+account before uploading a document. Never publish a shared API key in the
+GitHub Pages JavaScript.
+
+| Choice | Useful for | What the user should know |
+| --- | --- | --- |
+| [PaddleOCR official API / AI Studio](https://www.paddleocr.ai/latest/en/version3.x/inference_deployment/serving/paddleocr_official_api/overview.html) | Multilingual scans, photographed pages, tables, formulas, and paired Markdown/JSON | Uses the user's Baidu AI Studio access. The [current quota page](https://ai.baidu.com/ai-doc/AISTUDIO/pmjcld5qm) lists 3,000 pages per day per model per user and parses at most the first 100 pages of a larger file; this is a changeable service quota, not an SLA. The cited API pages do not make a PaddleOCR-specific retention promise, so review Baidu's current policy before sending sensitive material. |
+| [Mistral OCR](https://docs.mistral.ai/api/endpoint/ocr) | Complex scans and structured Markdown/JSON, including optional annotations and bounding boxes | A user-owned key and cloud upload are required. The [pricing page](https://mistral.ai/pricing/api/) currently charges per page; any experimental allowance or account limit is not a promise of free production capacity. [Zero Data Retention](https://help.mistral.ai/en/articles/347612-can-i-activate-zero-data-retention-zdr) is restricted to eligible paid plans and does not cover every file or batch route. |
+| [Mathpix](https://docs.mathpix.com/) | Mathematics, STEM pages, handwriting, Mathpix Markdown, and line geometry | Mathpix [does not offer a free trial](https://website.mathpix.com/docs/convert/billing) and charges setup/usage fees. Its [authentication guide](https://docs.mathpix.com/reference/authentication) says not to place secret keys in client-side code; PDF processing therefore needs a trusted backend. Its [retention page](https://docs.mathpix.com/concepts/data-retention) currently states up to 30 days for source/page images and 90 days for text output. |
+| [Azure Document Intelligence](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/prebuilt/layout?view=doc-intel-4.0.0) | Forms, tables, reading order, Markdown, and JSON polygons | Requires the user's Azure resource and credentials. The [F0 service limits](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/service-limits?view=doc-intel-4.0.0) currently include 500 pages per month but only the first two pages per request; the [FAQ](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/faq?view=doc-intel-4.0.0) says analysis inputs/results are temporarily stored in the selected region and deleted within 24 hours. |
+| [Google Document AI](https://docs.cloud.google.com/document-ai/docs/overview) | Enterprise OCR, forms, tables, and block/word geometry | Requires a Google Cloud project, processor, billing, and OAuth credentials; never ship a service-account key in a static site. The [pricing page](https://cloud.google.com/products/document-ai/pricing) currently includes the first 1,000 Enterprise Document OCR pages per account per month at no charge, then usage pricing. Google says in its [security documentation](https://docs.cloud.google.com/document-ai/docs/security) that customer documents and predictions are not used to train Document AI models. The project must derive Markdown from the returned Document JSON. |
+| [OCR.space](https://ocr.space/ocrapi) | A quick browser-direct option for short, non-sensitive files | Its official page documents browser AJAX and a free plan, currently 500 requests per day per IP, 25,000 per month, 1 MB per file, and at most three PDF pages, with no SLA. Use the user's own key because a browser key can be copied and exhaust its quota. The provider states that uploaded documents and OCR text are not stored. |
+| [olmOCR](https://github.com/allenai/olmocr) | Open-source processing of difficult PDFs, handwriting, math, tables, and multi-column reading order | The code is Apache-2.0, but local use needs a capable GPU and remote providers charge for compute. The [public demo](https://olmocr.allenai.org/) is for evaluation, not a documented production API or SLA. |
+| [Hugging Face public Spaces](https://huggingface.co/spaces/PaddlePaddle/PaddleOCR-VL-1.6_Online_Demo) | Trying a model before choosing a deployment | A public Space is a demo run by its owner. [ZeroGPU](https://huggingface.co/docs/hub/main/spaces-zerogpu) has small account-dependent daily GPU-minute quotas, queues, and execution limits; [dedicated Inference Endpoints](https://huggingface.co/docs/inference-endpoints/en/pricing) are paid. Do not use a demo endpoint as the project's production backend. |
 
 ```bash
 docreconstruct hybrid content.md original.pdf \
@@ -330,6 +354,14 @@ docreconstruct hybrid content.md original.png \
   --ocr-artifacts-dir output/result.ocr \
   --output output/result.docx --qa-report output/result.qa.json
 
+# PaddleOCR's official asynchronous AI Studio service is a separate provider.
+# It uses the user's own access token; it is not paddleocr_vl_server.
+export PADDLEOCR_ACCESS_TOKEN="..."
+docreconstruct hybrid content.md original.pdf \
+  --online-ocr --allow-cloud --ocr-provider paddleocr_official \
+  --ocr-artifacts-dir output/result.ocr \
+  --output output/result.docx --qa-report output/result.qa.json
+
 # Explicit multi-provider ensemble; this can upload and bill more than once.
 docreconstruct hybrid content.md original.png \
   --online-ocr --allow-cloud \
@@ -518,10 +550,11 @@ endpoints are:
 | `GET` | `/health` | Liveness and package version |
 | `GET` | `/v1/providers` | Registered or detectable providers |
 | `GET` | `/v1/formats` | Input/output format availability |
+| `GET` | `/v1/hybrid/capabilities` | Browser-safe high-fidelity requirements and operator-enabled hosted OCR choices |
 | `POST` | `/v1/analyze` | Upload a source and return canonical IR |
 | `POST` | `/v1/route` | Produce a cost-aware page/region provider plan |
 | `POST` | `/v1/reconstruct` | Upload a source and download the rendered artifact |
-| `POST` | `/v1/hybrid` | Rebuild editable DOCX from Markdown + original + optional JSON |
+| `POST` | `/v1/hybrid` | Rebuild editable DOCX from Markdown + original + positioned JSON, uploaded or explicitly generated by hosted OCR |
 | `POST` | `/v1/compare` | Compare supported IR or rendered artifacts and return a fidelity report |
 
 Uploads are multipart. The optional `options` part is a JSON object validated by
@@ -537,8 +570,27 @@ curl -f http://127.0.0.1:8000/v1/reconstruct \
 The web client uses `/v1/hybrid`. `fast` runs project-native OOXML QA and is
 the low-latency default. `verified` additionally renders through the
 operator-configured LibreOffice binary and performs visual comparison, so it
-takes longer. Saved JSON avoids another OCR upload; when it is absent, an
-operator may expose its configured PaddleOCR-VL service as an explicit opt-in:
+takes longer. High-fidelity mode requires positioned JSON. A saved sidecar
+avoids another OCR upload; when it is absent, an operator may expose its
+configured hosted OCR service as an explicit opt-in that creates it.
+
+An operator can expose a small, deliberate OCR chooser without exposing its
+credentials or service URLs:
+
+```text
+DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS=paddleocr_official,mistral_ocr
+PADDLEOCR_ACCESS_TOKEN=operator-secret
+MISTRAL_API_KEY=operator-secret
+```
+
+`GET /v1/hybrid/capabilities` returns only providers named in the allowlist. A
+provider is marked available only when its required server-side configuration
+is also present. The response includes `evidence_required`, `evidence_modes`,
+`server_generates_json`, `browser_credentials_accepted`, `maximum_upload_mb`,
+and non-secret provider labels/capabilities. It never returns environment
+variable names or values, tokens, API keys, or provider endpoints. The browser
+must select one of these discovered names through `options.ocr_provider`; it
+cannot introduce an arbitrary service or credential.
 
 ```bash
 curl -f https://your-backend.example/v1/hybrid \
@@ -548,19 +600,23 @@ curl -f https://your-backend.example/v1/hybrid \
   -F 'options={"quality":"fast","evidence_provider":"paddleocr"}' \
   --output reconstructed.docx
 
-# Omit evidence only when this backend advertises PaddleOCR-VL support.
+# Omit evidence only after capabilities advertises the selected hosted service.
 curl -f https://your-backend.example/v1/hybrid \
   -F "content=@content.md" \
   -F "layout=@original.pdf" \
-  -F 'options={"quality":"fast","use_paddleocr_vl":true}' \
+  -F 'options={"quality":"fast","ocr_provider":"paddleocr_official"}' \
   --output reconstructed.docx
 ```
 
 The backend operator, not the browser, controls OCR URLs, tokens, local
 renderer paths, CORS, and retention. Clients cannot supply those server-side
 values. Configure `PADDLEOCR_VL_SERVER_URL` for the built-in
-`paddleocr_vl_server`; optionally configure `PADDLEOCR_VL_SERVER_TOKEN`. For
-`verified`, configure `DOCRECONSTRUCT_LIBREOFFICE_PATH`. See the
+`paddleocr_vl_server`; optionally configure `PADDLEOCR_VL_SERVER_TOKEN`, and add
+`paddleocr_vl_server` to `DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS`. A configured URL
+alone does not make the provider discoverable or selectable. The legacy
+`use_paddleocr_vl` option is subject to the same allowlist and configuration
+checks; it is not a bypass. For `verified`, configure
+`DOCRECONSTRUCT_LIBREOFFICE_PATH`. See the
 [deployment guide](docs/PERFORMANCE.md) for the trust and consent boundary.
 
 Remote images referenced by Markdown are also operator-controlled. The upload
@@ -638,11 +694,14 @@ docreconstruct extract scan.pdf --mode cloud --allow-cloud \
 docreconstruct hybrid scan.md scan.pdf --output scan.editable.docx
 ```
 
-Built-in hosted adapters currently cover Mistral OCR, Azure Document
-Intelligence, Google Document AI, and Mathpix; saved AWS Textract JSON is also
-normalized. `paddleocr_vl_server` connects, with explicit upload consent, to a
-server managed by the operator that implements the official PaddleOCR-VL
-pipeline contract.
+Built-in hosted adapters currently cover `paddleocr_official`, Mistral OCR,
+Azure Document Intelligence, Google Document AI, and Mathpix; saved AWS
+Textract JSON is also normalized. `paddleocr_official` uses the user's
+`PADDLEOCR_ACCESS_TOKEN` and Paddle AI Studio's asynchronous job service; see
+the [official PaddleOCR API SDK](https://www.paddleocr.ai/latest/en/version3.x/inference_deployment/serving/paddleocr_official_api/python.html).
+It is distinct from `paddleocr_vl_server`, which connects, with explicit upload
+consent, to a PaddleOCR-VL server chosen and managed by the reconstruction
+backend operator.
 Website-exported Markdown is accepted directly, so users can run OCR manually
 in a provider's web UI and keep reconstruction inside this project. PaddleOCR
 and olmOCR publish open-source code, but their repositories do not provide this

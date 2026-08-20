@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Annotated, Any, TypeVar, cast
@@ -39,6 +40,8 @@ from .models import (
     FormatInfo,
     FormatsResponse,
     HealthResponse,
+    HostedOCRProviderInfo,
+    HybridCapabilitiesResponse,
     HybridOptions,
     HybridQuality,
     ProviderInfo,
@@ -61,6 +64,55 @@ _OUTPUT_DETAILS = {
     ),
     "markdown": (".md", "text/markdown; charset=utf-8"),
 }
+
+_HOSTED_OCR_LABELS = {
+    "paddleocr_official": "PaddleOCR official cloud",
+    "paddleocr_vl_server": "PaddleOCR-VL compatible server",
+    "mistral_ocr": "Mistral Document AI",
+    "google_document_ai": "Google Document AI",
+    "azure_document_intelligence": "Azure Document Intelligence",
+    "mathpix": "Mathpix",
+}
+
+# Each inner tuple is an alternative group; every outer group must have at
+# least one non-empty value. This is intentionally kept separate from the
+# discovery response so environment-variable names and values never leak.
+_HOSTED_OCR_CONFIGURATION_GROUPS = {
+    "paddleocr_official": (("PADDLEOCR_ACCESS_TOKEN",),),
+    "paddleocr_vl_server": (("PADDLEOCR_VL_SERVER_URL",),),
+    "mistral_ocr": (("MISTRAL_API_KEY",),),
+    "google_document_ai": (
+        ("GOOGLE_DOCUMENT_AI_ACCESS_TOKEN",),
+        ("GOOGLE_CLOUD_PROJECT", "GOOGLE_DOCUMENT_AI_PROJECT_ID"),
+        ("GOOGLE_DOCUMENT_AI_LOCATION",),
+        ("GOOGLE_DOCUMENT_AI_PROCESSOR_ID",),
+    ),
+    "azure_document_intelligence": (
+        ("AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT", "DOCUMENTINTELLIGENCE_ENDPOINT"),
+        ("AZURE_DOCUMENT_INTELLIGENCE_KEY", "DOCUMENTINTELLIGENCE_API_KEY"),
+    ),
+    "mathpix": (("MATHPIX_APP_ID",), ("MATHPIX_APP_KEY",)),
+}
+
+_LAYOUT_EXTENSION_FORMATS = {
+    ".pdf": "pdf",
+    ".png": "png",
+    ".jpg": "jpeg",
+    ".jpeg": "jpeg",
+    ".tif": "tiff",
+    ".tiff": "tiff",
+}
+_LAYOUT_MEDIA_TYPE_FORMATS = {
+    "application/pdf": "pdf",
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/jpg": "jpeg",
+    "image/tiff": "tiff",
+    "image/x-tiff": "tiff",
+}
+_GENERIC_UPLOAD_MEDIA_TYPES = {"", "application/octet-stream", "binary/octet-stream"}
+_API_ACCEPTED_LAYOUT_FORMATS = frozenset(_LAYOUT_EXTENSION_FORMATS.values())
+_PROVIDER_INPUT_FORMAT_ALIASES = {"jpg": "jpeg", "tif": "tiff"}
 
 
 def _package_version() -> str:
@@ -319,6 +371,231 @@ def _operator_feature_enabled(name: str) -> bool:
     return os.getenv(name, "").strip().casefold() in {"1", "true", "yes", "on"}
 
 
+def _verified_quality_available() -> bool:
+    """Check configured renderer presence without launching a subprocess."""
+
+    configured = os.getenv("DOCRECONSTRUCT_LIBREOFFICE_PATH", "").strip()
+    if not configured:
+        return False
+    candidate = Path(configured).expanduser()
+    return candidate.is_file() or shutil.which(configured) is not None
+
+
+def _public_hosted_ocr_names() -> tuple[str, ...]:
+    """Return the explicit operator allowlist without accepting client overrides."""
+
+    raw = os.getenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "")
+    return tuple(dict.fromkeys(name.strip().casefold() for name in raw.split(",") if name.strip()))
+
+
+def _hosted_ocr_is_configured(name: str) -> bool:
+    groups = _HOSTED_OCR_CONFIGURATION_GROUPS.get(name)
+    if groups is None:
+        return False
+    return all(
+        any(os.getenv(variable, "").strip() for variable in alternatives) for alternatives in groups
+    )
+
+
+def _api_supported_inputs(values: Any) -> list[str]:
+    """Intersect provider declarations with formats accepted by this upload API."""
+
+    if not isinstance(values, list):
+        return []
+    supported: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip().casefold().lstrip(".")
+        normalized = _PROVIDER_INPUT_FORMAT_ALIASES.get(normalized, normalized)
+        if normalized in _API_ACCEPTED_LAYOUT_FORMATS and normalized not in supported:
+            supported.append(normalized)
+    return supported
+
+
+def _hosted_ocr_provider_infos() -> list[HostedOCRProviderInfo]:
+    """Describe only allowlisted services and never expose credentials or endpoints."""
+
+    try:
+        provider_module = importlib.import_module("docreconstruct.providers")
+        factory = getattr(provider_module, "get_registry", None)
+        registry = factory() if callable(factory) else provider_module.registry
+    except (AttributeError, ImportError, RuntimeError, TypeError):
+        registry = None
+
+    rows: list[HostedOCRProviderInfo] = []
+    capability_fields = (
+        "geometry",
+        "reading_order",
+        "tables",
+        "images",
+        "handwriting",
+        "formulas",
+        "charts",
+        "distorted_photos",
+        "dewarping",
+    )
+    for name in _public_hosted_ocr_names():
+        if name not in _HOSTED_OCR_LABELS:
+            continue
+        provider = None
+        with suppress(KeyError, RuntimeError, TypeError, ValueError):
+            provider = registry.get(name) if registry is not None else None
+        capabilities = provider.capabilities if provider is not None else None
+        declared = capabilities.model_dump(mode="json") if capabilities is not None else {}
+        configured = _hosted_ocr_is_configured(name)
+        live = bool(declared.get("live_inference"))
+        available = configured and live
+        if not configured:
+            reason = "not configured by the server operator"
+        elif not live:
+            reason = "live OCR adapter is unavailable on this server"
+        else:
+            reason = None
+        rows.append(
+            HostedOCRProviderInfo(
+                name=name,
+                label=_HOSTED_OCR_LABELS[name],
+                available=available,
+                cost=str(declared.get("cost", "unknown")),
+                privacy=str(declared.get("privacy", "unknown")),
+                supported_inputs=_api_supported_inputs(declared.get("supported_inputs")),
+                capabilities=[field for field in capability_fields if declared.get(field) is True],
+                reason=reason,
+            )
+        )
+    return rows
+
+
+def _select_hybrid_ocr_provider(options: HybridOptions) -> str | None:
+    """Resolve a server-managed OCR choice without trusting browser credentials."""
+
+    name = options.ocr_provider or ("paddleocr_vl_server" if options.use_paddleocr_vl else None)
+    if name is None:
+        return None
+    name = name.casefold()
+    if name not in _HOSTED_OCR_LABELS:
+        raise HTTPException(
+            status_code=422, detail="the selected hosted OCR service is unsupported"
+        )
+    if name not in _public_hosted_ocr_names():
+        raise HTTPException(
+            status_code=422,
+            detail="the selected hosted OCR service is not offered by this server",
+        )
+    if not _hosted_ocr_is_configured(name):
+        label = _HOSTED_OCR_LABELS[name]
+        raise HTTPException(
+            status_code=503,
+            detail=f"{label} is not configured by the server operator",
+        )
+    return name
+
+
+def _upload_provider_options(
+    options: AnalyzeOptions,
+    upload: UploadFile,
+) -> dict[str, dict[str, Any]] | None:
+    """Apply the public hosted-provider policy to general upload endpoints."""
+
+    normalized_options: dict[str, dict[str, Any]] = {}
+    for raw_name, values in options.provider_options.items():
+        name = raw_name.strip().casefold().replace("-", "_")
+        if name in normalized_options:
+            raise HTTPException(status_code=422, detail="duplicate provider options")
+        normalized_options[name] = dict(values)
+
+    try:
+        provider_module = importlib.import_module("docreconstruct.providers")
+        factory = getattr(provider_module, "get_registry", None)
+        registry = factory() if callable(factory) else provider_module.registry
+    except (AttributeError, ImportError, RuntimeError, TypeError):
+        registry = None
+
+    source_suffix = Path(upload.filename or "").suffix.casefold()
+    saved_evidence = source_suffix in {".json", ".jsonl", ".ndjson"}
+    for raw_name in options.engines:
+        name = raw_name.strip().casefold().replace("-", "_")
+        if not name or name == "auto" or registry is None:
+            continue
+        with suppress(KeyError, RuntimeError, TypeError, ValueError):
+            capabilities = registry.get_capabilities(name)
+            if capabilities is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="the selected provider has no upload-safe capability declaration",
+                )
+            api_provider = any(mode.value == "api" for mode in capabilities.execution_modes)
+            if not api_provider or (saved_evidence and capabilities.saved_json):
+                continue
+            if name not in _HOSTED_OCR_LABELS or name not in _public_hosted_ocr_names():
+                raise HTTPException(
+                    status_code=422,
+                    detail="the selected hosted OCR service is not offered by this server",
+                )
+            if not _hosted_ocr_is_configured(name):
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"{_HOSTED_OCR_LABELS[name]} is not configured by the server operator",
+                )
+            managed = normalized_options.setdefault(name, {})
+            managed["allow_remote"] = True
+            if name in {"paddleocr_official", "paddleocr_vl_server"}:
+                managed["allow_custom_endpoint"] = True
+    return normalized_options or None
+
+
+def _validate_hosted_ocr_layout(upload: UploadFile, provider_name: str) -> None:
+    """Reject unsupported or MIME-spoofed files before upload or processing."""
+
+    provider = next(
+        (row for row in _hosted_ocr_provider_infos() if row.name == provider_name),
+        None,
+    )
+    if provider is None or not provider.available:
+        raise HTTPException(
+            status_code=503,
+            detail="the selected hosted OCR service is unavailable",
+        )
+    filename = Path(upload.filename or "").name
+    suffix = Path(filename).suffix.casefold()
+    source_format = _LAYOUT_EXTENSION_FORMATS.get(suffix)
+    accepted_suffixes = ", ".join(sorted(_LAYOUT_EXTENSION_FORMATS))
+    if source_format is None:
+        rendered = suffix or "no filename extension"
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{provider.label} cannot use {rendered}; choose a file ending in "
+                f"{accepted_suffixes}"
+            ),
+        )
+    supported = {value.casefold() for value in provider.supported_inputs}
+    if source_format not in supported:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{provider.label} does not support {source_format.upper()} files",
+        )
+
+    media_type = (upload.content_type or "").split(";", 1)[0].strip().casefold()
+    if media_type in _GENERIC_UPLOAD_MEDIA_TYPES:
+        return
+    declared_format = _LAYOUT_MEDIA_TYPE_FORMATS.get(media_type)
+    if declared_format is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"the uploaded file type {media_type!r} is not supported for hosted OCR",
+        )
+    if declared_format != source_format:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"the uploaded file type {media_type!r} does not match the filename "
+                f"extension {suffix}"
+            ),
+        )
+
+
 def _hybrid_artifact_name(content: Path, options: HybridOptions) -> str:
     if options.output_filename:
         return options.output_filename
@@ -412,6 +689,23 @@ def create_app() -> FastAPI:
     async def providers() -> ProvidersResponse:
         return ProvidersResponse(providers=_provider_infos())
 
+    @application.get(
+        "/v1/hybrid/capabilities",
+        response_model=HybridCapabilitiesResponse,
+        tags=["discovery"],
+    )
+    async def hybrid_capabilities() -> HybridCapabilitiesResponse:
+        hosted_providers = _hosted_ocr_provider_infos()
+        hosted_available = any(provider.available for provider in hosted_providers)
+        return HybridCapabilitiesResponse(
+            evidence_modes=(["upload_json", "hosted_ocr"] if hosted_available else ["upload_json"]),
+            server_generates_json=hosted_available,
+            verified_available=_verified_quality_available(),
+            remote_assets_available=_operator_feature_enabled("DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS"),
+            maximum_upload_mb=_upload_limit() // (1024 * 1024),
+            hosted_ocr_providers=hosted_providers,
+        )
+
     @application.get("/v1/formats", response_model=FormatsResponse, tags=["discovery"])
     async def formats() -> FormatsResponse:
         return FormatsResponse(formats=_format_infos())
@@ -433,6 +727,7 @@ def create_app() -> FastAPI:
         ] = None,
     ) -> AnalysisResponse:
         parsed = _parse_options(options, AnalyzeOptions)
+        provider_options = _upload_provider_options(parsed, file)
         temp_dir = Path(tempfile.mkdtemp(prefix="docreconstruct-analyze-"))
         try:
             source = await _stage_upload(file, temp_dir, "document.bin")
@@ -442,7 +737,7 @@ def create_app() -> FastAPI:
                 source,
                 engines=parsed.engines or None,
                 fusion=parsed.fusion,
-                provider_options=parsed.provider_options or None,
+                provider_options=provider_options,
             )
             return AnalysisResponse(
                 document=_document_payload(result),
@@ -470,6 +765,7 @@ def create_app() -> FastAPI:
         ] = None,
     ) -> RoutingResponse:
         parsed = _parse_options(options, RouteOptions)
+        provider_options = _upload_provider_options(parsed, file)
         temp_dir = Path(tempfile.mkdtemp(prefix="docreconstruct-route-"))
         try:
             source = await _stage_upload(file, temp_dir, "document.bin")
@@ -479,7 +775,7 @@ def create_app() -> FastAPI:
                 source,
                 engines=parsed.engines or None,
                 fusion=parsed.fusion,
-                provider_options=parsed.provider_options or None,
+                provider_options=provider_options,
             )
             routing = importlib.import_module("docreconstruct.routing")
             policy = routing.RoutingPolicy(confidence_threshold=parsed.confidence_threshold)
@@ -523,6 +819,7 @@ def create_app() -> FastAPI:
         ] = None,
     ) -> Any:
         parsed = _parse_options(options, ReconstructOptions)
+        provider_options = _upload_provider_options(parsed, file)
         temp_dir = Path(tempfile.mkdtemp(prefix="docreconstruct-output-"))
         try:
             source = await _stage_upload(file, temp_dir, "document.bin")
@@ -538,7 +835,7 @@ def create_app() -> FastAPI:
                 profile=parsed.profile.value,
                 refine=parsed.refine,
                 maximum_refinement_passes=parsed.maximum_refinement_passes,
-                provider_options=parsed.provider_options or None,
+                provider_options=provider_options,
             )
             if artifact.is_file():
                 background_tasks.add_task(shutil.rmtree, temp_dir, ignore_errors=True)
@@ -581,7 +878,12 @@ def create_app() -> FastAPI:
         layout: Annotated[UploadFile, File(description="Original PDF or raster layout authority")],
         evidence: Annotated[
             UploadFile | None,
-            File(description="Optional OCR JSON geometry and structure evidence"),
+            File(
+                description=(
+                    "OCR JSON geometry and structure evidence; required unless a hosted OCR "
+                    "provider is selected"
+                )
+            ),
         ] = None,
         options: Annotated[
             str | None,
@@ -589,10 +891,21 @@ def create_app() -> FastAPI:
         ] = None,
     ) -> FileResponse:
         parsed = _parse_options(options, HybridOptions)
+        selected_ocr_provider = _select_hybrid_ocr_provider(parsed)
+        if selected_ocr_provider is not None:
+            _validate_hosted_ocr_layout(layout, selected_ocr_provider)
         if parsed.evidence_provider is not None and evidence is None:
             raise HTTPException(
                 status_code=422,
                 detail="evidence_provider requires an evidence upload",
+            )
+        if evidence is None and selected_ocr_provider is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "best-quality reconstruction requires OCR JSON evidence; upload a JSON "
+                    "file or choose a hosted OCR service offered by this server"
+                ),
             )
         if parsed.remote_assets and not _operator_feature_enabled(
             "DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS"
@@ -619,15 +932,6 @@ def create_app() -> FastAPI:
                 )
             render_backend = "libreoffice"
 
-        if parsed.use_paddleocr_vl and not os.getenv("PADDLEOCR_VL_SERVER_URL"):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "PaddleOCR-VL is unavailable because the server operator has not configured "
-                    "PADDLEOCR_VL_SERVER_URL"
-                ),
-            )
-
         temp_dir = Path(tempfile.mkdtemp(prefix="docreconstruct-hybrid-api-"))
         try:
             content_path = await _stage_upload(content, temp_dir, "content.md")
@@ -642,19 +946,37 @@ def create_app() -> FastAPI:
 
             hybrid_job = importlib.import_module("docreconstruct.reconstruction.hybrid_job")
             online_ocr = None
-            if parsed.use_paddleocr_vl:
+            if selected_ocr_provider is not None:
                 extraction = importlib.import_module("docreconstruct.extraction")
+                provider_options: dict[str, dict[str, bool]] | None = None
+                if selected_ocr_provider in {
+                    "paddleocr_official",
+                    "paddleocr_vl_server",
+                }:
+                    # The URL is operator-controlled and was never supplied by
+                    # the browser. This opt-in does not expose it to the client.
+                    provider_options = {
+                        selected_ocr_provider: {
+                            "allow_custom_endpoint": True,
+                            "use_doc_unwarping": parsed.ocr_dewarping,
+                            "use_chart_recognition": parsed.ocr_charts,
+                        }
+                    }
                 online_ocr = hybrid_job.OnlineOCRRequest(
                     mode=extraction.ExtractionMode.CLOUD,
-                    providers=("paddleocr_vl_server",),
+                    providers=(selected_ocr_provider,),
                     allow_cloud=True,
                     maximum_providers=1,
+                    languages=tuple(parsed.ocr_languages),
+                    handwriting=parsed.ocr_handwriting,
+                    formulas=parsed.ocr_formulas,
+                    tables=parsed.ocr_tables,
+                    charts=parsed.ocr_charts,
+                    distorted_photo=parsed.ocr_distorted_photo,
+                    dewarping=parsed.ocr_dewarping,
                     artifacts_directory=temp_dir / "ocr",
                     cache=False,
-                    # The endpoint comes from operator-controlled environment
-                    # configuration, never from the upload client. Mark that
-                    # reviewed non-loopback endpoint as trusted explicitly.
-                    provider_options={"paddleocr_vl_server": {"allow_custom_endpoint": True}},
+                    provider_options=provider_options,
                 )
             result = await run_in_threadpool(
                 hybrid_job.run_hybrid_job,
@@ -685,10 +1007,12 @@ def create_app() -> FastAPI:
             background_tasks.add_task(shutil.rmtree, temp_dir, ignore_errors=True)
             ocr_provenance = (
                 "paddleocr-vl-server"
-                if parsed.use_paddleocr_vl
+                if selected_ocr_provider == "paddleocr_vl_server"
+                else selected_ocr_provider
+                if selected_ocr_provider is not None
                 else "provided-evidence"
                 if evidence is not None
-                else "scan-layout-only"
+                else "unknown"
             )
             headers = {
                 "X-DocReconstruct-OCR": ocr_provenance,

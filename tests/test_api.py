@@ -52,6 +52,7 @@ def test_health_and_openapi_are_available(client: TestClient) -> None:
 def test_discovery_endpoints_are_truthful_shapes(client: TestClient) -> None:
     providers = client.get("/v1/providers")
     formats = client.get("/v1/formats")
+    hybrid = client.get("/v1/hybrid/capabilities")
 
     assert providers.status_code == 200
     assert isinstance(providers.json()["providers"], list)
@@ -59,6 +60,123 @@ def test_discovery_endpoints_are_truthful_shapes(client: TestClient) -> None:
     format_rows = formats.json()["formats"]
     assert any(row["name"] == "json" and row["available"] for row in format_rows)
     assert any(row["direction"] == "input" for row in format_rows)
+    assert hybrid.status_code == 200
+    assert hybrid.json()["evidence_required"] is True
+    assert "upload_json" in hybrid.json()["evidence_modes"]
+    assert ("hosted_ocr" in hybrid.json()["evidence_modes"]) is hybrid.json()[
+        "server_generates_json"
+    ]
+    assert hybrid.json()["browser_credentials_accepted"] is False
+    assert isinstance(hybrid.json()["verified_available"], bool)
+    assert isinstance(hybrid.json()["remote_assets_available"], bool)
+
+
+def test_hybrid_capabilities_expose_allowlist_without_secrets_or_urls(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS",
+        "paddleocr_official,mistral_ocr,paddleocr_vl_server,unknown_provider",
+    )
+    monkeypatch.setenv("PADDLEOCR_ACCESS_TOKEN", "secret-official-paddle-value")
+    monkeypatch.setenv("MISTRAL_API_KEY", "secret-mistral-value")
+    monkeypatch.setenv("PADDLEOCR_VL_SERVER_URL", "https://private.example.test/ocr")
+    monkeypatch.setenv("PADDLEOCR_VL_SERVER_TOKEN", "secret-paddle-value")
+
+    response = client.get("/v1/hybrid/capabilities")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["name"] for row in payload["hosted_ocr_providers"]] == [
+        "paddleocr_official",
+        "mistral_ocr",
+        "paddleocr_vl_server",
+    ]
+    assert all(row["available"] for row in payload["hosted_ocr_providers"])
+    assert all(
+        set(row["supported_inputs"]) <= {"pdf", "png", "jpeg", "tiff"}
+        for row in payload["hosted_ocr_providers"]
+    )
+    assert payload["server_generates_json"] is True
+    assert payload["evidence_modes"] == ["upload_json", "hosted_ocr"]
+    serialized = response.text
+    assert "secret-mistral-value" not in serialized
+    assert "secret-paddle-value" not in serialized
+    assert "secret-official-paddle-value" not in serialized
+    assert "private.example.test" not in serialized
+    assert "MISTRAL_API_KEY" not in serialized
+    assert "PADDLEOCR_VL_SERVER_URL" not in serialized
+
+
+def test_hybrid_capabilities_do_not_offer_unconfigured_generation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "paddleocr_official")
+    monkeypatch.delenv("PADDLEOCR_ACCESS_TOKEN", raising=False)
+
+    response = client.get("/v1/hybrid/capabilities")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["evidence_modes"] == ["upload_json"]
+    assert payload["server_generates_json"] is False
+    assert payload["hosted_ocr_providers"] == [
+        {
+            "name": "paddleocr_official",
+            "label": "PaddleOCR official cloud",
+            "available": False,
+            "cost": "unknown",
+            "privacy": "third_party",
+            "supported_inputs": ["pdf", "png", "jpeg", "tiff"],
+            "capabilities": [
+                "geometry",
+                "reading_order",
+                "tables",
+                "images",
+                "handwriting",
+                "formulas",
+                "charts",
+                "distorted_photos",
+                "dewarping",
+            ],
+            "reason": "not configured by the server operator",
+        }
+    ]
+
+
+def test_hybrid_capabilities_report_operator_features_without_launching_tools(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    renderer = tmp_path / "soffice"
+    renderer.write_bytes(b"configured renderer placeholder")
+    monkeypatch.setenv("DOCRECONSTRUCT_LIBREOFFICE_PATH", str(renderer))
+    monkeypatch.setenv("DOCRECONSTRUCT_ALLOW_REMOTE_ASSETS", "true")
+
+    payload = client.get("/v1/hybrid/capabilities").json()
+
+    assert payload["verified_available"] is True
+    assert payload["remote_assets_available"] is True
+
+
+def test_google_document_ai_requires_location_before_becoming_available(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "google_document_ai")
+    monkeypatch.setenv("GOOGLE_DOCUMENT_AI_ACCESS_TOKEN", "operator-secret")
+    monkeypatch.setenv("GOOGLE_DOCUMENT_AI_PROJECT_ID", "project")
+    monkeypatch.setenv("GOOGLE_DOCUMENT_AI_PROCESSOR_ID", "processor")
+    monkeypatch.delenv("GOOGLE_DOCUMENT_AI_LOCATION", raising=False)
+
+    unavailable = client.get("/v1/hybrid/capabilities").json()
+    assert unavailable["server_generates_json"] is False
+    assert unavailable["hosted_ocr_providers"][0]["available"] is False
+
+    monkeypatch.setenv("GOOGLE_DOCUMENT_AI_LOCATION", "us")
+    available = client.get("/v1/hybrid/capabilities").json()
+    assert available["server_generates_json"] is True
+    assert available["hosted_ocr_providers"][0]["available"] is True
 
 
 def test_analyze_stages_upload_and_delegates_to_pipeline(
@@ -91,6 +209,114 @@ def test_analyze_stages_upload_and_delegates_to_pipeline(
         "provider_options": None,
     }
     assert not call["source"].exists()
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/analyze", "/v1/route", "/v1/reconstruct"])
+def test_general_upload_endpoints_block_unpublished_hosted_ocr(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint: str,
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "operator-secret")
+    monkeypatch.delenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", raising=False)
+
+    response = client.post(
+        endpoint,
+        files={"file": ("scan.png", b"source", "image/png")},
+        data={"options": json.dumps({"engines": ["mistral_ocr"]})},
+    )
+
+    assert response.status_code == 422
+    assert "not offered by this server" in response.text
+
+
+def test_analyze_uses_allowlisted_hosted_ocr_with_server_managed_consent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.pipeline as pipeline
+
+    call: dict[str, Any] = {}
+
+    def fake_analyze(source: Path, **kwargs: Any) -> Document:
+        call.update(kwargs)
+        return _document("hosted-analysis")
+
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "mistral_ocr")
+    monkeypatch.setenv("MISTRAL_API_KEY", "operator-secret")
+    monkeypatch.setattr(pipeline, "analyze", fake_analyze)
+    response = client.post(
+        "/v1/analyze",
+        files={"file": ("scan.png", b"source", "image/png")},
+        data={
+            "options": json.dumps(
+                {
+                    "engines": ["mistral_ocr"],
+                    "provider_options": {"mistral_ocr": {"include_blocks": False}},
+                }
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert call["provider_options"] == {
+        "mistral_ocr": {"include_blocks": False, "allow_remote": True}
+    }
+
+
+def test_analyze_preserves_saved_hosted_provider_json_without_cloud_allowlist(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.pipeline as pipeline
+
+    call: dict[str, Any] = {}
+
+    def fake_analyze(source: Path, **kwargs: Any) -> Document:
+        call.update(kwargs)
+        return _document("saved-analysis")
+
+    monkeypatch.delenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", raising=False)
+    monkeypatch.setattr(pipeline, "analyze", fake_analyze)
+    response = client.post(
+        "/v1/analyze",
+        files={"file": ("mistral.json", b'{"pages": []}', "application/json")},
+        data={"options": json.dumps({"engines": ["mistral_ocr"]})},
+    )
+
+    assert response.status_code == 200, response.text
+    assert call["provider_options"] is None
+
+
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        {"allow_remote": True},
+        {"allow_custom_endpoint": True},
+        {"api_key": "browser-secret"},
+        {"access_token": "browser-secret"},
+        {"endpoint": "https://attacker.example.test"},
+        {"base_url": "https://attacker.example.test"},
+        {"headers": {"Authorization": "Bearer browser-secret"}},
+    ],
+)
+def test_analyze_rejects_client_managed_hosted_credentials_and_endpoints(
+    client: TestClient,
+    blocked: dict[str, Any],
+) -> None:
+    response = client.post(
+        "/v1/analyze",
+        files={"file": ("scan.png", b"source", "image/png")},
+        data={
+            "options": json.dumps(
+                {
+                    "engines": ["mistral_ocr"],
+                    "provider_options": {"mistral_ocr": blocked},
+                }
+            )
+        },
+    )
+
+    assert response.status_code == 422
+    assert "managed by the server" in response.text
 
 
 def test_reconstruct_returns_rendered_download(
@@ -281,6 +507,173 @@ def test_hybrid_upload_runs_project_job_and_returns_docx(
     assert call["kwargs"]["online_ocr"] is None
 
 
+def test_hybrid_requires_uploaded_or_generated_json_evidence(client: TestClient) -> None:
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+    )
+
+    assert response.status_code == 422
+    assert "requires OCR JSON evidence" in response.text
+
+
+def test_hybrid_uses_operator_allowlisted_hosted_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    call: dict[str, Any] = {}
+
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        call.update(kwargs)
+        Path(kwargs["output"]).write_bytes(b"hosted-docx")
+        return SimpleNamespace(validation=SimpleNamespace(passed=True, score=1.0, metrics={}))
+
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "mistral_ocr")
+    monkeypatch.setenv("MISTRAL_API_KEY", "operator-secret")
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={
+            "options": json.dumps(
+                {
+                    "ocr_provider": "mistral_ocr",
+                    "ocr_languages": ["vi", "en", "vi"],
+                    "ocr_handwriting": True,
+                    "ocr_charts": True,
+                    "ocr_distorted_photo": True,
+                    "ocr_dewarping": True,
+                }
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-docreconstruct-ocr"] == "mistral_ocr"
+    online = call["online_ocr"]
+    assert online.providers == ("mistral_ocr",)
+    assert online.languages == ("vi", "en")
+    assert online.handwriting is True
+    assert online.charts is True
+    assert online.distorted_photo is True
+    assert online.dewarping is True
+    assert online.provider_options is None
+
+
+def test_hybrid_rejects_hosted_provider_not_offered_by_operator(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "operator-secret")
+    monkeypatch.delenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", raising=False)
+
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"ocr_provider": "mistral_ocr"})},
+    )
+
+    assert response.status_code == 422
+    assert "not offered by this server" in response.text
+
+
+@pytest.mark.parametrize(
+    ("filename", "media_type"),
+    [
+        ("document.pdf", "application/pdf"),
+        ("page.png", "image/png"),
+        ("photo.jpg", "image/jpeg"),
+        ("photo.jpeg", "image/jpeg"),
+        ("scan.tif", "image/tiff"),
+        ("scan.tiff", "image/tiff"),
+    ],
+)
+def test_hybrid_paddle_official_accepts_supported_layout_formats(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    media_type: str,
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    call: dict[str, Any] = {}
+
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        call.update(kwargs)
+        Path(kwargs["output"]).write_bytes(b"official-paddle-docx")
+        return SimpleNamespace(validation=SimpleNamespace(passed=True, score=1.0, metrics={}))
+
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "paddleocr_official")
+    monkeypatch.setenv("PADDLEOCR_ACCESS_TOKEN", "operator-secret")
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
+
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": (filename, b"source", media_type),
+        },
+        data={"options": json.dumps({"ocr_provider": "paddleocr_official"})},
+    )
+
+    assert response.status_code == 200, response.text
+    assert call["online_ocr"].providers == ("paddleocr_official",)
+
+
+@pytest.mark.parametrize(
+    ("filename", "media_type"),
+    [("page.webp", "image/webp"), ("page.bmp", "image/bmp")],
+)
+def test_hybrid_paddle_official_rejects_unsupported_layout_formats(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    media_type: str,
+) -> None:
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "paddleocr_official")
+    monkeypatch.setenv("PADDLEOCR_ACCESS_TOKEN", "operator-secret")
+
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": (filename, b"source", media_type),
+        },
+        data={"options": json.dumps({"ocr_provider": "paddleocr_official"})},
+    )
+
+    assert response.status_code == 422
+    assert "choose a file ending in" in response.text
+
+
+def test_hybrid_hosted_ocr_rejects_mime_filename_mismatch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "paddleocr_official")
+    monkeypatch.setenv("PADDLEOCR_ACCESS_TOKEN", "operator-secret")
+
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("page.png", b"source", "image/webp"),
+        },
+        data={"options": json.dumps({"ocr_provider": "paddleocr_official"})},
+    )
+
+    assert response.status_code == 422
+    assert "is not supported for hosted OCR" in response.text
+
+
 def test_hybrid_verified_requires_operator_libreoffice_configuration(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -290,6 +683,7 @@ def test_hybrid_verified_requires_operator_libreoffice_configuration(
         files={
             "content": ("content.md", b"text", "text/markdown"),
             "layout": ("layout.png", b"layout", "image/png"),
+            "evidence": ("evidence.json", b'{"pages": []}', "application/json"),
         },
         data={"options": json.dumps({"quality": "verified"})},
     )
@@ -301,6 +695,7 @@ def test_hybrid_verified_requires_operator_libreoffice_configuration(
 def test_hybrid_paddleocr_requires_operator_endpoint(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "paddleocr_vl_server")
     monkeypatch.delenv("PADDLEOCR_VL_SERVER_URL", raising=False)
     response = client.post(
         "/v1/hybrid",
@@ -312,7 +707,7 @@ def test_hybrid_paddleocr_requires_operator_endpoint(
     )
 
     assert response.status_code == 503
-    assert "PADDLEOCR_VL_SERVER_URL" in response.text
+    assert "not configured by the server operator" in response.text
 
 
 def test_hybrid_paddleocr_uses_operator_managed_server(
@@ -328,6 +723,7 @@ def test_hybrid_paddleocr_uses_operator_managed_server(
         return SimpleNamespace(validation=SimpleNamespace(passed=True, score=1.0, metrics={}))
 
     monkeypatch.setenv("PADDLEOCR_VL_SERVER_URL", "http://127.0.0.1:8080")
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "paddleocr_vl_server")
     monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
     response = client.post(
         "/v1/hybrid",
@@ -345,7 +741,32 @@ def test_hybrid_paddleocr_uses_operator_managed_server(
     assert online.allow_cloud is True
     assert online.providers == ("paddleocr_vl_server",)
     assert online.maximum_providers == 1
-    assert online.provider_options == {"paddleocr_vl_server": {"allow_custom_endpoint": True}}
+    assert online.provider_options == {
+        "paddleocr_vl_server": {
+            "allow_custom_endpoint": True,
+            "use_doc_unwarping": False,
+            "use_chart_recognition": False,
+        }
+    }
+
+
+def test_legacy_paddle_switch_cannot_bypass_public_allowlist(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PADDLEOCR_VL_SERVER_URL", "http://127.0.0.1:8080")
+    monkeypatch.delenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", raising=False)
+
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"text", "text/markdown"),
+            "layout": ("layout.png", b"layout", "image/png"),
+        },
+        data={"options": json.dumps({"use_paddleocr_vl": True})},
+    )
+
+    assert response.status_code == 422
+    assert "not offered by this server" in response.text
 
 
 def test_hybrid_remote_assets_require_operator_opt_in(
@@ -358,6 +779,7 @@ def test_hybrid_remote_assets_require_operator_opt_in(
         files={
             "content": ("content.md", b"![figure](https://example.test/a.png)", "text/markdown"),
             "layout": ("layout.png", b"layout", "image/png"),
+            "evidence": ("evidence.json", b'{"pages": []}', "application/json"),
         },
         data={"options": json.dumps({"remote_assets": True})},
     )
@@ -386,13 +808,14 @@ def test_hybrid_operator_can_enable_remote_assets_and_scan_only_provenance(
         files={
             "content": ("content.md", b"![figure](https://example.test/a.png)", "text/markdown"),
             "layout": ("layout.png", b"layout", "image/png"),
+            "evidence": ("evidence.json", b'{"pages": []}', "application/json"),
         },
         data={"options": json.dumps({"remote_assets": True})},
     )
 
     assert response.status_code == 200, response.text
     assert call["allow_remote_assets"] is True
-    assert response.headers["x-docreconstruct-ocr"] == "scan-layout-only"
+    assert response.headers["x-docreconstruct-ocr"] == "provided-evidence"
 
 
 def test_hybrid_verified_exposes_actual_visual_score_only(
@@ -418,6 +841,7 @@ def test_hybrid_verified_exposes_actual_visual_score_only(
         files={
             "content": ("content.md", b"text", "text/markdown"),
             "layout": ("layout.png", b"layout", "image/png"),
+            "evidence": ("evidence.json", b'{"pages": []}', "application/json"),
         },
         data={"options": json.dumps({"quality": "verified"})},
     )

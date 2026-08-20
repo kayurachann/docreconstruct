@@ -11,9 +11,9 @@
     >
     <meta
       name="description"
-      content="Giao diện web chú trọng quyền riêng tư để dựng lại tài liệu có thể chỉnh sửa bằng docreconstruct."
+      content="Biến PDF hoặc ảnh scan thành tệp Word có thể chỉnh sửa bằng bản gốc, Markdown và JSON vị trí."
     >
-    <title>docreconstruct — Dựng lại tài liệu có thể chỉnh sửa</title>
+    <title>docreconstruct — Biến bản scan thành Word có thể sửa</title>
     <link rel="stylesheet" href="./styles.css">
     <script src="./app.js" defer></script>
   </head>
@@ -56,17 +56,17 @@
       <section class="hero" aria-labelledby="page-title">
         <div class="eyebrow">
           <span class="status-dot" aria-hidden="true"></span>
-          <span data-i18n="eyebrow">Giao diện web nguồn mở</span>
+          <span data-i18n="eyebrow">Chuẩn bị và gửi tác vụ trên trình duyệt</span>
         </div>
-        <h1 id="page-title" data-i18n="title">Dựng lại tài liệu có thể chỉnh sửa</h1>
+        <h1 id="page-title" data-i18n="title">Biến bản scan thành Word có thể sửa</h1>
         <p class="hero-copy" data-i18n="subtitle">
-          Kết hợp nội dung Markdown, tệp gốc và dữ liệu bố cục tùy chọn để tạo tệp Word giữ
-          nguyên cấu trúc tốt nhất có thể.
+          Dùng đủ bản gốc, tệp chữ và tệp vị trí để giữ nội dung lẫn bố cục tốt nhất có thể.
+          Không cần máy tính mạnh: phần xử lý sẽ chạy ở dịch vụ bạn chọn.
         </p>
         <div class="hero-facts" aria-label="Thông tin chính" data-i18n-aria="factsAria">
-          <span data-i18n="factOne">Không tải tệp lên GitHub</span>
-          <span data-i18n="factTwo">Đầu ra DOCX có thể chỉnh sửa</span>
-          <span data-i18n="factThree">Bạn tự chọn máy chủ xử lý</span>
+          <span data-i18n="factOne">Ba tệp giúp kết quả chính xác hơn</span>
+          <span data-i18n="factTwo">Word tải về có thể chỉnh sửa</span>
+          <span data-i18n="factThree">Bạn biết rõ tệp được gửi đi đâu</span>
         </div>
       </section>
 
@@ -74,22 +74,132 @@
         <section class="panel form-panel" aria-labelledby="form-title">
           <div class="panel-heading">
             <div>
-              <p class="step-label" data-i18n="formStep">Bước 1–3</p>
-              <h2 id="form-title" data-i18n="formTitle">Chuẩn bị tác vụ</h2>
+              <p class="step-label" data-i18n="formStep">Ba bước đơn giản</p>
+              <h2 id="form-title" data-i18n="formTitle">Tạo tệp Word của bạn</h2>
             </div>
-            <span class="backend-badge" data-i18n="noBackendBadge">Chưa kèm máy chủ</span>
+            <span id="input-badge" class="backend-badge" data-i18n="noBackendBadge">Cần đủ 3 tệp</span>
           </div>
 
           <form id="reconstruct-form" novalidate>
             <fieldset class="form-section">
               <legend>
                 <span class="number">1</span>
-                <span data-i18n="serverSection">Chọn máy chủ xử lý</span>
+                <span data-i18n="filesSection">Chuẩn bị đủ ba tệp</span>
+              </legend>
+
+              <div class="source-explainer" role="note">
+                <strong data-i18n="sourceExplainerTitle">Vì sao cần ba tệp?</strong>
+                <p data-i18n="sourceExplainerBody">
+                  Bản gốc cho biết trang trông thế nào, Markdown giữ chữ và công thức, còn JSON
+                  cho biết từng phần nằm ở đâu. Thiếu một tệp có thể làm sai vị trí hoặc thứ tự đọc.
+                </p>
+              </div>
+
+              <div class="upload-grid">
+                <label class="upload-card source-original" for="layout-file">
+                  <input
+                    id="layout-file"
+                    name="layout"
+                    type="file"
+                    accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,application/pdf,image/*"
+                    required
+                  >
+                  <span class="upload-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect>
+                      <circle cx="9" cy="10" r="1.5"></circle>
+                      <path d="m5.5 17 4.25-4 3 2.5 2.25-2 3.5 3.5"></path>
+                    </svg>
+                  </span>
+                  <span class="upload-copy">
+                    <span class="source-role" data-i18n="originalRole">1 · Hình dáng trang</span>
+                    <strong data-i18n="originalLabel">Bản gốc PDF hoặc ảnh</strong>
+                    <small data-i18n="originalHelp">Giữ khổ giấy, hình ảnh và vị trí</small>
+                    <span class="file-name" id="layout-file-name" data-i18n="chooseOriginal">Chọn tệp gốc</span>
+                  </span>
+                  <span class="required" data-i18n="required">Bắt buộc</span>
+                </label>
+
+                <label class="upload-card source-content" for="content-file">
+                  <input id="content-file" name="content" type="file" accept=".md,text/markdown,text/plain" required>
+                  <span class="upload-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <path d="M7 3.5h7l4 4V20.5H7zM14 3.5v4h4M9.5 12h6M9.5 15h6"></path>
+                    </svg>
+                  </span>
+                  <span class="upload-copy">
+                    <span class="source-role" data-i18n="markdownRole">2 · Chữ có thể sửa</span>
+                    <strong data-i18n="markdownLabel">Tệp chữ Markdown (.md)</strong>
+                    <small data-i18n="markdownHelp">Giữ chữ, bảng và công thức</small>
+                    <span class="file-name" id="content-file-name" data-i18n="chooseFile">Chọn tệp .md</span>
+                  </span>
+                  <span class="required" data-i18n="required">Bắt buộc</span>
+                </label>
+
+                <label id="evidence-upload-card" class="upload-card source-evidence" for="evidence-file">
+                  <input id="evidence-file" name="evidence" type="file" accept=".json,application/json" required>
+                  <span class="upload-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <path d="M8 4.5H6.5a2 2 0 0 0-2 2v3a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2H8M16 4.5h1.5a2 2 0 0 1 2 2v3a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2H16"></path>
+                    </svg>
+                  </span>
+                  <span class="upload-copy">
+                    <span class="source-role" data-i18n="jsonRole">3 · Vị trí từng phần</span>
+                    <strong data-i18n="jsonLabel">Tệp vị trí JSON (.json)</strong>
+                    <small data-i18n="jsonHelp">Giữ cột, khối chữ và thứ tự đọc</small>
+                    <span class="file-name" id="evidence-file-name" data-i18n="chooseJson">Chọn tệp .json</span>
+                  </span>
+                  <span id="evidence-required-badge" class="required" data-i18n="required">Bắt buộc</span>
+                </label>
+              </div>
+
+              <div id="bundle-status" class="bundle-status" role="status" aria-live="polite">
+                <span class="bundle-status-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="m5 12.5 4.25 4.25L19.5 6.5"></path></svg>
+                </span>
+                <span>
+                  <strong id="bundle-status-title" data-i18n="bundleWaitingTitle">Chưa đủ bộ ba tệp</strong>
+                  <small id="bundle-status-detail" data-i18n="bundleWaitingBody">Hãy chọn bản gốc, Markdown và JSON.</small>
+                </span>
+              </div>
+
+              <section class="ocr-helper" aria-labelledby="ocr-helper-title">
+                <div>
+                  <p class="step-label" data-i18n="ocrHelperEyebrow">Chưa có tệp .md và .json?</p>
+                  <h3 id="ocr-helper-title" data-i18n="ocrHelperTitle">Tạo dữ liệu OCR trước</h3>
+                  <p data-i18n="ocrHelperBody">
+                    Để có đủ bộ ba, hãy dùng dịch vụ có ghi rõ xuất được cả Markdown và JSON vị trí.
+                    Bản demo chỉ để thử khả năng nhận chữ và không thay thế tệp JSON bắt buộc.
+                  </p>
+                </div>
+                <div class="ocr-links" aria-label="Dịch vụ OCR trực tuyến" data-i18n-aria="ocrLinksAria">
+                  <a href="https://aistudio.baidu.com/paddleocr" target="_blank" rel="noreferrer">
+                    <strong>PaddleOCR AI Studio</strong>
+                    <small data-i18n="paddleLinkHelp">Tạo bộ dữ liệu · cần tài khoản</small>
+                    <span aria-hidden="true">↗</span>
+                  </a>
+                  <a href="https://huggingface.co/spaces/PaddlePaddle/PaddleOCR-VL-1.6_Online_Demo" target="_blank" rel="noreferrer">
+                    <strong>PaddleOCR-VL Demo</strong>
+                    <small data-i18n="paddleDemoHelp">Chỉ thử OCR/Markdown · không đảm bảo JSON</small>
+                    <span aria-hidden="true">↗</span>
+                  </a>
+                </div>
+                <p class="ocr-helper-note" data-i18n="ocrHelperNote">
+                  Đây là các trang độc lập. Khả năng xuất JSON, giới hạn miễn phí và thời gian lưu tệp
+                  có thể thay đổi; docreconstruct không gửi tệp khi bạn chỉ mở liên kết.
+                </p>
+              </section>
+            </fieldset>
+
+            <fieldset class="form-section">
+              <legend>
+                <span class="number">2</span>
+                <span data-i18n="serverSection">Chọn nơi xử lý</span>
               </legend>
 
               <div class="field">
                 <label for="backend-url">
-                  <span data-i18n="backendLabel">Địa chỉ máy chủ</span>
+                  <span data-i18n="backendLabel">Địa chỉ dịch vụ docreconstruct</span>
                   <span class="required" data-i18n="required">Bắt buộc</span>
                 </label>
                 <div class="url-input-wrap">
@@ -106,13 +216,13 @@
                     spellcheck="false"
                     autocomplete="url"
                     required
-                    placeholder="https://api.example.org"
+                    placeholder="https://dich-vu.example"
                     data-i18n-placeholder="backendPlaceholder"
                     aria-describedby="backend-help"
                   >
                 </div>
                 <p id="backend-help" class="field-help" data-i18n="backendHelp">
-                  Trang này sẽ gọi đường dẫn /v1/hybrid trên máy chủ bạn nhập.
+                  Dán địa chỉ do đơn vị cung cấp dịch vụ gửi cho bạn. Trang sẽ tự nối đúng đường dẫn xử lý.
                 </p>
                 <div class="server-disclosure" role="note">
                   <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -120,140 +230,125 @@
                     <circle cx="12" cy="12" r="9"></circle>
                   </svg>
                   <p>
-                    <strong data-i18n="noPublicBackendTitle">Không kèm máy chủ công cộng.</strong>
+                    <strong data-i18n="noPublicBackendTitle">Hiện chưa có dịch vụ công cộng mặc định.</strong>
                     <span data-i18n="noPublicBackendBody">
-                      Trang này không thể xử lý tài liệu nếu bạn chưa cấu hình một máy chủ tương
-                      thích.
+                      GitHub chỉ mở trang web này, không chạy OCR hay Word. Chỉ dùng địa chỉ từ đơn vị bạn tin tưởng.
                     </span>
                   </p>
                 </div>
-              </div>
-            </fieldset>
 
-            <fieldset class="form-section">
-              <legend>
-                <span class="number">2</span>
-                <span data-i18n="filesSection">Thêm tệp nguồn</span>
-              </legend>
+                <section id="capability-panel" class="capability-panel" aria-labelledby="capability-title">
+                  <div class="capability-heading">
+                    <div>
+                      <h3 id="capability-title" data-i18n="capabilityTitle">Dịch vụ này có thể làm gì?</h3>
+                      <p data-i18n="capabilityIntro">
+                        Sau khi bạn nhập địa chỉ, trang sẽ hỏi dịch vụ xem có thể tạo JSON giúp bạn hay không.
+                      </p>
+                    </div>
+                    <span id="capability-state" class="capability-state" data-i18n="capabilityWaiting">Chưa kiểm tra</span>
+                  </div>
 
-              <div class="upload-grid">
-                <label class="upload-card" for="content-file">
-                  <input id="content-file" name="content" type="file" accept=".md,text/markdown,text/plain" required>
-                  <span class="upload-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24">
-                      <path d="M7 3.5h7l4 4V20.5H7zM14 3.5v4h4M9.5 12h6M9.5 15h6"></path>
-                    </svg>
-                  </span>
-                  <span class="upload-copy">
-                    <strong data-i18n="markdownLabel">Nội dung Markdown</strong>
-                    <small data-i18n="markdownHelp">Văn bản, công thức và liên kết ảnh</small>
-                    <span class="file-name" id="content-file-name" data-i18n="chooseFile">Chọn tệp .md</span>
-                  </span>
-                  <span class="required" data-i18n="required">Bắt buộc</span>
-                </label>
+                  <p id="capability-message" class="capability-message" aria-live="polite" data-i18n="capabilityPrompt">
+                    Nhập địa chỉ dịch vụ để xem lựa chọn OCR trực tuyến.
+                  </p>
 
-                <label class="upload-card" for="layout-file">
-                  <input
-                    id="layout-file"
-                    name="layout"
-                    type="file"
-                    accept=".pdf,.png,.jpg,.jpeg,.webp,.tif,.tiff,application/pdf,image/*"
-                    required
-                  >
-                  <span class="upload-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24">
-                      <rect x="3.5" y="4.5" width="17" height="15" rx="2"></rect>
-                      <circle cx="9" cy="10" r="1.5"></circle>
-                      <path d="m5.5 17 4.25-4 3 2.5 2.25-2 3.5 3.5"></path>
-                    </svg>
-                  </span>
-                  <span class="upload-copy">
-                    <strong data-i18n="originalLabel">Bản gốc PDF hoặc ảnh</strong>
-                    <small data-i18n="originalHelp">Nguồn tham chiếu cho bố cục và vị trí</small>
-                    <span class="file-name" id="layout-file-name" data-i18n="chooseOriginal">Chọn tệp gốc</span>
-                  </span>
-                  <span class="required" data-i18n="required">Bắt buộc</span>
-                </label>
+                  <fieldset id="evidence-mode-picker" class="evidence-mode-picker" hidden>
+                    <legend data-i18n="evidenceModeTitle">Bạn muốn chuẩn bị JSON bằng cách nào?</legend>
+                    <div class="route-grid">
+                      <label class="route-card">
+                        <input type="radio" name="evidence-mode" value="upload" checked>
+                        <span>
+                          <strong data-i18n="evidenceUploadTitle">Tôi đã có tệp JSON</strong>
+                          <small data-i18n="evidenceUploadHelp">Nhanh và ổn định nhất vì không phải chạy OCR lại.</small>
+                        </span>
+                      </label>
+                      <label id="online-route-card" class="route-card">
+                        <input id="online-evidence-mode" type="radio" name="evidence-mode" value="online">
+                        <span>
+                          <strong data-i18n="evidenceOnlineTitle">Nhờ OCR trực tuyến tạo JSON</strong>
+                          <small data-i18n="evidenceOnlineHelp">Tiện hơn nhưng có thể phải chờ, có giới hạn hoặc phát sinh phí.</small>
+                        </span>
+                      </label>
+                    </div>
 
-                <label class="upload-card optional-card" for="evidence-file">
-                  <input id="evidence-file" name="evidence" type="file" accept=".json,application/json">
-                  <span class="upload-icon" aria-hidden="true">
-                    <svg viewBox="0 0 24 24">
-                      <path d="M8 4.5H6.5a2 2 0 0 0-2 2v3a2 2 0 0 1-2 2 2 2 0 0 1 2 2v4a2 2 0 0 0 2 2H8M16 4.5h1.5a2 2 0 0 1 2 2v3a2 2 0 0 0 2 2 2 2 0 0 0-2 2v4a2 2 0 0 1-2 2H16"></path>
-                    </svg>
-                  </span>
-                  <span class="upload-copy">
-                    <strong data-i18n="jsonLabel">Dữ liệu bố cục JSON</strong>
-                    <small data-i18n="jsonHelp">Tọa độ và thứ tự đọc từ công cụ OCR</small>
-                    <span class="file-name" id="evidence-file-name" data-i18n="chooseJson">Chọn tệp .json</span>
-                  </span>
-                  <span class="optional" data-i18n="optional">Không bắt buộc</span>
-                </label>
+                    <div id="online-provider-field" class="field online-provider-field" hidden>
+                      <label for="online-ocr-provider" data-i18n="onlineProviderLabel">Dịch vụ OCR sẽ dùng</label>
+                      <select id="online-ocr-provider" name="onlineOcrProvider"></select>
+                      <p id="online-provider-detail" class="field-help"></p>
+                    </div>
+                  </fieldset>
+                </section>
               </div>
             </fieldset>
 
             <fieldset class="form-section options-section">
               <legend>
                 <span class="number">3</span>
-                <span data-i18n="optionsSection">Chọn cách xử lý</span>
+                <span data-i18n="optionsSection">Chọn tốc độ và độ kiểm tra</span>
               </legend>
 
               <div class="options-grid">
-                <div class="field">
-                  <label for="provider" data-i18n="providerLabel">Nguồn dữ liệu bố cục</label>
+                <div id="saved-provider-field" class="field">
+                  <label for="provider" data-i18n="providerLabel">Tệp JSON được tạo bởi</label>
                   <select id="provider" name="provider">
-                    <option value="" data-i18n="providerAuto">Tự nhận diện</option>
+                    <option value="" data-i18n="providerAuto">Để hệ thống tự nhận biết</option>
                     <option value="paddleocr">PaddleOCR</option>
                     <option value="mineru">MinerU</option>
                     <option value="olmocr">olmOCR</option>
                     <option value="json">JSON</option>
                   </select>
-                  <p class="field-help" data-i18n="providerHelp">Chỉ chọn khi bạn biết nguồn tạo tệp JSON.</p>
+                  <p class="field-help" data-i18n="providerHelp">Không nhớ thì cứ để hệ thống tự nhận biết.</p>
                 </div>
 
                 <div class="field">
-                  <span class="field-label" id="quality-label" data-i18n="qualityLabel">Mức kiểm chứng</span>
+                  <span class="field-label" id="quality-label" data-i18n="qualityLabel">Bạn ưu tiên điều gì?</span>
                   <div class="segmented" role="radiogroup" aria-labelledby="quality-label">
                     <label>
                       <input type="radio" name="quality" value="fast" checked>
                       <span>
-                        <strong data-i18n="qualityFast">Nhanh</strong>
-                        <small data-i18n="qualityFastHelp">Trả DOCX ngay sau khi dựng</small>
+                        <strong data-i18n="qualityFast">Có Word sớm hơn</strong>
+                        <small data-i18n="qualityFastHelp">Bỏ qua bước dựng ảnh kiểm tra</small>
                       </span>
                     </label>
-                    <label>
-                      <input type="radio" name="quality" value="verified">
+                    <label id="verified-quality-card">
+                      <input id="quality-verified" type="radio" name="quality" value="verified" disabled>
                       <span>
-                        <strong data-i18n="qualityVerified">Kiểm chứng</strong>
-                        <small data-i18n="qualityVerifiedHelp">Máy chủ dựng ảnh để đối chiếu</small>
+                        <strong data-i18n="qualityVerified">Kiểm tra kỹ hơn</strong>
+                        <small id="quality-verified-help" data-i18n="qualityVerifiedUnavailable">Dịch vụ xử lý chưa bật lựa chọn này</small>
                       </span>
                     </label>
                   </div>
                 </div>
               </div>
 
-              <details class="advanced-options">
-                <summary data-i18n="advancedTitle">Tùy chọn nâng cao</summary>
+              <section class="advanced-options" aria-labelledby="advanced-title">
+                <div class="advanced-heading">
+                  <div>
+                    <h3 id="advanced-title" data-i18n="advancedTitle">Tuỳ chọn cho tài liệu khó</h3>
+                    <p data-i18n="advancedIntro">Tất cả đều hiện sẵn. Nếu chưa chắc, hãy giữ các lựa chọn mặc định.</p>
+                  </div>
+                  <span data-i18n="advancedVisibleBadge">Luôn hiển thị</span>
+                </div>
                 <div class="advanced-grid">
                   <label class="check-row">
                     <input id="strict-evidence" type="checkbox" checked>
                     <span>
-                      <strong data-i18n="strictLabel">Kiểm tra JSON nghiêm ngặt</strong>
-                      <small data-i18n="strictHelp">Dừng lại nếu dữ liệu bố cục không hợp lệ.</small>
+                      <strong data-i18n="strictLabel">Báo ngay nếu tệp JSON bị lỗi</strong>
+                      <small data-i18n="strictHelp">Khuyên dùng để tránh tạo Word sai bố cục mà không biết.</small>
                     </span>
                   </label>
                   <label class="check-row">
-                    <input id="remote-assets" type="checkbox">
+                    <input id="remote-assets" type="checkbox" disabled>
                     <span>
-                      <strong data-i18n="remoteAssetsLabel">Cho phép tải ảnh từ liên kết trong Markdown</strong>
-                      <small data-i18n="remoteAssetsHelp">Máy chủ có thể kết nối tới địa chỉ bên ngoài.</small>
+                      <strong data-i18n="remoteAssetsLabel">Lấy cả ảnh được gắn bằng liên kết</strong>
+                      <small id="remote-assets-help" data-i18n="remoteAssetsUnavailable">Dịch vụ xử lý chưa bật lựa chọn này.</small>
                     </span>
                   </label>
                   <label class="check-row">
                     <input id="paddle-fallback" type="checkbox">
                     <span>
-                      <strong data-i18n="paddleFallbackLabel">Cho phép máy chủ dùng PaddleOCR-VL</strong>
-                      <small data-i18n="paddleFallbackHelp">Chỉ hoạt động khi quản trị viên đã cấu hình dịch vụ.</small>
+                      <strong data-i18n="paddleFallbackLabel">Cho phép PaddleOCR đọc lại chỗ khó</strong>
+                      <small id="paddle-fallback-help" data-i18n="paddleFallbackUnavailable">Đơn vị xử lý chưa xác nhận đã bật lựa chọn này.</small>
                     </span>
                   </label>
                   <div class="field compact-field">
@@ -267,7 +362,50 @@
                     >
                   </div>
                 </div>
-              </details>
+
+                <div id="online-ocr-options" class="online-ocr-options" hidden>
+                  <div class="online-options-heading">
+                    <h4 data-i18n="onlineOptionsTitle">Nói cho OCR biết tài liệu có gì</h4>
+                    <p data-i18n="onlineOptionsIntro">Các lựa chọn giúp mô tả tài liệu và chọn dịch vụ phù hợp; mức tác động tùy từng dịch vụ.</p>
+                  </div>
+                  <div class="online-options-grid">
+                    <div class="field compact-field">
+                      <label for="ocr-language" data-i18n="ocrLanguageLabel">Ngôn ngữ chính</label>
+                      <select id="ocr-language">
+                        <option value="" data-i18n="ocrLanguageAuto">Tự nhận biết</option>
+                        <option value="vi">Tiếng Việt</option>
+                        <option value="en">English</option>
+                        <option value="zh">中文</option>
+                        <option value="ru">Русский</option>
+                      </select>
+                    </div>
+                    <label class="check-row">
+                      <input id="ocr-handwriting" type="checkbox">
+                      <span><strong data-i18n="ocrHandwriting">Có chữ viết tay</strong></span>
+                    </label>
+                    <label class="check-row">
+                      <input id="ocr-formulas" type="checkbox" checked>
+                      <span><strong data-i18n="ocrFormulas">Có công thức toán</strong></span>
+                    </label>
+                    <label class="check-row">
+                      <input id="ocr-tables" type="checkbox" checked>
+                      <span><strong data-i18n="ocrTables">Có bảng biểu</strong></span>
+                    </label>
+                    <label class="check-row">
+                      <input id="ocr-charts" type="checkbox">
+                      <span><strong data-i18n="ocrCharts">Có biểu đồ hoặc sơ đồ</strong></span>
+                    </label>
+                    <label class="check-row">
+                      <input id="ocr-distorted-photo" type="checkbox">
+                      <span><strong data-i18n="ocrDistorted">Ảnh chụp bị nghiêng hoặc cong</strong></span>
+                    </label>
+                    <label class="check-row">
+                      <input id="ocr-dewarping" type="checkbox">
+                      <span><strong data-i18n="ocrDewarping">Làm phẳng trang trước khi đọc</strong></span>
+                    </label>
+                  </div>
+                </div>
+              </section>
             </fieldset>
 
             <div id="form-error" class="message error-message" role="alert" hidden></div>
@@ -280,20 +418,23 @@
                 aria-describedby="upload-consent-detail"
               >
               <span>
-                <strong data-i18n="consentTitle">Tôi đồng ý gửi tệp tới máy chủ đã chọn</strong>
+                <strong data-i18n="consentTitle">Tôi đồng ý gửi tệp tới dịch vụ đã chọn</strong>
                 <small id="upload-consent-detail">
-                  Tệp sẽ được tải lên máy chủ bạn nhập. Đơn vị vận hành có thể xử lý hoặc lưu giữ
-                  chúng theo chính sách riêng.
+                  Cả ba tệp sẽ được gửi tới dịch vụ bạn nhập. Đơn vị đó có thể xử lý hoặc lưu giữ
+                  tệp theo chính sách riêng.
                 </small>
               </span>
             </label>
 
             <button id="submit-button" class="primary-button" type="submit" disabled>
-              <span data-i18n="submit">Dựng tệp Word</span>
+              <span data-i18n="submit">Tạo tệp Word</span>
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m8 5 7 7-7 7"></path>
               </svg>
             </button>
+            <p id="submit-hint" class="submit-hint" aria-live="polite" data-i18n="submitHint">
+              Chọn đủ ba tệp, nhập nơi xử lý và xác nhận đồng ý để tiếp tục.
+            </p>
           </form>
         </section>
 
@@ -332,16 +473,30 @@
             </div>
           </section>
 
+          <section class="panel notice-card" aria-labelledby="speed-title">
+            <div class="notice-icon speed-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M12 7v5l3 2"></path>
+              </svg>
+            </div>
+            <h2 id="speed-title" data-i18n="speedTitle">Muốn nhận kết quả nhanh hơn?</h2>
+            <p data-i18n="speedBody">
+              Dùng JSON có sẵn và chọn “Có Word sớm hơn”. OCR trực tuyến, nhiều trang hoặc kiểm tra
+              bằng ảnh sẽ cần thêm thời gian; trang sẽ hiện thời gian thực sau khi hoàn tất.
+            </p>
+          </section>
+
           <section class="panel notice-card" aria-labelledby="privacy-title">
             <div class="notice-icon privacy-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24">
                 <path d="M12 3 5.5 5.75v5.1c0 4.48 2.78 8.26 6.5 10.15 3.72-1.89 6.5-5.67 6.5-10.15v-5.1zM9 12l2 2 4-4"></path>
               </svg>
             </div>
-            <h2 id="privacy-title" data-i18n="privacyTitle">Quyền riêng tư rõ ràng</h2>
+            <h2 id="privacy-title" data-i18n="privacyTitle">Tệp có thể rời khỏi thiết bị</h2>
             <p data-i18n="privacyBody">
-              GitHub Pages chỉ phân phối giao diện tĩnh này. Tệp được gửi thẳng từ trình duyệt tới
-              máy chủ bạn chọn; GitHub không xử lý tài liệu và trang này không lưu khóa truy cập.
+              Trang này không giữ tệp. Khi bạn bắt đầu, tệp đi thẳng tới dịch vụ đã chọn; nếu dùng
+              OCR trực tuyến, bản gốc có thể được gửi tiếp tới nhà cung cấp OCR.
             </p>
           </section>
 
@@ -351,10 +506,10 @@
                 <path d="M12 2.75v18.5M16.25 6.5h-6.4a3.1 3.1 0 0 0 0 6.2h4.3a3.1 3.1 0 0 1 0 6.2H7.5"></path>
               </svg>
             </div>
-            <h2 id="cost-title" data-i18n="costTitle">Mã nguồn mở không đồng nghĩa GPU miễn phí</h2>
+            <h2 id="cost-title" data-i18n="costTitle">Có thể có giới hạn hoặc phí</h2>
             <p data-i18n="costBody">
-              Giao diện và dự án là mã nguồn mở. Máy chủ, điện năng, GPU hoặc dịch vụ OCR bên thứ ba
-              vẫn có thể phát sinh chi phí theo cấu hình của đơn vị vận hành.
+              Phần mềm là mã nguồn mở, nhưng dịch vụ xử lý hoặc OCR có thể yêu cầu tài khoản, giới
+              hạn số trang, xếp hàng hoặc tính phí. Hãy xem điều khoản của nơi bạn chọn.
             </p>
           </section>
 

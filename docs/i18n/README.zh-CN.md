@@ -15,16 +15,16 @@ GitHub Pages 部署完成后，可通过
 GitHub Pages 无法运行 Python、LibreOffice、Triton、vLLM 或 GPU OCR 模型；
 本仓库也不附带公共后端，更不提供不限量的免费 GPU 算力。
 
-使用该界面时，用户必须选择由可信机构运营的后端。提交前，界面会明确说明
-校对后的 Markdown、原始 PDF 或图像以及可选 JSON 将上传到该后端，并要求
-用户确认同意。启用 PaddleOCR-VL 后，后端可能把原始文件转交给运营方所配置
-的 OCR 服务。更改后端地址或 OCR 选项后，必须重新确认。数据保留期限、隐私
-保护、处理地区、使用限额和费用均由相应运营方决定。详情参见
+使用该界面时，用户必须选择由可信机构运营的后端。高质量模式需要同时提供
+校对后的 Markdown、原始 PDF 或图像以及带位置信息的 JSON。用户既可以上传
+已有 JSON，也可以主动选择在线 OCR 服务生成 JSON。任何文件离开设备之前，
+界面都会说明接收方并要求用户确认。更改后端地址或 OCR 选项后，必须重新确认。
+数据保留期限、隐私保护、处理地区、使用限额和费用均由相应运营方决定。详情参见
 [性能与部署说明](../PERFORMANCE.md)。
 
 ## 推荐的三类输入
 
-同时提供以下三类相互补充的输入，通常能得到最可靠的结果。三者各有用途，
+高质量模式只有在以下三类相互补充的输入都齐全时才会开始。三者各有用途，
 不能简单地互相替代：
 
 | 输入 | 项目以此作为判断依据的内容 |
@@ -36,8 +36,34 @@ GitHub Pages 无法运行 Python、LibreOffice、Triton、vLLM 或 GPU OCR 模�
 项目会先分别对每个 JSON 文件进行规范化和对齐，再综合各来源的信息。JSON
 可以补充版面和结构信息，但不能覆盖 Markdown 中的文字；原始文件则始终是
 页面外观和几何尺寸的最终参照。与当前文档无关或存在冲突的 JSON 会被拒绝，
-或者在 QA 报告中明确列出。如果缺少其中一类输入，项目仍可运行，但可核对
-的项目会减少，因此应将输出视为可信度较低的结果。
+或者在 QA 报告中明确列出。只含零散文字的 JSON 不算位置证据：每个可用内容
+块都必须注明所属页面、页面尺寸以及边界框或多边形坐标。如果缺少其中一类
+输入，项目仍可按估算模式运行，但输出只能视为可信度较低的结果，不能称为
+高质量结果。
+
+### 还没有位置 JSON？
+
+用户可以打开服务商的官方网站自行导出文件，也可以通过可信后端使用自己的
+账号和密钥。请勿把共用密钥写进 GitHub Pages 的 JavaScript。限额、价格和政策
+都可能调整，因此上传前应以官方网站以及用户账号中显示的条款为准。
+
+| 选择 | 适合处理 | 使用前需要了解 |
+| --- | --- | --- |
+| [PaddleOCR 官方接口 / AI Studio](https://www.paddleocr.ai/latest/en/version3.x/inference_deployment/serving/paddleocr_official_api/overview.html) | 多语言扫描件、拍摄变形的页面、表格和公式，可同时输出 Markdown 与 JSON | 使用用户自己的 AI Studio 权限。[现行限额说明](https://ai.baidu.com/ai-doc/AISTUDIO/pmjcld5qm)为每位用户、每个模型每日 3,000 页；文件超过 100 页时只处理前 100 页。这是可调整的用量限额，不是可用性承诺。所引接口文档没有给出 PaddleOCR 专属的数据保留期限，敏感文件上传前应先阅读百度现行政策。 |
+| [Mistral OCR](https://docs.mistral.ai/api/endpoint/ocr) | 复杂页面、结构化 Markdown 和位置数据 | 需要用户自己的密钥，并把文件上传到 Mistral。[价格页](https://mistral.ai/pricing/api/)按页计费；试用额度和速率限制取决于账号，不能视为有保障的免费生产算力。[零数据保留](https://help.mistral.ai/en/articles/347612-can-i-activate-zero-data-retention-zdr)仅适用于符合条件的付费方案，也不覆盖所有文件上传或批处理路径。 |
+| [Mathpix](https://docs.mathpix.com/) | 数学公式、理工科资料和手写内容 | [不提供免费试用](https://website.mathpix.com/docs/convert/billing)，并收取开户和使用费用。Mathpix 明确要求[不得在浏览器代码中暴露密钥](https://docs.mathpix.com/reference/authentication)，因此 PDF 处理需要可信后端。[保留政策](https://docs.mathpix.com/concepts/data-retention)目前注明源图像最长保留 30 天、识别文字最长保留 90 天。 |
+| [Azure 文档智能](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/prebuilt/layout?view=doc-intel-4.0.0) | 表单、表格、阅读顺序、Markdown 和多边形坐标 | 需要用户自己的 Azure 资源和凭据。[F0 限额](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/service-limits?view=doc-intel-4.0.0)目前为每月 500 页，但每次请求只处理前两页。微软说明分析数据会在所选区域暂存，并在 [24 小时内删除](https://learn.microsoft.com/en-us/azure/ai-services/document-intelligence/faq?view=doc-intel-4.0.0)。 |
+| [Google Document AI](https://docs.cloud.google.com/document-ai/docs/overview) | 企业文档识别、表单和详细坐标数据 | 需要 Google Cloud 项目、处理器、结算账号和 OAuth 权限。[价格页](https://cloud.google.com/products/document-ai/pricing)目前规定每个账号每月前 1,000 页企业文档 OCR 不收费，之后按量计费。Google 表示[不会使用客户文档和预测结果训练 Document AI](https://docs.cloud.google.com/document-ai/docs/security)。项目需要把返回的 Document JSON 转成 Markdown。 |
+| [OCR.space](https://ocr.space/ocrapi) | 短小且不敏感、希望由浏览器直接提交的文件 | 免费方案目前限制为每个 IP 每日 500 次、每月 25,000 次、每个文件 1 MB、PDF 最多三页，并且没有可用性承诺。必须使用用户自己的密钥；浏览器中的密钥仍可能被复制并耗尽额度。服务商声明不会保存源文件和 OCR 文字。 |
+| [olmOCR](https://github.com/allenai/olmocr) | 困难 PDF、手写、数学、表格和多栏阅读顺序 | Apache-2.0 开源代码不等于免费托管算力。本地运行需要合适的 GPU，外部推理服务另行收费。[在线演示](https://olmocr.allenai.org/)仅供试用，没有公开的生产接口或可用性承诺。 |
+| [Hugging Face Spaces 公开演示](https://huggingface.co/spaces/PaddlePaddle/PaddleOCR-VL-1.6_Online_Demo) | 部署前试用模型 | [ZeroGPU](https://huggingface.co/docs/hub/main/spaces-zerogpu)按账号提供少量每日 GPU 分钟数，并有排队和运行时长限制；[专用推理端点](https://huggingface.co/docs/inference-endpoints/en/pricing)需要付费。不得把公开演示当作项目默认的生产后端。 |
+
+在本项目中，`paddleocr_official` 按照[官方工具包](https://www.paddleocr.ai/latest/en/version3.x/inference_deployment/serving/paddleocr_official_api/python.html)
+读取 `PADDLEOCR_ACCESS_TOKEN`，向 AI Studio 提交异步任务。它不同于
+`paddleocr_vl_server`；后者连接的是由后端运营方自行选择和管理的
+PaddleOCR-VL 服务器。运营方可用 `DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS`
+公布一份小型允许列表。`/v1/hybrid/capabilities` 只把允许且已配置的服务标为
+可用，不会返回密钥、访问令牌或私有服务地址。
 
 默认情况下，来源文件中的页码必须准确对应。只有当两个页面序列都完整、
 连续且页数相同，项目才会按先后顺序重新配对，例如把 OCR 标记为第 5–6 页

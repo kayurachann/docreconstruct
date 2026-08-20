@@ -26,6 +26,7 @@ from docreconstruct.providers import (
     MistralOCRProvider,
     NativePDFProvider,
     OlmOCRProvider,
+    PaddleOCROfficialProvider,
     PaddleOCRProvider,
     PaddleOCRVLServerProvider,
     ProviderContext,
@@ -50,9 +51,11 @@ def test_builtin_registry_and_custom_registry() -> None:
         "native_pdf",
         "olmocr",
         "paddleocr",
+        "paddleocr_official",
         "paddleocr_vl_server",
     }
     assert isinstance(registry.get("PaddleOCR"), PaddleOCRProvider)
+    assert isinstance(registry.get("PaddleOCR-Official"), PaddleOCROfficialProvider)
     assert isinstance(registry.get("PaddleOCR-VL-Server"), PaddleOCRVLServerProvider)
     assert isinstance(registry.get("Mistral-OCR"), MistralOCRProvider)
     assert isinstance(registry.get("Mathpix"), MathpixProvider)

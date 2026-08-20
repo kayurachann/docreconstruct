@@ -48,6 +48,7 @@ from .mistral_ocr import MistralOCRProvider, MistralOcrProvider
 from .native_pdf import NativePDFProvider, NativePdfProvider
 from .olmocr import OLMOCRProvider, OlmOCRProvider, OlmOcrProvider
 from .paddleocr import PaddleOCRProvider, PaddleOcrProvider
+from .paddleocr_official import PaddleOCRAPIProvider, PaddleOCROfficialProvider
 from .paddleocr_vl_server import (
     PaddleOCRVLAPIProvider,
     PaddleOCRVLServerProvider,
@@ -68,6 +69,7 @@ for _provider in (
     MathpixProvider,
     NativePDFProvider,
     PaddleOCRProvider,
+    PaddleOCROfficialProvider,
     PaddleOCRVLServerProvider,
     MinerUProvider,
     OlmOCRProvider,
@@ -133,6 +135,8 @@ __all__ = [
     "OlmOcrProvider",
     "PaddleOCRProvider",
     "PaddleOcrProvider",
+    "PaddleOCRAPIProvider",
+    "PaddleOCROfficialProvider",
     "PaddleOCRVLAPIProvider",
     "PaddleOCRVLServerProvider",
     "PaddleOcrVlServerProvider",
