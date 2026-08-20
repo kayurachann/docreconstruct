@@ -65,6 +65,9 @@ def _reserved_page_workers(count: int) -> Iterator[int]:
 # workers and 1.19 s for four, so the figure below stays a little above the
 # observed cost; it is what the projected saving has to beat.
 _PAGE_POOL_STARTUP_SECONDS = 1.5
+# Autocorrelation score a periodic line rhythm must reach before it may
+# override the measured pitch.
+_MINIMUM_PERIODIC_SCORE = 0.30
 # A compressed PDF says nothing about how much memory its pages decode to: a
 # 4.7 MiB, 20-page scan expands to roughly 500 MiB of RGB, so page count and
 # decoded pixels are the quantities that have to be bounded, not upload size.
@@ -589,17 +592,51 @@ def _merge_runs(runs: list[tuple[int, int]], gap: int) -> list[tuple[int, int]]:
     return merged
 
 
+def _dominant_gap(gaps: list[float]) -> float | None:
+    """Return the repeated baseline gap, or ``None`` when there is not one.
+
+    The 16-60 px window that classifies a gap as a line pitch only describes a
+    page rasterized at roughly 150-200 DPI; a 300 DPI scan or double spacing
+    falls outside it, and the estimate then came from page height alone. A gap
+    list can still show the real rhythm — but only when a majority of gaps
+    agree. A page whose bands barely separate yields a handful of gaps that are
+    section breaks, and their median is not a line pitch, so the caller keeps
+    its page-height prior instead.
+    """
+
+    if len(gaps) < 4:
+        return None
+    best: list[float] = []
+    for candidate in gaps:
+        tolerance = max(2.25, candidate * 0.08)
+        neighbors = [gap for gap in gaps if abs(gap - candidate) <= tolerance]
+        if len(neighbors) > len(best):
+            best = neighbors
+    if len(best) < 4 or len(best) * 2 < len(gaps):
+        return None
+    return float(_require_numpy().median(best))
+
+
 def _estimate_line_pitch(ink: Any, content: PixelBox) -> tuple[float, list[tuple[int, int]]]:
     np = _require_numpy()
     cropped = ink[content.y0 : content.y1, content.x0 : content.x1]
     row_ink = np.count_nonzero(cropped, axis=1)
     threshold = max(3, int(content.width * 0.002))
     bands = _runs(row_ink >= threshold)
+    # The band-height and gap bounds are raw pixels, which only describe a page
+    # rasterized at roughly 150-200 DPI.  A 300 DPI scan, a phone photo, or
+    # double spacing puts the true rhythm outside them entirely, and the page
+    # then fell back to `content.height / 55` — a guess unrelated to the
+    # document.  The window is kept as a preference so no page that already
+    # lands inside it moves; the difference is what happens when nothing does.
     useful = [band for band in bands if 3 <= band[1] - band[0] <= 45]
     centers = [(start + end) / 2 for start, end in useful]
     gaps = [right - left for left, right in zip(centers, centers[1:], strict=False)]
     plausible = [gap for gap in gaps if 16 <= gap <= 60]
-    pitch = float(np.median(plausible)) if plausible else max(18.0, content.height / 55.0)
+    if plausible:
+        pitch = float(np.median(plausible))
+    else:
+        pitch = _dominant_gap(gaps) or max(18.0, content.height / 55.0)
     return pitch, [(start + content.y0, end + content.y0) for start, end in useful]
 
 
@@ -699,7 +736,9 @@ def _detect_text_lines(
         neighbors = [gap for gap in plausible if abs(gap - cluster) <= 2.25]
         refined_pitch = float(np.median(neighbors))
     else:
-        refined_pitch = initial_pitch
+        # Same reasoning as `_estimate_line_pitch`: a rhythm outside the window
+        # is still a measurement when enough gaps agree on it.
+        refined_pitch = _dominant_gap(gaps) or initial_pitch
     return lines, refined_pitch
 
 
@@ -1079,6 +1118,7 @@ def _segment_column_layout(
         "column_boxes": [[box.x0, box.y0, box.x1, box.y1] for box in boxes],
         "column_confidence": float(round(min(0.99, 0.62 + support_ratio * 0.42), 4)),
         "periodic_line_pitch": min((item[0] for item in periodic), default=None),
+        "periodic_line_score": max((item[1] for item in periodic), default=None),
         "column_content_bottoms": [content_bottom(box) for box in boxes],
     }
 
@@ -1179,6 +1219,7 @@ def _detect_column_layout(
             round(min(0.99, 0.58 + (1.0 - smoothed[center] / baseline) * 0.36), 4)
         ),
         "periodic_line_pitch": min((item[0] for item in periodic), default=None),
+        "periodic_line_score": max((item[1] for item in periodic), default=None),
         "column_content_bottoms": [content_bottom(left_box), content_bottom(right_box)],
     }
 
@@ -1571,7 +1612,18 @@ def analyze_scan_page(
         line_bands = [(line.bbox.y0, line.bbox.y1) for line in text_lines]
     column_metadata = _detect_column_layout(ink, content, text_lines, line_pitch)
     periodic_pitch = column_metadata.get("periodic_line_pitch")
-    if isinstance(periodic_pitch, (int, float)) and periodic_pitch >= 12:
+    periodic_score = column_metadata.get("periodic_line_score")
+    # Rerunning line detection on the autocorrelation lag is only justified when
+    # that lag is a real rhythm.  A high-DPI page whose true pitch is far beyond
+    # the lag ceiling has no true peak inside the searched range, so the winner
+    # is whatever noise scores highest — 0.13 on one 600 DPI fixture, which was
+    # accepted and drove the page to a 12 px pitch and 338 lines where it has 21.
+    if (
+        isinstance(periodic_pitch, (int, float))
+        and periodic_pitch >= 12
+        and isinstance(periodic_score, (int, float))
+        and periodic_score >= _MINIMUM_PERIODIC_SCORE
+    ):
         periodic_value = float(periodic_pitch)
         # A dense masthead or display title can make the first global pass
         # merge every second body baseline.  Once repeated column rhythm gives
