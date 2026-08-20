@@ -8,6 +8,7 @@ from typing import Any
 from docreconstruct.profiles import PROFILE_SETTINGS
 
 COMPONENTS = ("text", "layout", "structure", "editability", "visual")
+FIDELITY_METRIC_VERSION = "3.0.0-alpha.1"
 
 FIDELITY_PROFILES: dict[str, dict[str, float]] = {
     profile.value: {
@@ -49,7 +50,12 @@ class FidelityScore:
     profile: str = "balanced"
     custom_weights: dict[str, float] | None = field(default=None, repr=False, compare=False)
     weights: dict[str, float] = field(init=False)
+    configured_weights: dict[str, float] = field(init=False)
+    overall_measured: float = field(init=False)
+    overall_strict: float = field(init=False)
+    measurement_coverage: float = field(init=False)
     overall: float = field(init=False)
+    metric_version: str = field(default=FIDELITY_METRIC_VERSION, init=False)
 
     def __post_init__(self) -> None:
         canonical_profile = _PROFILE_ALIASES.get(self.profile.lower(), self.profile.lower())
@@ -70,24 +76,40 @@ class FidelityScore:
                 raise ValueError("custom fidelity weights must be non-negative and not all zero")
 
         components = {name: _score(getattr(self, name)) for name in COMPONENTS}
+        total_weight = sum(configured.values())
         available_weight = sum(
             configured[name] for name, score in components.items() if score is not None
         )
         if available_weight == 0:
             normalized = {name: 0.0 for name in COMPONENTS}
-            overall = 0.0
+            overall_measured = 0.0
         else:
             normalized = {
                 name: (configured[name] / available_weight if components[name] is not None else 0.0)
                 for name in COMPONENTS
             }
-            overall = sum((components[name] or 0.0) * normalized[name] for name in COMPONENTS)
+            overall_measured = sum(
+                (components[name] or 0.0) * normalized[name] for name in COMPONENTS
+            )
+        overall_strict = (
+            sum((components[name] or 0.0) * configured[name] for name in COMPONENTS) / total_weight
+            if total_weight
+            else 0.0
+        )
+        measurement_coverage = available_weight / total_weight if total_weight else 0.0
 
         for name, score in components.items():
             object.__setattr__(self, name, score)
         object.__setattr__(self, "profile", canonical_profile)
         object.__setattr__(self, "weights", normalized)
-        object.__setattr__(self, "overall", max(0.0, min(1.0, overall)))
+        object.__setattr__(self, "configured_weights", configured)
+        object.__setattr__(self, "overall_measured", max(0.0, min(1.0, overall_measured)))
+        object.__setattr__(self, "overall_strict", max(0.0, min(1.0, overall_strict)))
+        object.__setattr__(self, "measurement_coverage", max(0.0, min(1.0, measurement_coverage)))
+        # Transitional compatibility: ``overall`` retains the historical
+        # measured-only behavior for one release. New gates must use
+        # ``overall_strict`` together with ``measurement_coverage``.
+        object.__setattr__(self, "overall", max(0.0, min(1.0, overall_measured)))
 
     @classmethod
     def from_metrics(
@@ -122,10 +144,16 @@ class FidelityScore:
     def to_dict(self) -> dict[str, Any]:
         return {
             "profile": self.profile,
+            "metric_version": self.metric_version,
             "overall": self.overall,
+            "overall_deprecated": True,
+            "overall_measured": self.overall_measured,
+            "overall_strict": self.overall_strict,
+            "measurement_coverage": self.measurement_coverage,
             "percentage": self.percentage,
             "components": self.components,
             "weights": dict(self.weights),
+            "configured_weights": dict(self.configured_weights),
         }
 
 

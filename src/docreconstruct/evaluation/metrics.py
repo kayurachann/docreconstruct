@@ -26,6 +26,13 @@ from docreconstruct.renderers._utils import (
     value,
 )
 
+from .assignment import minimum_cost_assignment
+
+TEXT_METRIC_VERSION = "2.0.0"
+LAYOUT_METRIC_VERSION = "3.0.0-alpha.1"
+STRUCTURE_METRIC_VERSION = "3.0.0-alpha.1"
+EDITABILITY_METRIC_VERSION = "2.0.0-alpha.1"
+
 
 def _clamp(score: float) -> float:
     return max(0.0, min(1.0, float(score)))
@@ -110,6 +117,7 @@ class TextMetrics:
     numerical_accuracy: float
     reference_characters: int
     candidate_characters: int
+    metric_version: str = TEXT_METRIC_VERSION
 
     @property
     def cer(self) -> float:
@@ -181,51 +189,154 @@ def _records(document: Any) -> list[_ElementRecord]:
     return result
 
 
+_TEXT_COMPATIBLE = {
+    "text",
+    "title",
+    "heading",
+    "paragraph",
+    "list_item",
+    "caption",
+    "header",
+    "footer",
+    "footnote",
+    "page_number",
+}
+
+
+def _semantic_compatibility(left: str, right: str) -> float | None:
+    if left == right:
+        return 0.0
+    if left in _TEXT_COMPATIBLE and right in _TEXT_COMPATIBLE:
+        return 0.35
+    return None
+
+
+def _record_sort_key(record: _ElementRecord) -> tuple[Any, ...]:
+    raw_order = value(record.element, "reading_order", None)
+    box = bbox_tuple(record.element)
+    return (
+        record.page_index,
+        "text" if record.type in _TEXT_COMPATIBLE else record.type,
+        1 if raw_order is None else 0,
+        finite_number(raw_order, 1_000_000),
+        box[1],
+        box[0],
+        box[3],
+        box[2],
+        record.type,
+        re.sub(r"\s+", " ", record.text).strip().casefold(),
+        record.id,
+        record.source_index,
+    )
+
+
+def _normalized_text_cost(left: str, right: str) -> float:
+    normalized_left = re.sub(r"\s+", " ", left).strip().casefold()
+    normalized_right = re.sub(r"\s+", " ", right).strip().casefold()
+    if normalized_left == normalized_right:
+        return 0.0
+    return 1.0 - _accuracy(normalized_left, normalized_right)
+
+
 def _match_elements(
     reference: Any, candidate: Any
 ) -> tuple[list[tuple[_ElementRecord, _ElementRecord]], int, int]:
-    """Match IDs first, then exact type/text pairs, then type-only pairs."""
+    """Globally assign compatible elements page-by-page.
+
+    Candidate list order is not evidence.  Records are first canonicalized,
+    then a minimum-cost page-local assignment combines semantic type, text,
+    geometry, size, and reading-order evidence.  Duplicate IDs receive no
+    special treatment; a unique ID is only a small tie preference and never
+    overrides a hard semantic incompatibility.
+    """
 
     refs = _records(reference)
     cands = _records(candidate)
     pairs: list[tuple[_ElementRecord, _ElementRecord]] = []
-    used_ref: set[int] = set()
-    used_cand: set[int] = set()
 
-    candidate_ids: dict[str, int] = {}
-    duplicate_ids: set[str] = set()
-    for index, record in enumerate(cands):
-        if not record.id:
-            continue
-        if record.id in candidate_ids:
-            duplicate_ids.add(record.id)
-        candidate_ids[record.id] = index
-    for ref_index, record in enumerate(refs):
-        if record.id and record.id not in duplicate_ids and record.id in candidate_ids:
-            cand_index = candidate_ids[record.id]
-            if cand_index not in used_cand:
-                pairs.append((record, cands[cand_index]))
-                used_ref.add(ref_index)
-                used_cand.add(cand_index)
-
-    for strict_text in (True, False):
-        for ref_index, ref in enumerate(refs):
-            if ref_index in used_ref:
-                continue
-            best: int | None = None
-            for cand_index, cand in enumerate(cands):
-                if cand_index in used_cand or ref.type != cand.type:
+    ref_id_counts = Counter(record.id for record in refs if record.id)
+    cand_id_counts = Counter(record.id for record in cands if record.id)
+    page_indices = sorted(
+        {record.page_index for record in refs} | {record.page_index for record in cands}
+    )
+    for page_index in page_indices:
+        page_refs = sorted(
+            (record for record in refs if record.page_index == page_index), key=_record_sort_key
+        )
+        page_cands = sorted(
+            (record for record in cands if record.page_index == page_index), key=_record_sort_key
+        )
+        normalized_candidate_text: dict[str, list[int]] = {}
+        for cand_index, cand in enumerate(page_cands):
+            normalized_candidate_text.setdefault(
+                re.sub(r"\s+", " ", cand.text).strip().casefold(), []
+            ).append(cand_index)
+        unique_candidate_ids = {
+            cand.id: cand_index
+            for cand_index, cand in enumerate(page_cands)
+            if cand.id and cand_id_counts[cand.id] == 1
+        }
+        pair_costs: list[list[float | None]] = []
+        order_denominator = max(len(page_refs), len(page_cands), 2) - 1
+        for ref_rank, ref in enumerate(page_refs):
+            row: list[float | None] = [None] * len(page_cands)
+            if max(len(page_refs), len(page_cands)) <= 96:
+                candidate_indices = set(range(len(page_cands)))
+            else:
+                proportional_rank = round(
+                    ref_rank * (len(page_cands) - 1) / max(len(page_refs) - 1, 1)
+                )
+                candidate_indices = set(
+                    range(
+                        max(0, proportional_rank - 32),
+                        min(len(page_cands), proportional_rank + 33),
+                    )
+                )
+                normalized_ref_text = re.sub(r"\s+", " ", ref.text).strip().casefold()
+                exact_text_indices = normalized_candidate_text.get(normalized_ref_text, ())
+                candidate_indices.update(
+                    sorted(exact_text_indices, key=lambda index: abs(index - proportional_rank))[
+                        :64
+                    ]
+                )
+                if ref.id and ref_id_counts[ref.id] == 1 and ref.id in unique_candidate_ids:
+                    candidate_indices.add(unique_candidate_ids[ref.id])
+            for cand_rank in sorted(candidate_indices):
+                cand = page_cands[cand_rank]
+                type_cost = _semantic_compatibility(ref.type, cand.type)
+                if type_cost is None:
                     continue
-                if strict_text and ref.text != cand.text:
-                    continue
-                best = cand_index
-                # Prefer the same page even when IDs were not propagated.
-                if ref.page_index == cand.page_index:
-                    break
-            if best is not None:
-                pairs.append((ref, cands[best]))
-                used_ref.add(ref_index)
-                used_cand.add(best)
+                geometry_cost = 1.0 - _mean(
+                    [_bbox_iou(ref.element, cand.element), _position_similarity(ref, cand)]
+                )
+                text_cost = _normalized_text_cost(ref.text, cand.text)
+                size_cost = 1.0 - _size_similarity(ref.element, cand.element)
+                order_cost = abs(ref_rank - cand_rank) / order_denominator
+                cost = (
+                    0.45 * geometry_cost
+                    + 0.25 * text_cost
+                    + 0.15 * type_cost
+                    + 0.10 * size_cost
+                    + 0.05 * order_cost
+                )
+                if (
+                    ref.id
+                    and ref.id == cand.id
+                    and ref_id_counts[ref.id] == 1
+                    and cand_id_counts[cand.id] == 1
+                ):
+                    cost = max(0.0, cost - 0.02)
+                row[cand_rank] = cost
+            pair_costs.append(row)
+        assignment = minimum_cost_assignment(
+            pair_costs,
+            candidate_count=len(page_cands),
+            unmatched_cost=0.4,
+        )
+        pairs.extend(
+            (page_refs[pair.reference_index], page_cands[pair.candidate_index])
+            for pair in assignment.pairs
+        )
     pairs.sort(key=lambda pair: pair[0].source_index)
     return pairs, len(refs), len(cands)
 
@@ -307,6 +418,7 @@ class LayoutMetrics:
     matched_elements: int
     reference_elements: int
     candidate_elements: int
+    metric_version: str = LAYOUT_METRIC_VERSION
 
     @property
     def element_f1(self) -> float:
@@ -407,17 +519,127 @@ def _relationship_accuracy(pairs: list[tuple[_ElementRecord, _ElementRecord]]) -
     return _mean(comparable, 1.0)
 
 
-def _table_accuracy(pairs: list[tuple[_ElementRecord, _ElementRecord]]) -> float:
-    table_pairs = [pair for pair in pairs if pair[0].type == "table"]
-    scores: list[float] = []
-    for ref, cand in table_pairs:
-        ref_rows, cand_rows = table_rows(ref.element), table_rows(cand.element)
-        ref_columns = max((len(row) for row in ref_rows), default=0)
-        cand_columns = max((len(row) for row in cand_rows), default=0)
-        scores.append(
-            _mean([_ratio(len(ref_rows), len(cand_rows)), _ratio(ref_columns, cand_columns)])
+@dataclass(frozen=True)
+class _TableCellRecord:
+    row: int
+    column: int
+    row_span: int
+    column_span: int
+    text: str
+
+
+def _table_cells(element: Any) -> list[_TableCellRecord]:
+    metadata = element_metadata(element)
+    raw_cells = metadata.get("cells")
+    if raw_cells is None and isinstance(metadata.get("table"), dict):
+        raw_cells = metadata["table"].get("cells")
+    cells: list[_TableCellRecord] = []
+    if isinstance(raw_cells, Sequence) and not isinstance(raw_cells, (str, bytes, bytearray)):
+        for raw in raw_cells:
+            if not isinstance(raw, dict) and not hasattr(raw, "text"):
+                continue
+            row = max(0, int(finite_number(value(raw, "row", value(raw, "row_index", 0)))))
+            column = max(
+                0,
+                int(
+                    finite_number(
+                        value(raw, "column", value(raw, "col", value(raw, "column_index", 0)))
+                    )
+                ),
+            )
+            cells.append(
+                _TableCellRecord(
+                    row=row,
+                    column=column,
+                    row_span=max(1, int(finite_number(value(raw, "row_span", 1), 1))),
+                    column_span=max(
+                        1,
+                        int(finite_number(value(raw, "column_span", value(raw, "col_span", 1)), 1)),
+                    ),
+                    text=str(value(raw, "text", value(raw, "value", "")) or ""),
+                )
+            )
+    if cells:
+        minimum_row = min(cell.row for cell in cells)
+        minimum_column = min(cell.column for cell in cells)
+        return [
+            dataclasses.replace(
+                cell,
+                row=cell.row - minimum_row,
+                column=cell.column - minimum_column,
+            )
+            for cell in cells
+        ]
+    return [
+        _TableCellRecord(row_index, column_index, 1, 1, str(text))
+        for row_index, row in enumerate(table_rows(element))
+        for column_index, text in enumerate(row)
+    ]
+
+
+def _table_dimensions(cells: Sequence[_TableCellRecord]) -> tuple[int, int]:
+    return (
+        max((cell.row + cell.row_span for cell in cells), default=0),
+        max((cell.column + cell.column_span for cell in cells), default=0),
+    )
+
+
+def _table_pair_scores(ref: _ElementRecord, cand: _ElementRecord) -> tuple[float, float, float]:
+    ref_cells = _table_cells(ref.element)
+    cand_cells = _table_cells(cand.element)
+    ref_rows, ref_columns = _table_dimensions(ref_cells)
+    cand_rows, cand_columns = _table_dimensions(cand_cells)
+    topology = _mean([_ratio(ref_rows, cand_rows), _ratio(ref_columns, cand_columns)])
+    ref_by_position = {(cell.row, cell.column): cell for cell in ref_cells}
+    cand_by_position = {(cell.row, cell.column): cell for cell in cand_cells}
+    positions = set(ref_by_position) | set(cand_by_position)
+    if not positions:
+        return topology, 1.0, 1.0
+    text_scores: list[float] = []
+    span_scores: list[float] = []
+    for position in sorted(positions):
+        ref_cell = ref_by_position.get(position)
+        cand_cell = cand_by_position.get(position)
+        if ref_cell is None or cand_cell is None:
+            text_scores.append(0.0)
+            span_scores.append(0.0)
+            continue
+        text_scores.append(1.0 - _normalized_text_cost(ref_cell.text, cand_cell.text))
+        span_scores.append(
+            _mean(
+                [
+                    _ratio(ref_cell.row_span, cand_cell.row_span),
+                    _ratio(ref_cell.column_span, cand_cell.column_span),
+                ]
+            )
         )
-    return _mean(scores, 1.0)
+    return topology, _mean(text_scores, 0.0), _mean(span_scores, 0.0)
+
+
+def _table_accuracy(
+    pairs: list[tuple[_ElementRecord, _ElementRecord]],
+    refs: Sequence[_ElementRecord],
+    cands: Sequence[_ElementRecord],
+) -> tuple[float, float, float, float]:
+    ref_tables = [record for record in refs if record.type == "table"]
+    cand_tables = [record for record in cands if record.type == "table"]
+    if not ref_tables and not cand_tables:
+        return 1.0, 1.0, 1.0, 1.0
+    table_pairs = [pair for pair in pairs if pair[0].type == pair[1].type == "table"]
+    denominator = max(len(ref_tables), len(cand_tables), 1)
+    topology_scores: list[float] = []
+    text_scores: list[float] = []
+    span_scores: list[float] = []
+    for ref, cand in table_pairs:
+        topology, text, span = _table_pair_scores(ref, cand)
+        topology_scores.append(topology)
+        text_scores.append(text)
+        span_scores.append(span)
+    topology = sum(topology_scores) / denominator
+    text = sum(text_scores) / denominator
+    span = sum(span_scores) / denominator
+    combined = 0.35 * topology + 0.40 * text + 0.25 * span
+    return combined, topology, text, span
 
 
 @dataclass(frozen=True)
@@ -428,6 +650,10 @@ class StructureMetrics:
     reading_order_accuracy: float
     hierarchy_accuracy: float
     table_structure_accuracy: float
+    table_topology_accuracy: float = 1.0
+    table_cell_text_accuracy: float = 1.0
+    table_span_accuracy: float = 1.0
+    metric_version: str = STRUCTURE_METRIC_VERSION
 
     @property
     def score(self) -> float:
@@ -444,16 +670,22 @@ class StructureMetrics:
 
 def evaluate_structure(reference: Any, candidate: Any) -> StructureMetrics:
     pairs, _, _ = _match_elements(reference, candidate)
-    ref_types = Counter(record.type for record in _records(reference))
-    cand_types = Counter(record.type for record in _records(candidate))
+    refs = _records(reference)
+    cands = _records(candidate)
+    ref_types = Counter(record.type for record in refs)
+    cand_types = Counter(record.type for record in cands)
     precision, recall, f1 = _f1_from_counts(ref_types, cand_types)
+    table, table_topology, table_text, table_span = _table_accuracy(pairs, refs, cands)
     return StructureMetrics(
         type_precision=precision,
         type_recall=recall,
         type_f1=f1,
         reading_order_accuracy=_reading_order_accuracy(pairs),
         hierarchy_accuracy=_relationship_accuracy(pairs),
-        table_structure_accuracy=_table_accuracy(pairs),
+        table_structure_accuracy=table,
+        table_topology_accuracy=table_topology,
+        table_cell_text_accuracy=table_text,
+        table_span_accuracy=table_span,
     )
 
 
@@ -482,6 +714,7 @@ class EditabilityMetrics:
     editable_ratio: float
     native_text_ratio: float
     native_structure_ratio: float
+    metric_version: str = EDITABILITY_METRIC_VERSION
 
     @property
     def score(self) -> float:
@@ -497,9 +730,27 @@ def _evaluate_docx_artifact(path: Path) -> EditabilityMetrics:
             xml = archive.read("word/document.xml")
     except (OSError, KeyError, zipfile.BadZipFile) as exc:
         raise ValueError(f"not a readable DOCX artifact: {path}") from exc
-    paragraphs = xml.count(b"<w:p>") + xml.count(b"<w:p ")
-    tables = xml.count(b"<w:tbl>") + xml.count(b"<w:tbl ")
-    drawings = xml.count(b"<w:drawing>") + xml.count(b"<w:drawing ") + xml.count(b"<w:pict>")
+    try:
+        from xml.etree import ElementTree
+
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError as exc:
+        raise ValueError(f"not a readable DOCX artifact: {path}") from exc
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    drawing = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing"
+    pict = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pict"
+    math_text = "{http://schemas.openxmlformats.org/officeDocument/2006/math}t"
+    paragraphs = sum(
+        1
+        for paragraph in root.iter(word + "p")
+        if any(
+            (node.text or "").strip()
+            for node in paragraph.iter()
+            if node.tag in {word + "t", math_text}
+        )
+    )
+    tables = sum(1 for _ in root.iter(word + "tbl"))
+    drawings = sum(1 for node in root.iter() if node.tag in {drawing, pict})
     editable = paragraphs + tables
     total = editable + drawings
     return EditabilityMetrics(
@@ -542,12 +793,20 @@ def evaluate_editability(candidate: Any, output_format: str | None = None) -> Ed
         metadata = element_metadata(record.element)
         explicit = metadata.get("editable")
         is_flattened = bool(metadata.get("flattened", False))
+        has_native_text = bool(record.text.strip()) or bool(
+            metadata.get("latex") or metadata.get("omml") or metadata.get("native_text")
+        )
         if explicit is not None:
-            is_editable = bool(explicit) and not is_flattened
+            is_editable = (
+                bool(explicit)
+                and not is_flattened
+                and (record.type in _NATIVE_STRUCTURAL_TYPES or has_native_text)
+            )
         else:
             is_editable = (
-                record.type in _NATIVE_TEXT_TYPES | _NATIVE_STRUCTURAL_TYPES and not is_flattened
-            )
+                (record.type in _NATIVE_TEXT_TYPES and has_native_text)
+                or record.type in _NATIVE_STRUCTURAL_TYPES
+            ) and not is_flattened
         editable += is_editable
         flattened += is_flattened or (
             record.type in {"image", "figure"} and bool(metadata.get("full_page", False))

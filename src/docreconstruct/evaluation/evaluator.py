@@ -7,6 +7,7 @@ import json
 import re
 import zipfile
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -26,6 +27,16 @@ from .metrics import (
 from .visual import VisualMetrics, evaluate_visual
 
 _RASTER_SUFFIXES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp"}
+EVALUATION_REPORT_SCHEMA_VERSION = "1.1.0"
+EVALUATION_METRIC_VERSION = "3.0.0-alpha.1"
+
+
+class MeasurementStatus(StrEnum):
+    """Whether a component was actually evaluated in this report."""
+
+    MEASURED = "measured"
+    NOT_MEASURED = "not_measured"
+    NOT_APPLICABLE = "not_applicable"
 
 
 def _has_pages(source: Any) -> bool:
@@ -233,14 +244,49 @@ class EvaluationReport:
     def score(self) -> float:
         return self.fidelity.overall
 
+    @property
+    def component_statuses(self) -> dict[str, str]:
+        return {
+            name: str(
+                MeasurementStatus.MEASURED
+                if getattr(self, name) is not None
+                else MeasurementStatus.NOT_MEASURED
+            )
+            for name in ("text", "layout", "structure", "editability", "visual")
+        }
+
+    @property
+    def accepted(self) -> bool:
+        """Conservative gate for reports without caller-supplied thresholds.
+
+        A report with missing required measurements can never pass.  In this
+        threshold-free public API, only a completely measured exact result is
+        accepted; benchmark-specific gates remain responsible for calibrated
+        non-exact thresholds.
+        """
+
+        measured = [score for score in self.fidelity.components.values() if score is not None]
+        return (
+            self.fidelity.measurement_coverage == 1.0
+            and bool(measured)
+            and all(score == 1.0 for score in measured)
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": EVALUATION_REPORT_SCHEMA_VERSION,
+            "metric_version": EVALUATION_METRIC_VERSION,
             "text": self.text.to_dict() if self.text else None,
             "layout": self.layout.to_dict() if self.layout else None,
             "structure": self.structure.to_dict() if self.structure else None,
             "editability": self.editability.to_dict() if self.editability else None,
             "visual": self.visual.to_dict() if self.visual else None,
             "fidelity": self.fidelity.to_dict(),
+            "overall_measured": self.fidelity.overall_measured,
+            "overall_strict": self.fidelity.overall_strict,
+            "measurement_coverage": self.fidelity.measurement_coverage,
+            "component_statuses": self.component_statuses,
+            "accepted": self.accepted,
             "metadata": dict(self.metadata),
         }
 
@@ -275,9 +321,10 @@ def evaluate(
 ) -> EvaluationReport:
     """Evaluate the dimensions supported by the supplied IR or artifacts.
 
-    Missing dimensions are not treated as zero: profile weights are
-    renormalized over the metrics that can be measured from the available
-    evidence. DOCX rendering is disabled by default; selecting ``auto`` or
+    ``overall_measured`` preserves the historical renormalized diagnostic
+    score. ``overall_strict`` keeps the configured denominator fixed, so a
+    missing required dimension cannot inflate a quality gate. DOCX rendering
+    is disabled by default; selecting ``auto`` or
     ``libreoffice`` is the caller's explicit authorization to start the
     corresponding external renderer.
     """
@@ -389,6 +436,9 @@ def evaluate(
             "visual_mode": visual_mode if visual_metrics is not None else None,
             "render_backend": normalized_render_backend,
             "renderer_provenance": [result.provenance() for result in render_results],
+            "schema_version": EVALUATION_REPORT_SCHEMA_VERSION,
+            "metric_version": EVALUATION_METRIC_VERSION,
+            "measurement_coverage": fidelity.measurement_coverage,
             "measured_components": [
                 name
                 for name, metric in (

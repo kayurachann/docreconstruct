@@ -11,8 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-VISUAL_METRIC_VERSION = "2.1"
+VISUAL_METRIC_VERSION = "2.2"
 DEFAULT_RENDERED_VISUAL_MIN_SCORE = 0.05
+VISUAL_PROFILES = {"document_mono", "document_color"}
 
 
 class VisualDependencyError(ImportError):
@@ -176,6 +177,8 @@ class VisualMetrics:
     page_score_macro: float | None = None
     foreground_threshold: int = 16
     foreground_detection: str = "adaptive-local-contrast"
+    color_similarity: float = 1.0
+    profile: str = "document_mono"
 
     @property
     def content_score(self) -> float:
@@ -192,7 +195,7 @@ class VisualMetrics:
                 0.0,
                 min(1.0, 0.75 * self.pixel_similarity + 0.15 * self.rms_similarity + 0.10),
             )
-        return max(
+        base_score = max(
             0.0,
             min(
                 1.0,
@@ -202,6 +205,9 @@ class VisualMetrics:
                 + 0.01 * self.pixel_similarity,
             ),
         )
+        if self.profile == "document_color":
+            return 0.75 * base_score + 0.25 * self.color_similarity
+        return base_score
 
     @property
     def geometry_score(self) -> float:
@@ -244,6 +250,7 @@ class VisualMetrics:
                 "region_similarity": self.region_similarity,
                 "dimension_similarity": self.dimension_similarity,
                 "page_count_similarity": self.page_count_similarity,
+                "color_similarity": self.color_similarity,
             },
         }
 
@@ -411,6 +418,7 @@ def _single_visual_metrics(
     foreground_threshold: int = 16,
     adaptive_foreground: bool = True,
     region_grid: tuple[int, int] = (4, 4),
+    profile: str = "document_mono",
 ) -> VisualMetrics:
     api = _pillow()
     ref_image = _opaque_rgb(_load_image(reference, api), api)
@@ -485,6 +493,15 @@ def _single_visual_metrics(
     histogram = grayscale.histogram()
     threshold = max(0, min(254, int(threshold)))
     differing_pixels = sum(histogram[threshold + 1 :])
+    foreground_union = api["ImageChops"].lighter(foreground_ref, foreground_cand)
+    if _foreground_count(foreground_union) == 0:
+        color_similarity = 1.0
+    else:
+        color_statistics = api["ImageStat"].Stat(
+            api["ImageChops"].difference(ref_canvas, cand_canvas),
+            foreground_union,
+        )
+        color_similarity = 1.0 - sum(color_statistics.mean) / (len(color_statistics.mean) * 255.0)
     metrics = VisualMetrics(
         pixel_similarity=max(0.0, min(1.0, pixel_similarity)),
         rms_similarity=max(0.0, min(1.0, rms_similarity)),
@@ -506,6 +523,8 @@ def _single_visual_metrics(
         foreground_detection=(
             "adaptive-local-contrast" if adaptive_foreground else "fixed-local-contrast"
         ),
+        color_similarity=max(0.0, min(1.0, color_similarity)),
+        profile=profile,
     )
     return dataclasses.replace(metrics, page_score_macro=metrics.score)
 
@@ -526,6 +545,7 @@ def evaluate_visual(
     foreground_threshold: int = 16,
     adaptive_foreground: bool = True,
     region_grid: tuple[int, int] = (4, 4),
+    profile: str = "document_mono",
 ) -> VisualMetrics:
     """Compare one image or two ordered page-image sequences.
 
@@ -537,6 +557,10 @@ def evaluate_visual(
     not allow white background to dominate the overall score.
     """
 
+    normalized_profile = profile.strip().casefold().replace("-", "_")
+    if normalized_profile not in VISUAL_PROFILES:
+        choices = ", ".join(sorted(VISUAL_PROFILES))
+        raise ValueError(f"unknown visual profile {profile!r}; choose {choices}")
     if len(region_grid) != 2:
         raise ValueError("region_grid must contain two positive integers")
     normalized_grid = (int(region_grid[0]), int(region_grid[1]))
@@ -570,6 +594,7 @@ def evaluate_visual(
                 foreground_detection=(
                     "adaptive-local-contrast" if adaptive_foreground else "fixed-local-contrast"
                 ),
+                profile=normalized_profile,
             )
         page_metrics: list[VisualMetrics] = []
         for index in range(min(len(references), len(candidates))):
@@ -583,6 +608,7 @@ def evaluate_visual(
                     foreground_threshold=foreground_threshold,
                     adaptive_foreground=adaptive_foreground,
                     region_grid=normalized_grid,
+                    profile=normalized_profile,
                 )
             )
         missing = page_count - len(page_metrics)
@@ -602,6 +628,7 @@ def evaluate_visual(
         foreground_f1 = sum(item.foreground_f1 or 0.0 for item in page_metrics) / page_count
         edge_similarity = sum(item.edge_similarity or 0.0 for item in page_metrics) / page_count
         region_similarity = sum(item.region_similarity or 0.0 for item in page_metrics) / page_count
+        color_similarity = sum(item.color_similarity for item in page_metrics) / page_count
         page_count_similarity = _ratio(len(references), len(candidates))
         page_score_macro = sum(item.score for item in page_metrics) / page_count
         return VisualMetrics(
@@ -634,6 +661,8 @@ def evaluate_visual(
             foreground_detection=(
                 "adaptive-local-contrast" if adaptive_foreground else "fixed-local-contrast"
             ),
+            color_similarity=color_similarity,
+            profile=normalized_profile,
         )
     return _single_visual_metrics(
         reference,
@@ -644,6 +673,7 @@ def evaluate_visual(
         foreground_threshold=foreground_threshold,
         adaptive_foreground=adaptive_foreground,
         region_grid=normalized_grid,
+        profile=normalized_profile,
     )
 
 
