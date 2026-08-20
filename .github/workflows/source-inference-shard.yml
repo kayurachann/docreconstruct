@@ -1,0 +1,320 @@
+name: Run one source-benchmark inference shard
+
+on:
+  workflow_call:
+    inputs:
+      system:
+        description: Candidate lane
+        type: string
+        required: true
+      suite:
+        description: hard or all
+        type: string
+        required: true
+      shard_index:
+        description: Zero-based deterministic shard
+        type: number
+        required: true
+      shard_count:
+        description: Suite-specific deterministic shard count
+        type: number
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  MODEL_CACHE_PROTOCOL: docling-2.120.3-mineru-3.4.5-marker-2.0.0-v1
+  DATASET_REVISION: aa1ee96d106dbe53d0ae59474d75c6e6d9b53fec
+
+jobs:
+  inference:
+    name: ${{ inputs.system }} / shard ${{ inputs.shard_index }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      SYSTEM: ${{ inputs.system }}
+      SHARD_INDEX: ${{ inputs.shard_index }}
+      SHARD_COUNT: ${{ inputs.shard_count }}
+      SUITE: ${{ inputs.suite }}
+      HF_HOME: ${{ github.workspace }}/.benchmark-cache/huggingface
+      XDG_CACHE_HOME: ${{ github.workspace }}/.benchmark-cache/xdg
+      MODEL_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/surya
+      TORCH_HOME: ${{ github.workspace }}/.benchmark-cache/torch
+      FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
+      FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
+      MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
+      RAPIDOCR_CACHE_ROOT: ${{ github.workspace }}/.benchmark-cache/rapidocr
+      RAPIDOCR_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/rapidocr/docling
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    steps:
+      - name: Reject unknown lane or shard inputs
+        run: |
+          case "$SYSTEM" in
+            docreconstruct-tesseract|docling|mineru|marker) ;;
+            *) echo "Unsupported candidate lane: $SYSTEM" >&2; exit 2 ;;
+          esac
+          case "$SUITE" in
+            hard|all) ;;
+            *) echo "Unsupported benchmark suite: $SUITE" >&2; exit 2 ;;
+          esac
+          if (( SHARD_COUNT <= 0 || SHARD_INDEX < 0 || SHARD_INDEX >= SHARD_COUNT )); then
+            echo "Invalid shard $SHARD_INDEX/$SHARD_COUNT" >&2
+            exit 2
+          fi
+
+      - name: Check out the exact benchmark code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download and byte-verify this GT-free raw source shard
+        run: |
+          python scripts/benchmark/prepare_sources.py \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --output "$RUNNER_TEMP/corpus" \
+            --subset "$SUITE" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT"
+
+      - name: Restore only the currently active lane's model cache
+        if: inputs.system != 'docreconstruct-tesseract'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/.benchmark-cache
+          key: source-benchmark-model-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ env.MODEL_CACHE_PROTOCOL }}-${{ inputs.system }}-${{ hashFiles('scripts/benchmark/model-pins.json', 'scripts/benchmark/install_system.sh', 'scripts/benchmark/verify_install_contract.py', 'scripts/benchmark/materialize_pinned_models.py', 'scripts/benchmark/install_rapidocr_assets.py', 'scripts/benchmark/verify_model_cache.py', 'scripts/benchmark/inventory_environment.py', 'scripts/benchmark/compare_model_inventories.py', 'scripts/benchmark/prepare_sources.py', 'scripts/benchmark/run_candidate.py', '.github/workflows/source-benchmark.yml', '.github/workflows/source-prepare-model.yml', '.github/workflows/source-inference-shard.yml') }}
+          fail-on-cache-miss: true
+
+      - name: Download the active lane's small prepared inventory
+        if: inputs.system != 'docreconstruct-tesseract'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: model-inventory-${{ inputs.system }}-${{ github.sha }}
+          path: ${{ runner.temp }}/prepared-model-inventory
+
+      - name: Install the pinned candidate
+        run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/pip-install-report.json"
+
+      - name: Verify the installed candidate contract
+        if: inputs.system != 'docreconstruct-tesseract'
+        run: |
+          python scripts/benchmark/verify_install_contract.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM"
+
+      - name: Install byte-pinned RapidOCR assets into Docling
+        if: inputs.system == 'docling'
+        run: |
+          models_dir=$(python scripts/benchmark/install_rapidocr_assets.py \
+            --pins scripts/benchmark/model-pins.json \
+            --cache "$RAPIDOCR_CACHE_DIR")
+          echo "RAPIDOCR_MODELS_DIR=$models_dir" >> "$GITHUB_ENV"
+
+      - name: Reject an incomplete restored model cache
+        if: inputs.system != 'docreconstruct-tesseract'
+        run: |
+          python scripts/benchmark/verify_model_cache.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM" \
+            --hf-home "$HF_HOME" \
+            --direct-cache "$MODEL_CACHE_DIR" \
+            --font-path "$FONT_PATH" \
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
+            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
+          if [[ "$SYSTEM" == "docling" ]]; then
+            python scripts/benchmark/install_rapidocr_assets.py \
+              --pins scripts/benchmark/model-pins.json \
+              --cache "$RAPIDOCR_CACHE_DIR" \
+              --models-dir "$RAPIDOCR_MODELS_DIR" \
+              --verify-only >/dev/null
+          fi
+
+      - name: Inventory the restored model immediately before measurement
+        if: inputs.system != 'docreconstruct-tesseract'
+        run: |
+          inventory_args=(
+            --output "$RUNNER_TEMP/model-cache-before-inference.json"
+            --pip-report "$RUNNER_TEMP/pip-install-report.json"
+            --model-pins scripts/benchmark/model-pins.json
+            --system "$SYSTEM"
+            --cache-root "$HF_HOME"
+            --cache-root "$XDG_CACHE_HOME"
+            --cache-root "$MODEL_CACHE_DIR"
+            --cache-root "$TORCH_HOME"
+            --cache-root "$FONT_DIR"
+          )
+          if [[ "$SYSTEM" == "marker" ]]; then
+            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            inventory_args+=(
+              --cache-root "$RAPIDOCR_CACHE_ROOT"
+              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
+              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
+              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
+              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
+            )
+          elif [[ "$SYSTEM" == "mineru" ]]; then
+            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
+          fi
+          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
+          python scripts/benchmark/compare_model_inventories.py \
+            --prepared "$RUNNER_TEMP/prepared-model-inventory/model-cache-manifest.json" \
+            --inference "$RUNNER_TEMP/model-cache-before-inference.json"
+
+      - name: Forbid remote model mutation during measured inference
+        if: inputs.system != 'docreconstruct-tesseract'
+        run: |
+          echo "HF_HUB_OFFLINE=1" >> "$GITHUB_ENV"
+          if [[ "$SYSTEM" == "mineru" ]]; then
+            echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build the ground-truth-free harness manifest
+        run: |
+          args=(
+            --root "$RUNNER_TEMP/corpus"
+            --output "$RUNNER_TEMP/run"
+            --destination "$RUNNER_TEMP/source-benchmark.json"
+            --wrapper "$GITHUB_WORKSPACE/scripts/benchmark/run_candidate.py"
+            --checkout "$GITHUB_WORKSPACE"
+            --system "$SYSTEM"
+            --subset "$SUITE"
+            --git-sha "$GITHUB_SHA"
+            --shard-index "$SHARD_INDEX"
+            --shard-count "$SHARD_COUNT"
+            --shard-budget-seconds 18000
+          )
+          if [[ "$SYSTEM" == "docreconstruct-tesseract" ]]; then
+            args+=(--tessdata "$BENCHMARK_TESSDATA")
+          fi
+          python scripts/benchmark/create_manifest.py "${args[@]}"
+
+      - name: Run cold-isolated source inference
+        id: harness
+        run: |
+          set +e
+          python -m docreconstruct.cli benchmark-source \
+            "$RUNNER_TEMP/source-benchmark.json" \
+            --subset "$SUITE" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT" \
+            --no-official-evaluator
+          status=$?
+          set -e
+          if [[ "$status" -ne 0 && "$status" -ne 3 ]]; then
+            echo "Harness infrastructure failed with exit $status" >&2
+            exit "$status"
+          fi
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Inventory the realized runtime and model blobs after measurement
+        run: |
+          inventory_args=(
+            --output "$RUNNER_TEMP/environment.json"
+            --pip-report "$RUNNER_TEMP/pip-install-report.json"
+            --cache-root "$HF_HOME"
+            --cache-root "$XDG_CACHE_HOME"
+            --cache-root "$MODEL_CACHE_DIR"
+            --cache-root "$TORCH_HOME"
+            --cache-root "$FONT_DIR"
+          )
+          if [[ "$SYSTEM" == "docreconstruct-tesseract" ]]; then
+            inventory_args+=(
+              --runtime-command "tesseract=$(command -v tesseract)"
+              --runtime-file "tessdata-eng=$BENCHMARK_TESSDATA/eng.traineddata"
+              --runtime-file "tessdata-chi-sim=$BENCHMARK_TESSDATA/chi_sim.traineddata"
+              --runtime-file "tessdata-chi-tra=$BENCHMARK_TESSDATA/chi_tra.traineddata"
+              --runtime-file "tessdata-tsv-config=$BENCHMARK_TESSDATA/configs/tsv"
+            )
+          elif [[ "$SYSTEM" == "marker" ]]; then
+            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            inventory_args+=(
+              --cache-root "$RAPIDOCR_CACHE_ROOT"
+              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
+              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
+              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
+              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
+            )
+          elif [[ "$SYSTEM" == "mineru" ]]; then
+            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
+          fi
+          if [[ "$SYSTEM" != "docreconstruct-tesseract" ]]; then
+            inventory_args+=(
+              --model-pins scripts/benchmark/model-pins.json
+              --system "$SYSTEM"
+            )
+          fi
+          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
+
+      - name: Prove measured inference did not mutate model bytes
+        if: inputs.system != 'docreconstruct-tesseract'
+        run: |
+          python scripts/benchmark/compare_model_inventories.py \
+            --prepared "$RUNNER_TEMP/model-cache-before-inference.json" \
+            --inference "$RUNNER_TEMP/environment.json"
+
+      - name: Stage public predictions, failure ledger, hashes, and timings
+        run: |
+          python scripts/benchmark/stage_inference.py \
+            --run "$RUNNER_TEMP/run" \
+            --output "$RUNNER_TEMP/public-artifact" \
+            --system "$SYSTEM" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT" \
+            --corpus-manifest "$RUNNER_TEMP/corpus/corpus-manifest.json" \
+            --source-verification "$RUNNER_TEMP/corpus/source-verification.json" \
+            --environment "$RUNNER_TEMP/environment.json" \
+            --harness-exit-code "${{ steps.harness.outputs.exit_code }}"
+
+      - name: Upload public inference evidence only
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inference-${{ inputs.suite }}-${{ inputs.system }}-${{ inputs.shard_index }}-of-${{ inputs.shard_count }}
+          path: ${{ runner.temp }}/public-artifact
+          compression-level: 6
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Stage a sanitized infrastructure-failure marker
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/infrastructure-failure"
+          python - "$RUNNER_TEMP/infrastructure-failure/setup-failure.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          payload = {
+              "schema_version": 1,
+              "classification": "infrastructure-invalid",
+              "reason": "shard setup or evidence staging failed; no candidate quality score",
+              "system": os.environ["SYSTEM"],
+              "subset": os.environ["SUITE"],
+              "shard": {
+                  "index": int(os.environ["SHARD_INDEX"]),
+                  "count": int(os.environ["SHARD_COUNT"]),
+              },
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as stream:
+              json.dump(payload, stream, indent=2)
+              stream.write("\n")
+          PY
+
+      - name: Upload sanitized infrastructure-failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: infrastructure-failure-${{ inputs.suite }}-${{ inputs.system }}-${{ inputs.shard_index }}-of-${{ inputs.shard_count }}
+          path: ${{ runner.temp }}/infrastructure-failure
+          compression-level: 6
+          retention-days: 14
+          if-no-files-found: error

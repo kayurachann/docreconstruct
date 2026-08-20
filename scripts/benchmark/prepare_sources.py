@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Prepare one immutable OmniDocBench raw-image shard from a GT-free index.
+"""Materialize one immutable OmniDocBench raw-image shard from a GT-free index.
 
 The source index contains only page filenames, subset labels, source byte hashes,
-and sizes.  It deliberately excludes text, formula, table, order, and geometry
-annotations. Every parser job for a shard restores the same byte-verified raw
-images made by this script; no candidate-specific container conversion occurs.
+and sizes. It deliberately excludes text, formula, table, order, and geometry
+annotations. Every parser job independently downloads the same byte-verified raw
+images with this script; no candidate-specific container conversion occurs.
 """
 
 from __future__ import annotations
@@ -14,10 +14,11 @@ import hashlib
 import json
 import shutil
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 DATASET_REPOSITORY = "opendatalab/OmniDocBench"
@@ -25,6 +26,11 @@ DATASET_REVISION = "aa1ee96d106dbe53d0ae59474d75c6e6d9b53fec"
 _SOURCE_INDEX_KEYS = {"page_info", "source_bytes", "source_sha256"}
 _PAGE_INFO_KEYS = {"image_path", "page_attribute"}
 _PAGE_ATTRIBUTE_KEYS = {"subset"}
+_ALLOWED_IMAGE_SUFFIXES = {".jpeg", ".jpg", ".png"}
+_ALLOWED_DOWNLOAD_HOSTS = {"huggingface.co"}
+_ALLOWED_DOWNLOAD_HOST_SUFFIXES = (".hf.co", ".huggingface.co")
+_MAX_SOURCE_BYTES = 64 * 1024 * 1024
+_DOWNLOAD_ATTEMPTS = 5
 
 
 def sha256_file(path: Path) -> str:
@@ -45,6 +51,44 @@ def subset_matches(selection: str, page_subset: str | None) -> bool:
     return requested == actual
 
 
+def source_relative_path(value: object) -> PurePosixPath:
+    if not isinstance(value, str):
+        raise ValueError("source index image_path must be a string")
+    relative = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or ":" in value
+        or any(ord(character) < 32 for character in value)
+        or relative.is_absolute()
+        or relative.as_posix() != value
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.suffix.casefold() not in _ALLOWED_IMAGE_SUFFIXES
+    ):
+        raise ValueError(f"unsafe or unsupported source path: {value!r}")
+    return relative
+
+
+def validate_download_url(value: str) -> None:
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError(f"invalid source download URL: {value!r}") from exc
+    host = (parsed.hostname or "").casefold()
+    trusted_host = host in _ALLOWED_DOWNLOAD_HOSTS or any(
+        host.endswith(suffix) for suffix in _ALLOWED_DOWNLOAD_HOST_SUFFIXES
+    )
+    if (
+        parsed.scheme.casefold() != "https"
+        or not trusted_host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+    ):
+        raise RuntimeError(f"untrusted source download redirect: {value!r}")
+
+
 def validate_source_index_item(item: dict[str, Any]) -> None:
     if set(item) != _SOURCE_INDEX_KEYS:
         raise ValueError(
@@ -53,6 +97,7 @@ def validate_source_index_item(item: dict[str, Any]) -> None:
     info = item.get("page_info")
     if not isinstance(info, dict) or set(info) != _PAGE_INFO_KEYS:
         raise ValueError("source index page_info must contain only image_path and page_attribute")
+    source_relative_path(info.get("image_path"))
     attributes = info.get("page_attribute")
     if not isinstance(attributes, dict) or set(attributes) != _PAGE_ATTRIBUTE_KEYS:
         raise ValueError("source index page_attribute must contain only subset")
@@ -63,8 +108,13 @@ def validate_source_index_item(item: dict[str, Any]) -> None:
         or any(c not in "0123456789abcdef" for c in digest)
     ):
         raise ValueError("source index source_sha256 must be lowercase SHA-256")
-    if not isinstance(item.get("source_bytes"), int) or item["source_bytes"] <= 0:
-        raise ValueError("source index source_bytes must be a positive integer")
+    source_bytes = item.get("source_bytes")
+    if (
+        not isinstance(source_bytes, int)
+        or isinstance(source_bytes, bool)
+        or not 0 < source_bytes <= _MAX_SOURCE_BYTES
+    ):
+        raise ValueError(f"source index source_bytes must be between 1 and {_MAX_SOURCE_BYTES}")
 
 
 def load_index(path: Path, subset: str, shard_index: int, shard_count: int) -> list[dict[str, Any]]:
@@ -88,28 +138,50 @@ def load_index(path: Path, subset: str, shard_index: int, shard_count: int) -> l
     return sharded
 
 
-def download_source(item: dict[str, Any], sources_dir: Path) -> Path:
-    relative = Path(item["page_info"]["image_path"])
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(f"unsafe source path: {relative}")
-    destination = sources_dir / relative
+def _download_source_once(item: dict[str, Any], sources_dir: Path) -> Path:
+    relative = source_relative_path(item["page_info"]["image_path"])
+    destination = sources_dir.joinpath(*relative.parts)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    quoted = urllib.parse.quote(relative.as_posix(), safe="/")
+    quoted = urllib.parse.quote(relative.as_posix(), safe="")
     url = (
         f"https://huggingface.co/datasets/{DATASET_REPOSITORY}/resolve/"
         f"{DATASET_REVISION}/images/{quoted}?download=true"
     )
+    validate_download_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "docreconstruct-benchmark/0.1"})
-    with (
-        urllib.request.urlopen(request, timeout=180) as response,  # noqa: S310
-        tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream,
-    ):
-        temporary = Path(stream.name)
-        shutil.copyfileobj(response, stream)
+    expected_size = int(item["source_bytes"])
+    temporary: Path | None = None
     try:
+        with urllib.request.urlopen(request, timeout=180) as response:  # noqa: S310
+            validate_download_url(response.geturl())
+            declared_length = response.headers.get("Content-Length")
+            if declared_length is not None:
+                try:
+                    response_bytes = int(declared_length)
+                except ValueError as exc:
+                    raise RuntimeError("source response has an invalid Content-Length") from exc
+                if response_bytes < 0 or response_bytes > expected_size:
+                    raise RuntimeError(
+                        f"source response exceeds its declared bound: "
+                        f"expected at most {expected_size}, got {response_bytes}"
+                    )
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=".source-",
+                dir=destination.parent,
+                delete=False,
+            ) as stream:
+                temporary = Path(stream.name)
+                written = 0
+                while chunk := response.read(min(1024 * 1024, expected_size - written + 1)):
+                    written += len(chunk)
+                    if written > expected_size:
+                        raise RuntimeError(
+                            f"source response exceeds {expected_size} bytes: {relative}"
+                        )
+                    stream.write(chunk)
         actual_size = temporary.stat().st_size
         actual_sha = sha256_file(temporary)
-        expected_size = int(item["source_bytes"])
         expected_sha = str(item["source_sha256"])
         if actual_size != expected_size or actual_sha != expected_sha:
             raise RuntimeError(
@@ -118,9 +190,24 @@ def download_source(item: dict[str, Any], sources_dir: Path) -> Path:
             )
         temporary.replace(destination)
     finally:
-        if temporary.exists():
+        if temporary is not None and temporary.exists():
             temporary.unlink()
     return destination
+
+
+def download_source(item: dict[str, Any], sources_dir: Path) -> Path:
+    last_error: OSError | RuntimeError | None = None
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        try:
+            return _download_source_once(item, sources_dir)
+        except (OSError, RuntimeError) as exc:
+            last_error = exc
+            if attempt < _DOWNLOAD_ATTEMPTS:
+                time.sleep(attempt)
+    raise RuntimeError(
+        f"failed to download byte-pinned source after {_DOWNLOAD_ATTEMPTS} attempts: "
+        f"{item['page_info']['image_path']}"
+    ) from last_error
 
 
 def corpus_manifest(
@@ -173,11 +260,11 @@ def prepare(args: argparse.Namespace) -> None:
     (output / "corpus-manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"Prepared {len(items)} shared raw images in {output}")
+    print(f"Materialized {len(items)} byte-pinned raw images in {output}")
 
 
 def verify(args: argparse.Namespace) -> dict[str, Any]:
-    """Byte-verify a restored cache against the committed GT-free source index."""
+    """Byte-verify a local corpus against the committed GT-free source index."""
     validate_arguments(args)
     output = args.output.resolve()
     sources = output / "sources"

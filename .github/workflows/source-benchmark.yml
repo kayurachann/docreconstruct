@@ -16,490 +16,106 @@ permissions:
   contents: read
 
 concurrency:
-  group: source-benchmark-${{ github.ref }}-${{ inputs.suite }}
+  # Hard and full runs share model-cache keys and must never contend with each other.
+  group: source-benchmark-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   PYTHON_VERSION: "3.11"
-  SHARD_COUNT: "20"
-  MODEL_CACHE_PROTOCOL: docling-2.120.3-mineru-3.4.5-marker-2.0.0-v1
+  SHARD_COUNT: ${{ inputs.suite == 'hard' && '4' || '20' }}
   DATASET_REVISION: aa1ee96d106dbe53d0ae59474d75c6e6d9b53fec
   DATASET_JSON_SHA256: a45cd84b04ad8b793e775089640e6b681209abea33ead54c1828ddca35fae496
   EVALUATOR_REVISION: 193627ae9e97d89188468ed1ee3b7a856ff76044
 
 jobs:
-  prepare-sources:
-    name: Prepare shared raw-image shard ${{ matrix.shard }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
+  inference-tesseract:
+    name: Tesseract / shard ${{ matrix.shard }}
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-    steps:
-      - name: Check out the exact benchmark code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
+        shard: ${{ fromJSON(inputs.suite == 'hard' && '[0,1,2,3]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
+    uses: ./.github/workflows/source-inference-shard.yml
+    with:
+      system: docreconstruct-tesseract
+      suite: ${{ inputs.suite }}
+      shard_index: ${{ matrix.shard }}
+      shard_count: ${{ inputs.suite == 'hard' && 4 || 20 }}
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+  prepare-docling:
+    name: Prepare Docling before its shards
+    uses: ./.github/workflows/source-prepare-model.yml
+    with:
+      system: docling
 
-      - name: Restore or reserve the immutable source cache key
-        id: source-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/corpus
-          key: source-benchmark-input-${{ runner.os }}-${{ env.DATASET_REVISION }}-raw-v1-${{ hashFiles('scripts/benchmark/omnidocbench-v1.6-source-index.json', 'scripts/benchmark/prepare_sources.py') }}-${{ inputs.suite }}-${{ matrix.shard }}-of-20
-
-      - name: Download and byte-verify this raw source shard once
-        if: steps.source-cache.outputs.cache-hit != 'true'
-        env:
-          SUITE: ${{ inputs.suite }}
-          SHARD_INDEX: ${{ matrix.shard }}
-        run: |
-          python scripts/benchmark/prepare_sources.py \
-            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
-            --output "$RUNNER_TEMP/corpus" \
-            --subset "$SUITE" \
-            --shard-index "$SHARD_INDEX" \
-            --shard-count "$SHARD_COUNT"
-
-      - name: Verify every restored or downloaded source byte
-        env:
-          SUITE: ${{ inputs.suite }}
-          SHARD_INDEX: ${{ matrix.shard }}
-        run: |
-          python scripts/benchmark/prepare_sources.py \
-            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
-            --output "$RUNNER_TEMP/corpus" \
-            --subset "$SUITE" \
-            --shard-index "$SHARD_INDEX" \
-            --shard-count "$SHARD_COUNT" \
-            --verify-only
-
-  prepare-models:
-    name: Prepare one model cache / ${{ matrix.system }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        system: [docling, mineru, marker]
-    env:
-      SYSTEM: ${{ matrix.system }}
-      HF_HOME: ${{ github.workspace }}/.benchmark-cache/huggingface
-      XDG_CACHE_HOME: ${{ github.workspace }}/.benchmark-cache/xdg
-      MODEL_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/surya
-      TORCH_HOME: ${{ github.workspace }}/.benchmark-cache/torch
-      FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
-      FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
-      MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
-      RAPIDOCR_CACHE_ROOT: ${{ github.workspace }}/.benchmark-cache/rapidocr
-      RAPIDOCR_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/rapidocr/docling
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
-    steps:
-      - name: Check out the exact benchmark code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Restore or reserve the immutable model cache key
-        id: models
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ github.workspace }}/.benchmark-cache
-          key: source-benchmark-model-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ env.MODEL_CACHE_PROTOCOL }}-${{ matrix.system }}-${{ hashFiles('scripts/benchmark/model-pins.json') }}
-
-      - name: Download one GT-free raw image for model warm-up
-        run: |
-          python scripts/benchmark/prepare_sources.py \
-            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
-            --output "$RUNNER_TEMP/prewarm-corpus" \
-            --subset hard \
-            --shard-index 0 \
-            --shard-count 296
-
-      - name: Install the pinned candidate
-        run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/prewarm-pip-report.json"
-
-      - name: Verify the installed candidate contract
-        run: |
-          python scripts/benchmark/verify_install_contract.py \
-            --pins scripts/benchmark/model-pins.json \
-            --system "$SYSTEM"
-
-      - name: Materialize only declared immutable model assets
-        run: |
-          args=(
-            --pins scripts/benchmark/model-pins.json
-            --system "$SYSTEM"
-            --hf-home "$HF_HOME"
-            --output "$RUNNER_TEMP/realized-huggingface-models.json"
-          )
-          if [[ "$SYSTEM" == "mineru" ]]; then
-            args+=(--mineru-config "$MINERU_TOOLS_CONFIG_JSON")
-          elif [[ "$SYSTEM" == "docling" ]]; then
-            args+=(--rapidocr-cache "$RAPIDOCR_CACHE_DIR")
-          fi
-          if [[ "${{ steps.models.outputs.cache-hit }}" == "true" ]]; then
-            args+=(--offline)
-          fi
-          python scripts/benchmark/materialize_pinned_models.py "${args[@]}"
-          echo "HF_HUB_OFFLINE=1" >> "$GITHUB_ENV"
-          if [[ "$SYSTEM" == "mineru" ]]; then
-            echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
-          fi
-
-      - name: Install byte-pinned RapidOCR assets into Docling
-        if: matrix.system == 'docling'
-        run: |
-          models_dir=$(python scripts/benchmark/install_rapidocr_assets.py \
-            --pins scripts/benchmark/model-pins.json \
-            --cache "$RAPIDOCR_CACHE_DIR")
-          echo "RAPIDOCR_MODELS_DIR=$models_dir" >> "$GITHUB_ENV"
-
-      - name: Inventory a restored cache before repeat warm-up
-        if: steps.models.outputs.cache-hit == 'true'
-        run: |
-          python scripts/benchmark/verify_model_cache.py \
-            --pins scripts/benchmark/model-pins.json \
-            --system "$SYSTEM" \
-            --hf-home "$HF_HOME" \
-            --direct-cache "$MODEL_CACHE_DIR" \
-            --font-path "$FONT_PATH" \
-            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
-            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
-          inventory_args=(
-            --output "$RUNNER_TEMP/model-cache-before-prewarm.json"
-            --pip-report "$RUNNER_TEMP/prewarm-pip-report.json"
-            --model-pins scripts/benchmark/model-pins.json
-            --system "$SYSTEM"
-            --cache-root "$HF_HOME"
-            --cache-root "$XDG_CACHE_HOME"
-            --cache-root "$MODEL_CACHE_DIR"
-            --cache-root "$TORCH_HOME"
-            --cache-root "$FONT_DIR"
-          )
-          if [[ "$SYSTEM" == "marker" ]]; then
-            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
-          elif [[ "$SYSTEM" == "docling" ]]; then
-            inventory_args+=(
-              --cache-root "$RAPIDOCR_CACHE_ROOT"
-              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
-              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
-              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
-              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
-            )
-          elif [[ "$SYSTEM" == "mineru" ]]; then
-            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
-          fi
-          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
-
-      - name: Materialize models without retaining the warm-up output
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/.benchmark-cache"
-          mapfile -d '' sources < <(find "$RUNNER_TEMP/prewarm-corpus/sources" -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) -print0 | sort -z)
-          if [[ "${#sources[@]}" -eq 0 ]]; then
-            echo "No warm-up image found" >&2
-            exit 1
-          fi
-          python scripts/benchmark/run_candidate.py \
-            --system "$SYSTEM" \
-            --input "${sources[0]}" \
-            --output "$RUNNER_TEMP/prewarm.md" \
-            --work-dir "$RUNNER_TEMP/prewarm-work"
-
-      - name: Reject an incomplete or mutated model cache
-        run: |
-          python scripts/benchmark/verify_model_cache.py \
-            --pins scripts/benchmark/model-pins.json \
-            --system "$SYSTEM" \
-            --hf-home "$HF_HOME" \
-            --direct-cache "$MODEL_CACHE_DIR" \
-            --font-path "$FONT_PATH" \
-            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
-            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
-          if [[ "$SYSTEM" == "docling" ]]; then
-            python scripts/benchmark/install_rapidocr_assets.py \
-              --pins scripts/benchmark/model-pins.json \
-              --cache "$RAPIDOCR_CACHE_DIR" \
-              --models-dir "$RAPIDOCR_MODELS_DIR" \
-              --verify-only >/dev/null
-          fi
-
-      - name: Hash the exact model cache
-        run: |
-          inventory_args=(
-            --output "$RUNNER_TEMP/model-cache-manifest.json"
-            --pip-report "$RUNNER_TEMP/prewarm-pip-report.json"
-            --model-pins scripts/benchmark/model-pins.json
-            --system "$SYSTEM"
-            --cache-root "$HF_HOME"
-            --cache-root "$XDG_CACHE_HOME"
-            --cache-root "$MODEL_CACHE_DIR"
-            --cache-root "$TORCH_HOME"
-            --cache-root "$FONT_DIR"
-          )
-          if [[ "$SYSTEM" == "marker" ]]; then
-            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
-          elif [[ "$SYSTEM" == "docling" ]]; then
-            inventory_args+=(
-              --cache-root "$RAPIDOCR_CACHE_ROOT"
-              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
-              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
-              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
-              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
-            )
-          elif [[ "$SYSTEM" == "mineru" ]]; then
-            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
-          fi
-          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
-
-      - name: Prove repeat warm-up did not mutate a restored cache
-        if: steps.models.outputs.cache-hit == 'true'
-        run: |
-          python scripts/benchmark/compare_model_inventories.py \
-            --prepared "$RUNNER_TEMP/model-cache-before-prewarm.json" \
-            --inference "$RUNNER_TEMP/model-cache-manifest.json"
-
-      - name: Upload the small public model inventory
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: model-inventory-${{ matrix.system }}-${{ github.sha }}
-          path: ${{ runner.temp }}/model-cache-manifest.json
-          compression-level: 6
-          retention-days: 30
-          if-no-files-found: error
-
-  inference:
-    name: ${{ matrix.system }} / shard ${{ matrix.shard }}
-    needs: [prepare-sources, prepare-models]
+  inference-docling:
+    name: Docling / shard ${{ matrix.shard }}
+    needs: prepare-docling
     if: ${{ always() }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 360
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 4
       matrix:
-        system: [docreconstruct-tesseract, docling, mineru, marker]
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-    env:
-      SYSTEM: ${{ matrix.system }}
-      SHARD_INDEX: ${{ matrix.shard }}
-      SUITE: ${{ inputs.suite }}
-      HF_HOME: ${{ github.workspace }}/.benchmark-cache/huggingface
-      XDG_CACHE_HOME: ${{ github.workspace }}/.benchmark-cache/xdg
-      MODEL_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/surya
-      TORCH_HOME: ${{ github.workspace }}/.benchmark-cache/torch
-      FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
-      FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
-      MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
-      RAPIDOCR_CACHE_ROOT: ${{ github.workspace }}/.benchmark-cache/rapidocr
-      RAPIDOCR_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/rapidocr/docling
-      OMP_NUM_THREADS: "4"
-      MKL_NUM_THREADS: "4"
-    steps:
-      - name: Check out the exact benchmark code
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
+        shard: ${{ fromJSON(inputs.suite == 'hard' && '[0,1,2,3]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
+    uses: ./.github/workflows/source-inference-shard.yml
+    with:
+      system: docling
+      suite: ${{ inputs.suite }}
+      shard_index: ${{ matrix.shard }}
+      shard_count: ${{ inputs.suite == 'hard' && 4 || 20 }}
 
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+  prepare-mineru:
+    name: Prepare MinerU after every Docling shard
+    needs: inference-docling
+    if: ${{ always() }}
+    uses: ./.github/workflows/source-prepare-model.yml
+    with:
+      system: mineru
 
-      - name: Restore the shared source shard
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/corpus
-          key: source-benchmark-input-${{ runner.os }}-${{ env.DATASET_REVISION }}-raw-v1-${{ hashFiles('scripts/benchmark/omnidocbench-v1.6-source-index.json', 'scripts/benchmark/prepare_sources.py') }}-${{ inputs.suite }}-${{ matrix.shard }}-of-20
-          fail-on-cache-miss: true
+  inference-mineru:
+    name: MinerU / shard ${{ matrix.shard }}
+    needs: prepare-mineru
+    if: ${{ always() }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: ${{ fromJSON(inputs.suite == 'hard' && '[0,1,2,3]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
+    uses: ./.github/workflows/source-inference-shard.yml
+    with:
+      system: mineru
+      suite: ${{ inputs.suite }}
+      shard_index: ${{ matrix.shard }}
+      shard_count: ${{ inputs.suite == 'hard' && 4 || 20 }}
 
-      - name: Reject a corrupt or incomplete restored source shard
-        run: |
-          python scripts/benchmark/prepare_sources.py \
-            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
-            --output "$RUNNER_TEMP/corpus" \
-            --subset "$SUITE" \
-            --shard-index "$SHARD_INDEX" \
-            --shard-count "$SHARD_COUNT" \
-            --verify-only
+  prepare-marker:
+    name: Prepare Marker after every MinerU shard
+    needs: inference-mineru
+    if: ${{ always() }}
+    uses: ./.github/workflows/source-prepare-model.yml
+    with:
+      system: marker
 
-      - name: Restore the one shared model cache
-        id: restore-models
-        if: matrix.system != 'docreconstruct-tesseract'
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ github.workspace }}/.benchmark-cache
-          key: source-benchmark-model-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ env.MODEL_CACHE_PROTOCOL }}-${{ matrix.system }}-${{ hashFiles('scripts/benchmark/model-pins.json') }}
-          fail-on-cache-miss: true
-
-      - name: Download the prepared model inventory
-        if: matrix.system != 'docreconstruct-tesseract'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: model-inventory-${{ matrix.system }}-${{ github.sha }}
-          path: ${{ runner.temp }}/prepared-model-inventory
-
-      - name: Install the pinned candidate
-        run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/pip-install-report.json"
-
-      - name: Verify the installed candidate contract
-        if: matrix.system != 'docreconstruct-tesseract'
-        run: |
-          python scripts/benchmark/verify_install_contract.py \
-            --pins scripts/benchmark/model-pins.json \
-            --system "$SYSTEM"
-
-      - name: Verify the restored model cache
-        if: matrix.system != 'docreconstruct-tesseract'
-        run: |
-          python scripts/benchmark/verify_model_cache.py \
-            --pins scripts/benchmark/model-pins.json \
-            --system "$SYSTEM" \
-            --hf-home "$HF_HOME" \
-            --direct-cache "$MODEL_CACHE_DIR" \
-            --font-path "$FONT_PATH" \
-            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
-            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
-
-      - name: Install byte-pinned RapidOCR assets into Docling
-        if: matrix.system == 'docling'
-        run: |
-          models_dir=$(python scripts/benchmark/install_rapidocr_assets.py \
-            --pins scripts/benchmark/model-pins.json \
-            --cache "$RAPIDOCR_CACHE_DIR")
-          echo "RAPIDOCR_MODELS_DIR=$models_dir" >> "$GITHUB_ENV"
-
-      - name: Forbid remote model mutation during measured inference
-        if: matrix.system != 'docreconstruct-tesseract'
-        run: |
-          echo "HF_HUB_OFFLINE=1" >> "$GITHUB_ENV"
-          if [[ "$SYSTEM" == "mineru" ]]; then
-            echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
-          fi
-
-      - name: Build the ground-truth-free harness manifest
-        run: |
-          args=(
-            --root "$RUNNER_TEMP/corpus"
-            --output "$RUNNER_TEMP/run"
-            --destination "$RUNNER_TEMP/source-benchmark.json"
-            --wrapper "$GITHUB_WORKSPACE/scripts/benchmark/run_candidate.py"
-            --checkout "$GITHUB_WORKSPACE"
-            --system "$SYSTEM"
-            --subset "$SUITE"
-            --git-sha "$GITHUB_SHA"
-            --shard-index "$SHARD_INDEX"
-            --shard-count "$SHARD_COUNT"
-            --shard-budget-seconds 18000
-          )
-          if [[ "$SYSTEM" == "docreconstruct-tesseract" ]]; then
-            args+=(--tessdata "$BENCHMARK_TESSDATA")
-          fi
-          python scripts/benchmark/create_manifest.py "${args[@]}"
-
-      - name: Run cold-isolated source inference
-        id: harness
-        run: |
-          set +e
-          python -m docreconstruct.cli benchmark-source \
-            "$RUNNER_TEMP/source-benchmark.json" \
-            --subset "$SUITE" \
-            --shard-index "$SHARD_INDEX" \
-            --shard-count "$SHARD_COUNT" \
-            --no-official-evaluator
-          status=$?
-          set -e
-          if [[ "$status" -ne 0 && "$status" -ne 3 ]]; then
-            echo "Harness infrastructure failed with exit $status" >&2
-            exit "$status"
-          fi
-          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-
-      - name: Inventory the realized runtime and model blobs
-        run: |
-          inventory_args=(
-            --output "$RUNNER_TEMP/environment.json"
-            --pip-report "$RUNNER_TEMP/pip-install-report.json"
-            --cache-root "$HF_HOME"
-            --cache-root "$XDG_CACHE_HOME"
-            --cache-root "$MODEL_CACHE_DIR"
-            --cache-root "$TORCH_HOME"
-            --cache-root "$FONT_DIR"
-          )
-          if [[ "$SYSTEM" == "docreconstruct-tesseract" ]]; then
-            inventory_args+=(
-              --runtime-command "tesseract=$(command -v tesseract)"
-              --runtime-file "tessdata-eng=$BENCHMARK_TESSDATA/eng.traineddata"
-              --runtime-file "tessdata-chi-sim=$BENCHMARK_TESSDATA/chi_sim.traineddata"
-              --runtime-file "tessdata-chi-tra=$BENCHMARK_TESSDATA/chi_tra.traineddata"
-              --runtime-file "tessdata-tsv-config=$BENCHMARK_TESSDATA/configs/tsv"
-            )
-          elif [[ "$SYSTEM" == "marker" ]]; then
-            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
-          elif [[ "$SYSTEM" == "docling" ]]; then
-            inventory_args+=(
-              --cache-root "$RAPIDOCR_CACHE_ROOT"
-              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
-              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
-              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
-              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
-            )
-          elif [[ "$SYSTEM" == "mineru" ]]; then
-            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
-          fi
-          if [[ "$SYSTEM" != "docreconstruct-tesseract" ]]; then
-            inventory_args+=(
-              --model-pins scripts/benchmark/model-pins.json
-              --system "$SYSTEM"
-            )
-          fi
-          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
-
-      - name: Prove the inference cache matches the prepared cache
-        if: matrix.system != 'docreconstruct-tesseract'
-        run: |
-          python scripts/benchmark/compare_model_inventories.py \
-            --prepared "$RUNNER_TEMP/prepared-model-inventory/model-cache-manifest.json" \
-            --inference "$RUNNER_TEMP/environment.json"
-
-      - name: Stage public evidence only
-        run: |
-          python scripts/benchmark/stage_inference.py \
-            --run "$RUNNER_TEMP/run" \
-            --output "$RUNNER_TEMP/public-artifact" \
-            --system "$SYSTEM" \
-            --shard-index "$SHARD_INDEX" \
-            --shard-count "$SHARD_COUNT" \
-            --corpus-manifest "$RUNNER_TEMP/corpus/corpus-manifest.json" \
-            --source-verification "$RUNNER_TEMP/corpus/source-verification.json" \
-            --environment "$RUNNER_TEMP/environment.json" \
-            --harness-exit-code "${{ steps.harness.outputs.exit_code }}"
-
-      - name: Upload predictions, failures, hashes, and timings
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: inference-${{ inputs.suite }}-${{ matrix.system }}-${{ matrix.shard }}-of-20
-          path: ${{ runner.temp }}/public-artifact
-          compression-level: 6
-          retention-days: 14
-          if-no-files-found: error
+  inference-marker:
+    name: Marker / shard ${{ matrix.shard }}
+    needs: prepare-marker
+    if: ${{ always() }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: ${{ fromJSON(inputs.suite == 'hard' && '[0,1,2,3]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
+    uses: ./.github/workflows/source-inference-shard.yml
+    with:
+      system: marker
+      suite: ${{ inputs.suite }}
+      shard_index: ${{ matrix.shard }}
+      shard_count: ${{ inputs.suite == 'hard' && 4 || 20 }}
 
   prepare-evaluator-runtime:
     name: Prepare and smoke the pinned native evaluator runtime
+    needs: [inference-tesseract, inference-docling, inference-mineru, inference-marker]
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
@@ -620,7 +236,12 @@ jobs:
 
   official-evaluation:
     name: Official evaluator / ${{ matrix.system }}
-    needs: [inference, prepare-evaluator-runtime]
+    needs:
+      - inference-tesseract
+      - inference-docling
+      - inference-mineru
+      - inference-marker
+      - prepare-evaluator-runtime
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -681,7 +302,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: inference-${{ inputs.suite }}-${{ matrix.system }}-*-of-20
+          pattern: inference-${{ inputs.suite }}-${{ matrix.system }}-*-of-${{ env.SHARD_COUNT }}
           path: ${{ runner.temp }}/merged
           merge-multiple: true
 

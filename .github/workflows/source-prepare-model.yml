@@ -1,0 +1,222 @@
+name: Prepare one source-benchmark model cache
+
+on:
+  workflow_call:
+    inputs:
+      system:
+        description: Pinned model-backed candidate to prepare
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  MODEL_CACHE_PROTOCOL: docling-2.120.3-mineru-3.4.5-marker-2.0.0-v1
+  DATASET_REVISION: aa1ee96d106dbe53d0ae59474d75c6e6d9b53fec
+
+jobs:
+  prepare:
+    name: Prepare newest cache / ${{ inputs.system }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      SYSTEM: ${{ inputs.system }}
+      HF_HOME: ${{ github.workspace }}/.benchmark-cache/huggingface
+      XDG_CACHE_HOME: ${{ github.workspace }}/.benchmark-cache/xdg
+      MODEL_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/surya
+      TORCH_HOME: ${{ github.workspace }}/.benchmark-cache/torch
+      FONT_DIR: ${{ github.workspace }}/.benchmark-cache/marker-fonts
+      FONT_PATH: ${{ github.workspace }}/.benchmark-cache/marker-fonts/GoNotoCurrent-Regular.ttf
+      MINERU_TOOLS_CONFIG_JSON: ${{ github.workspace }}/.benchmark-cache/mineru.json
+      RAPIDOCR_CACHE_ROOT: ${{ github.workspace }}/.benchmark-cache/rapidocr
+      RAPIDOCR_CACHE_DIR: ${{ github.workspace }}/.benchmark-cache/rapidocr/docling
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+    steps:
+      - name: Reject an unknown lane before using it in a cache key
+        run: |
+          case "$SYSTEM" in
+            docling|mineru|marker) ;;
+            *) echo "Unsupported model-backed lane: $SYSTEM" >&2; exit 2 ;;
+          esac
+
+      - name: Check out the exact benchmark code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Restore or reserve only this lane's immutable model key
+        id: models
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ github.workspace }}/.benchmark-cache
+          key: source-benchmark-model-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ env.MODEL_CACHE_PROTOCOL }}-${{ inputs.system }}-${{ hashFiles('scripts/benchmark/model-pins.json', 'scripts/benchmark/install_system.sh', 'scripts/benchmark/verify_install_contract.py', 'scripts/benchmark/materialize_pinned_models.py', 'scripts/benchmark/install_rapidocr_assets.py', 'scripts/benchmark/verify_model_cache.py', 'scripts/benchmark/inventory_environment.py', 'scripts/benchmark/compare_model_inventories.py', 'scripts/benchmark/prepare_sources.py', 'scripts/benchmark/run_candidate.py', '.github/workflows/source-benchmark.yml', '.github/workflows/source-prepare-model.yml', '.github/workflows/source-inference-shard.yml') }}
+
+      - name: Download one byte-verified GT-free image for warm-up
+        run: |
+          python scripts/benchmark/prepare_sources.py \
+            --index scripts/benchmark/omnidocbench-v1.6-source-index.json \
+            --output "$RUNNER_TEMP/prewarm-corpus" \
+            --subset hard \
+            --shard-index 0 \
+            --shard-count 296
+
+      - name: Install the pinned candidate
+        run: bash scripts/benchmark/install_system.sh "$SYSTEM" "$RUNNER_TEMP/prewarm-pip-report.json"
+
+      - name: Verify the installed candidate contract
+        run: |
+          python scripts/benchmark/verify_install_contract.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM"
+
+      - name: Materialize only declared immutable model assets
+        run: |
+          args=(
+            --pins scripts/benchmark/model-pins.json
+            --system "$SYSTEM"
+            --hf-home "$HF_HOME"
+            --output "$RUNNER_TEMP/realized-huggingface-models.json"
+          )
+          if [[ "$SYSTEM" == "mineru" ]]; then
+            args+=(--mineru-config "$MINERU_TOOLS_CONFIG_JSON")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            args+=(--rapidocr-cache "$RAPIDOCR_CACHE_DIR")
+          fi
+          if [[ "${{ steps.models.outputs.cache-hit }}" == "true" ]]; then
+            args+=(--offline)
+          fi
+          python scripts/benchmark/materialize_pinned_models.py "${args[@]}"
+          echo "HF_HUB_OFFLINE=1" >> "$GITHUB_ENV"
+          if [[ "$SYSTEM" == "mineru" ]]; then
+            echo "MINERU_MODEL_SOURCE=local" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install byte-pinned RapidOCR assets into Docling
+        if: inputs.system == 'docling'
+        run: |
+          models_dir=$(python scripts/benchmark/install_rapidocr_assets.py \
+            --pins scripts/benchmark/model-pins.json \
+            --cache "$RAPIDOCR_CACHE_DIR")
+          echo "RAPIDOCR_MODELS_DIR=$models_dir" >> "$GITHUB_ENV"
+
+      - name: Inventory a restored cache before repeat warm-up
+        if: steps.models.outputs.cache-hit == 'true'
+        run: |
+          python scripts/benchmark/verify_model_cache.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM" \
+            --hf-home "$HF_HOME" \
+            --direct-cache "$MODEL_CACHE_DIR" \
+            --font-path "$FONT_PATH" \
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
+            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
+          inventory_args=(
+            --output "$RUNNER_TEMP/model-cache-before-prewarm.json"
+            --pip-report "$RUNNER_TEMP/prewarm-pip-report.json"
+            --model-pins scripts/benchmark/model-pins.json
+            --system "$SYSTEM"
+            --cache-root "$HF_HOME"
+            --cache-root "$XDG_CACHE_HOME"
+            --cache-root "$MODEL_CACHE_DIR"
+            --cache-root "$TORCH_HOME"
+            --cache-root "$FONT_DIR"
+          )
+          if [[ "$SYSTEM" == "marker" ]]; then
+            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            inventory_args+=(
+              --cache-root "$RAPIDOCR_CACHE_ROOT"
+              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
+              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
+              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
+              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
+            )
+          elif [[ "$SYSTEM" == "mineru" ]]; then
+            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
+          fi
+          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
+
+      - name: Warm the model without publishing candidate output
+        run: |
+          mapfile -d '' sources < <(find "$RUNNER_TEMP/prewarm-corpus/sources" \
+            -type f \( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \) \
+            -print0 | sort -z)
+          if [[ "${#sources[@]}" -eq 0 ]]; then
+            echo "No GT-free warm-up image found" >&2
+            exit 1
+          fi
+          python scripts/benchmark/run_candidate.py \
+            --system "$SYSTEM" \
+            --input "${sources[0]}" \
+            --output "$RUNNER_TEMP/prewarm.md" \
+            --work-dir "$RUNNER_TEMP/prewarm-work"
+
+      - name: Reject an incomplete or mutated model cache
+        run: |
+          python scripts/benchmark/verify_model_cache.py \
+            --pins scripts/benchmark/model-pins.json \
+            --system "$SYSTEM" \
+            --hf-home "$HF_HOME" \
+            --direct-cache "$MODEL_CACHE_DIR" \
+            --font-path "$FONT_PATH" \
+            --mineru-config "$MINERU_TOOLS_CONFIG_JSON" \
+            --rapidocr-cache "$RAPIDOCR_CACHE_DIR"
+          if [[ "$SYSTEM" == "docling" ]]; then
+            python scripts/benchmark/install_rapidocr_assets.py \
+              --pins scripts/benchmark/model-pins.json \
+              --cache "$RAPIDOCR_CACHE_DIR" \
+              --models-dir "$RAPIDOCR_MODELS_DIR" \
+              --verify-only >/dev/null
+          fi
+
+      - name: Hash the exact prepared model cache
+        run: |
+          inventory_args=(
+            --output "$RUNNER_TEMP/model-cache-manifest.json"
+            --pip-report "$RUNNER_TEMP/prewarm-pip-report.json"
+            --model-pins scripts/benchmark/model-pins.json
+            --system "$SYSTEM"
+            --cache-root "$HF_HOME"
+            --cache-root "$XDG_CACHE_HOME"
+            --cache-root "$MODEL_CACHE_DIR"
+            --cache-root "$TORCH_HOME"
+            --cache-root "$FONT_DIR"
+          )
+          if [[ "$SYSTEM" == "marker" ]]; then
+            inventory_args+=(--runtime-command "llama-server=$LLAMA_CPP_BINARY")
+          elif [[ "$SYSTEM" == "docling" ]]; then
+            inventory_args+=(
+              --cache-root "$RAPIDOCR_CACHE_ROOT"
+              --runtime-file "rapidocr-det=$RAPIDOCR_MODELS_DIR/PP-OCRv6_det_small.pth"
+              --runtime-file "rapidocr-cls=$RAPIDOCR_MODELS_DIR/ch_ptocr_mobile_v2.0_cls_mobile.pth"
+              --runtime-file "rapidocr-rec=$RAPIDOCR_MODELS_DIR/PP-OCRv6_rec_small.pth"
+              --runtime-file "rapidocr-dict=$RAPIDOCR_MODELS_DIR/ppocrv6_dict.txt"
+            )
+          elif [[ "$SYSTEM" == "mineru" ]]; then
+            inventory_args+=(--runtime-file "mineru-config=$MINERU_TOOLS_CONFIG_JSON")
+          fi
+          python scripts/benchmark/inventory_environment.py "${inventory_args[@]}"
+
+      - name: Prove repeat warm-up did not mutate a restored cache
+        if: steps.models.outputs.cache-hit == 'true'
+        run: |
+          python scripts/benchmark/compare_model_inventories.py \
+            --prepared "$RUNNER_TEMP/model-cache-before-prewarm.json" \
+            --inference "$RUNNER_TEMP/model-cache-manifest.json"
+
+      - name: Upload only the small public model inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: model-inventory-${{ inputs.system }}-${{ github.sha }}
+          path: ${{ runner.temp }}/model-cache-manifest.json
+          compression-level: 6
+          retention-days: 30
+          if-no-files-found: error
