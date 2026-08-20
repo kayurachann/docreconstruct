@@ -40,10 +40,10 @@ def expected_denominators() -> dict[str, object]:
         "subset": "hard",
         "selected_pages": 296,
         "metrics": {
-            "text_block": {"Edit_dist": 290},
-            "display_formula": {"Edit_dist": 100, "CDM": 100},
-            "table": {"TEDS": 97, "Edit_dist": 97},
-            "reading_order": {"Edit_dist": 296},
+            "text_block": {"Edit_dist": 267},
+            "display_formula": {"Edit_dist": 106, "CDM": 106},
+            "table": {"TEDS": 107, "Edit_dist": 107},
+            "reading_order": {"Edit_dist": 293},
         },
     }
 

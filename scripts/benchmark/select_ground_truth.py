@@ -10,6 +10,20 @@ from typing import Any
 
 HARD_SUBSETS = {"equation_hard", "layout_hard", "table_hard"}
 TEXT_CATEGORIES = {"text_block", "title", "code_txt", "code_txt_caption", "reference"}
+PINNED_DENOMINATOR_COUNTS = {
+    "hard": {
+        "text_block": {"Edit_dist": 267},
+        "display_formula": {"Edit_dist": 106, "CDM": 106},
+        "table": {"TEDS": 107, "Edit_dist": 107},
+        "reading_order": {"Edit_dist": 293},
+    },
+    "all": {
+        "text_block": {"Edit_dist": 1557},
+        "display_formula": {"Edit_dist": 313, "CDM": 313},
+        "table": {"TEDS": 458, "Edit_dist": 458},
+        "reading_order": {"Edit_dist": 1638},
+    },
+}
 
 
 def raw_page_categories(item: dict[str, Any]) -> set[str]:
@@ -20,7 +34,7 @@ def raw_page_categories(item: dict[str, Any]) -> set[str]:
     }
 
 
-def matched_page_categories(item: dict[str, Any]) -> set[str]:
+def matched_page_blocks(item: dict[str, Any]) -> list[dict[str, Any]]:
     groups: list[set[object]] = []
     for relation in item.get("extra", {}).get("relation", []):
         if relation.get("relation_type") != "truncated":
@@ -35,33 +49,63 @@ def matched_page_categories(item: dict[str, Any]) -> set[str]:
         groups = [*untouched, merged]
     truncated_ids = set().union(*groups) if groups else set()
     truncated_blocks: dict[object, dict[str, Any]] = {}
-    categories = set()
+    blocks = []
     for block in item.get("layout_dets", []):
         annotation_id = block.get("anno_id")
         if annotation_id in truncated_ids:
             truncated_blocks[annotation_id] = block
-        elif not block.get("ignore", False) and block.get("category_type"):
-            categories.add(str(block["category_type"]))
+        elif not block.get("ignore", False):
+            blocks.append(block)
     for group in groups:
-        blocks = [truncated_blocks[key] for key in group if key in truncated_blocks]
-        if not blocks or any(block.get("ignore", False) for block in blocks):
+        merged = [truncated_blocks[key] for key in group if key in truncated_blocks]
+        if not merged or any(block.get("ignore", False) for block in merged):
             continue
-        first = min(blocks, key=lambda block: block.get("order") or 0)
-        if first.get("category_type"):
-            categories.add(str(first["category_type"]))
-    return categories
+        ordered = sorted(merged, key=lambda block: block["order"])
+        first = ordered[0]
+        blocks.append(
+            {
+                "category_type": first.get("category_type"),
+                "order": first.get("order"),
+                "anno_id": first.get("anno_id"),
+                "text": "".join(str(block.get("text", "")) for block in ordered),
+            }
+        )
+    return blocks
+
+
+def matched_page_categories(item: dict[str, Any]) -> set[str]:
+    return {
+        str(block["category_type"])
+        for block in matched_page_blocks(item)
+        if block.get("category_type")
+    }
+
+
+def evaluator_gt_position(block: dict[str, Any]) -> object:
+    """Mirror the pinned matcher's truthy order-or-position reading-order key."""
+    if block.get("order"):
+        return block["order"]
+    position = block.get("position", [""])
+    if isinstance(position, (list, tuple)) and position:
+        return position[0]
+    return ""
 
 
 def expected_denominators(payload: list[dict[str, Any]], subset: str) -> dict[str, Any]:
     text_pages = formula_pages = table_pages = reading_pages = 0
     for item in payload:
         raw_categories = raw_page_categories(item)
-        matched_categories = matched_page_categories(item)
+        matched_blocks = matched_page_blocks(item)
+        matched_categories = {
+            str(block["category_type"]) for block in matched_blocks if block.get("category_type")
+        }
         has_text = bool(matched_categories & TEXT_CATEGORIES)
         has_formula = "equation_isolated" in raw_categories
         has_table = "table" in raw_categories
-        has_reading_order = bool(
-            matched_categories & (TEXT_CATEGORIES | {"equation_isolated", "table"})
+        reading_categories = TEXT_CATEGORIES | {"equation_isolated", "table"}
+        has_reading_order = any(
+            block.get("category_type") in reading_categories and evaluator_gt_position(block)
+            for block in matched_blocks
         )
         text_pages += has_text
         formula_pages += has_formula
@@ -113,9 +157,16 @@ def main(args: argparse.Namespace) -> None:
         )
     args.output.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
     if args.denominators is not None:
+        denominators = expected_denominators(payload, args.subset)
+        contract = PINNED_DENOMINATOR_COUNTS.get(args.subset)
+        if contract is not None and denominators["metrics"] != contract:
+            raise RuntimeError(
+                f"pinned {args.subset} denominator contract changed: "
+                f"expected {contract!r}, got {denominators['metrics']!r}"
+            )
         args.denominators.parent.mkdir(parents=True, exist_ok=True)
         args.denominators.write_text(
-            json.dumps(expected_denominators(payload, args.subset), indent=2) + "\n",
+            json.dumps(denominators, indent=2) + "\n",
             encoding="utf-8",
         )
 

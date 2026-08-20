@@ -198,7 +198,11 @@ exactly one official metric result and one run summary, all configured metric
 keys, an official page-coverage count of exactly 296 or 1,651, and per-metric
 page denominators exactly matching a count-only manifest derived from the pinned
 selected GT after inference. This safe manifest contains only totals, not
-filenames or content. Missing, duplicate, partial, or malformed output is staged
+filenames or content. Its pinned contracts are 267/106/107/293 pages for
+text/formula/table/reading order in `hard`, and 1,557/313/458/1,638 in `all`.
+These counts were cross-checked with the pinned evaluator using complete empty
+prediction sets; they validate denominator semantics and are not accuracy scores.
+Missing, duplicate, partial, or malformed output is staged
 as an invalid run and fails the job. The six required headline values are checked
 at their exact official JSON paths and must be finite numbers; `null`, strings,
 booleans, NaN, and infinity are rejected rather than published as scores.
