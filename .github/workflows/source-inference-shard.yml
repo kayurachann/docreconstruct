@@ -82,7 +82,8 @@ jobs:
             --output "$RUNNER_TEMP/corpus" \
             --subset "$SUITE" \
             --shard-index "$SHARD_INDEX" \
-            --shard-count "$SHARD_COUNT"
+            --shard-count "$SHARD_COUNT" \
+            --workers 4
 
       - name: Restore only the currently active lane's model cache
         if: inputs.system != 'docreconstruct-tesseract'

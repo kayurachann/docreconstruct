@@ -307,6 +307,25 @@ class DirectSourceMaterializationTests(unittest.TestCase):
             with self.subTest(unsafe=unsafe), self.assertRaises(RuntimeError):
                 prepare_sources.validate_download_url(unsafe)
 
+    def test_untrusted_redirect_is_rejected_before_parent_handler_opens_it(self) -> None:
+        handler = prepare_sources._TrustedSourceRedirectHandler()
+        with (
+            patch.object(
+                prepare_sources.urllib.request.HTTPRedirectHandler,
+                "redirect_request",
+            ) as parent,
+            self.assertRaisesRegex(RuntimeError, "untrusted source download redirect"),
+        ):
+            handler.redirect_request(
+                object(),
+                object(),
+                302,
+                "Found",
+                {},
+                "http://169.254.169.254/latest/meta-data",
+            )
+        parent.assert_not_called()
+
     def test_declared_source_size_has_a_hard_upper_bound(self) -> None:
         item = self.item()
         item["source_bytes"] = 64 * 1024 * 1024 + 1
@@ -333,7 +352,11 @@ class DirectSourceMaterializationTests(unittest.TestCase):
             root = Path(directory)
             item = self.item(b"ok")
             with (
-                patch("prepare_sources.urllib.request.urlopen", return_value=Response()),
+                patch.object(
+                    prepare_sources.urllib.request.OpenerDirector,
+                    "open",
+                    return_value=Response(),
+                ),
                 self.assertRaisesRegex(RuntimeError, "exceeds 2 bytes"),
             ):
                 prepare_sources._download_source_once(item, root)
@@ -402,6 +425,7 @@ class EvictionProofWorkflowTests(unittest.TestCase):
         self.assertIn("python scripts/benchmark/prepare_sources.py", source_step)
         self.assertIn('--shard-index "$SHARD_INDEX"', source_step)
         self.assertIn('--shard-count "$SHARD_COUNT"', source_step)
+        self.assertIn("--workers 4", source_step)
         self.assertNotIn("--verify-only", source_step)
         self.assertNotIn("source-benchmark-input-", combined)
         for upload in (
@@ -496,13 +520,17 @@ class EvictionProofWorkflowTests(unittest.TestCase):
     def test_uploads_exclude_raw_and_model_bytes(self) -> None:
         preparation = self.preparation()
         inference = self.inference()
-        prepare_upload = next(
+        prepare_uploads = [
             block
             for block in preparation.split("\n      - name:")
             if "actions/upload-artifact@" in block
-        )
-        self.assertIn("path: ${{ runner.temp }}/model-cache-manifest.json", prepare_upload)
-        self.assertNotIn(".benchmark-cache", prepare_upload)
+        ]
+        self.assertEqual(len(prepare_uploads), 2)
+        self.assertIn("path: ${{ runner.temp }}/model-cache-manifest.json", prepare_uploads[0])
+        self.assertIn("path: ${{ runner.temp }}/model-preparation-failure", prepare_uploads[1])
+        for upload in prepare_uploads:
+            self.assertNotIn(".benchmark-cache", upload)
+            self.assertNotIn("prewarm-corpus", upload)
         inference_uploads = [
             block
             for block in inference.split("\n      - name:")
@@ -529,9 +557,12 @@ class EvictionProofWorkflowTests(unittest.TestCase):
 
     def test_setup_failure_is_publicly_classified_as_infrastructure_invalid(self) -> None:
         inference = self.inference()
+        preparation = self.preparation()
         main = self.main()
         self.assertIn('"classification": "infrastructure-invalid"', inference)
         self.assertIn("no candidate quality score", inference)
+        self.assertIn('"classification": "infrastructure-invalid"', preparation)
+        self.assertIn("no candidate quality score", preparation)
         official = self.job(main, "official-evaluation")
         for dependency in (
             "inference-tesseract",

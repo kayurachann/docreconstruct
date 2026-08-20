@@ -220,3 +220,34 @@ jobs:
           compression-level: 6
           retention-days: 30
           if-no-files-found: error
+
+      - name: Stage a sanitized model-preparation failure marker
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/model-preparation-failure"
+          python - "$RUNNER_TEMP/model-preparation-failure/setup-failure.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          payload = {
+              "schema_version": 1,
+              "classification": "infrastructure-invalid",
+              "reason": "model preparation failed; no candidate quality score",
+              "system": os.environ["SYSTEM"],
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as stream:
+              json.dump(payload, stream, indent=2)
+              stream.write("\n")
+          PY
+
+      - name: Upload sanitized model-preparation failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: model-preparation-failure-${{ inputs.system }}-${{ github.sha }}
+          path: ${{ runner.temp }}/model-preparation-failure
+          compression-level: 6
+          retention-days: 14
+          if-no-files-found: error

@@ -33,6 +33,16 @@ _MAX_SOURCE_BYTES = 64 * 1024 * 1024
 _DOWNLOAD_ATTEMPTS = 5
 
 
+class _TrustedSourceRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject an untrusted redirect before urllib opens the target URL."""
+
+    def redirect_request(  # type: ignore[no-untyped-def]
+        self, request, response, code, message, headers, new_url
+    ):
+        validate_download_url(new_url)
+        return super().redirect_request(request, response, code, message, headers, new_url)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -142,7 +152,7 @@ def _download_source_once(item: dict[str, Any], sources_dir: Path) -> Path:
     relative = source_relative_path(item["page_info"]["image_path"])
     destination = sources_dir.joinpath(*relative.parts)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    quoted = urllib.parse.quote(relative.as_posix(), safe="")
+    quoted = urllib.parse.quote(relative.as_posix(), safe="/")
     url = (
         f"https://huggingface.co/datasets/{DATASET_REPOSITORY}/resolve/"
         f"{DATASET_REVISION}/images/{quoted}?download=true"
@@ -152,7 +162,8 @@ def _download_source_once(item: dict[str, Any], sources_dir: Path) -> Path:
     expected_size = int(item["source_bytes"])
     temporary: Path | None = None
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:  # noqa: S310
+        opener = urllib.request.build_opener(_TrustedSourceRedirectHandler())
+        with opener.open(request, timeout=180) as response:  # noqa: S310
             validate_download_url(response.geturl())
             declared_length = response.headers.get("Content-Length")
             if declared_length is not None:

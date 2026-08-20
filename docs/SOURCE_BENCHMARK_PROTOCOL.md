@@ -161,8 +161,11 @@ of 80 and a worst-case inference wall bound of 222 minutes per lane plus at most
 120 minutes of preparation. The three sequential model lanes therefore have a
 conservative pre-evaluator ceiling of about 17.1 hours for `hard`; the comparable
 `all` ceiling is about 18.5 hours. These are timeout-derived bounds, not expected
-typical latency; actual jobs may finish much earlier. The full run retains 20
-shards because its per-shard timeout proof requires them.
+typical latency. Adding the 150-minute evaluator preparation and two worst-case
+six-hour evaluator waves gives end-to-end ceilings of roughly 31.6 hours for
+`hard` and 33.0 hours for `all`; actual jobs may finish much earlier. A measured
+expected wall time cannot be claimed until one valid hard run completes. The full
+run retains 20 shards because its per-shard timeout proof requires them.
 
 Hugging Face revision aliases requested by pinned clients are explicit parts of
 the contract. Each declared alias is verified to target the pinned 40-character
