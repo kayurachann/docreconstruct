@@ -10,9 +10,10 @@ from pydantic import ValidationError
 from docreconstruct.reconstruction.constraint_plan import ConstraintPlan
 from docreconstruct.reconstruction.constraint_plan.canonical import stable_digest
 
-from .actions import CorrectionAction
+from .actions import CorrectionAction, CorrectionActionType, CorrectionParameters
 from .cache import CandidateRenderCache, candidate_sha256
 from .invariants import (
+    _PAGE_SCOPED_ACTIONS,
     actions_authorized_by_plan,
     hard_invariant_violations,
     objective_from_assessment,
@@ -101,6 +102,98 @@ def _validated_actions(raw_actions: object) -> tuple[CorrectionAction, ...]:
         raise ValueError("correction proposal did not satisfy the closed action schema") from exc
 
 
+_APPLIED_STATE_TOLERANCE = 1e-6
+
+# Every ADJUST_MARGIN action restates all four margins, so the plan's own
+# page margins are an authoritative starting point for the very first touch.
+_MARGIN_SEED_FIELDS = ("margin_top", "margin_right", "margin_bottom", "margin_left")
+
+
+def _state_key(action: CorrectionAction, page_number: int) -> tuple[object, ...]:
+    """Identify the setting an action mutates, so successive touches line up."""
+
+    if action.action_type in _PAGE_SCOPED_ACTIONS:
+        return (action.action_type, page_number)
+    return (action.action_type, tuple(action.object_ids))
+
+
+def _states_agree(claimed: CorrectionParameters, recorded: CorrectionParameters) -> bool:
+    """Compare only the fields the recorded state actually pins down."""
+
+    for name in type(recorded).model_fields:
+        expected = getattr(recorded, name)
+        if expected is None:
+            continue
+        actual = getattr(claimed, name)
+        if actual is None:
+            return False
+        if isinstance(expected, (int, float)) and not isinstance(expected, bool):
+            if abs(float(actual) - float(expected)) > _APPLIED_STATE_TOLERANCE:
+                return False
+        elif isinstance(expected, tuple):
+            if not isinstance(actual, tuple) or len(actual) != len(expected):
+                return False
+            if any(
+                abs(float(left) - float(right)) > _APPLIED_STATE_TOLERANCE
+                for left, right in zip(actual, expected, strict=True)
+            ):
+                return False
+        elif actual != expected:
+            return False
+    return True
+
+
+def _seed_applied_state(plan: ConstraintPlan) -> dict[tuple[object, ...], CorrectionParameters]:
+    seeded: dict[tuple[object, ...], CorrectionParameters] = {}
+    for page in plan.pages:
+        seeded[(CorrectionActionType.ADJUST_MARGIN, page.page_number)] = CorrectionParameters(
+            margin_top=page.margins.top,
+            margin_right=page.margins.right,
+            margin_bottom=page.margins.bottom,
+            margin_left=page.margins.left,
+        )
+    return seeded
+
+
+def _before_matches_applied_state(
+    plan: ConstraintPlan,
+    actions: Iterable[CorrectionAction],
+    applied: dict[tuple[object, ...], CorrectionParameters],
+) -> bool:
+    """Reject an action whose ``before`` contradicts what was actually applied.
+
+    ``CorrectionAction`` enforces a per-action delta limit between ``before``
+    and ``after``, but both come from the proposer.  Without pinning ``before``
+    to the state the engine recorded, a proposer can restate it on every
+    iteration and walk a setting arbitrarily far in single "bounded" steps.
+    """
+
+    page_by_object = {
+        item.object_id: page.page_number for page in plan.pages for item in page.objects
+    }
+    for action in actions:
+        pages = {page_by_object[object_id] for object_id in action.object_ids}
+        if len(pages) != 1:
+            return False
+        recorded = applied.get(_state_key(action, next(iter(pages))))
+        if recorded is not None and not _states_agree(action.before, recorded):
+            return False
+    return True
+
+
+def _record_applied_state(
+    plan: ConstraintPlan,
+    actions: Iterable[CorrectionAction],
+    applied: dict[tuple[object, ...], CorrectionParameters],
+) -> None:
+    page_by_object = {
+        item.object_id: page.page_number for page in plan.pages for item in page.objects
+    }
+    for action in actions:
+        pages = {page_by_object[object_id] for object_id in action.object_ids}
+        applied[_state_key(action, next(iter(pages)))] = action.after
+
+
 def run_bounded_correction(
     initial_artifact: bytes,
     constraint_plan: ConstraintPlan,
@@ -162,6 +255,7 @@ def run_bounded_correction(
     best_iteration = 0
     attempted_actions = 0
     accepted_actions = 0
+    applied_state = _seed_applied_state(constraint_plan)
     terminal_reason = TerminalReason.MAX_ITERATIONS
 
     for iteration_number in range(1, limits.max_iterations + 1):
@@ -204,7 +298,7 @@ def run_bounded_correction(
             constraint_plan,
             current_assessment,
             actions,
-        ):
+        ) or not _before_matches_applied_state(constraint_plan, actions, applied_state):
             iterations.append(
                 CorrectionIterationRecord(
                     iteration=iteration_number,
@@ -332,6 +426,7 @@ def run_bounded_correction(
             current_assessment = candidate_assessment
             current_objective = candidate_objective
             accepted_actions += len(actions)
+            _record_applied_state(constraint_plan, actions, applied_state)
             best_iteration = iteration_number
         if attempted_actions >= limits.max_actions:
             terminal_reason = TerminalReason.MAX_ACTIONS

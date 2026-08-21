@@ -167,6 +167,16 @@ _OBJECT_SOFT_RULE: dict[CorrectionActionType, SoftConstraintKind] = {
     CorrectionActionType.CHANGE_KEEP_WITH_NEXT: SoftConstraintKind.KEEP_WITH_NEXT,
 }
 
+# These reconfigure the page frame itself rather than one object, so two of
+# them in a batch collide even when their object_ids differ.
+_PAGE_SCOPED_ACTIONS = frozenset(
+    {
+        CorrectionActionType.ADJUST_MARGIN,
+        CorrectionActionType.ADJUST_GUTTER,
+        CorrectionActionType.SET_COLUMN_WIDTHS,
+    }
+)
+
 
 def actions_authorized_by_plan(
     plan: ConstraintPlan,
@@ -179,6 +189,17 @@ def actions_authorized_by_plan(
         return False
     if len({action.fingerprint for action in actions}) != len(actions):
         return False
+    # Distinct fingerprints only prove the actions differ, not that they are
+    # compatible.  Two different font sizes for the same paragraph are both
+    # "authorized" under a fingerprint check and then applied in an order the
+    # batch never specified.
+    seen_objects: set[str] = set()
+    for action in actions:
+        targets = set(action.object_ids)
+        if targets & seen_objects:
+            return False
+        seen_objects |= targets
+    seen_pages: set[int] = set()
     by_id = {item.object_id: item for page in plan.pages for item in page.objects}
     page_by_object = {item.object_id: page for page in plan.pages for item in page.objects}
     known_diagnostics = {item.diagnostic_id for item in assessment.render_diff.diagnostics}
@@ -193,7 +214,12 @@ def actions_authorized_by_plan(
         pages = {page_by_object[object_id].page_number for object_id in action.object_ids}
         if len(pages) != 1:
             return False
-        page = plan.pages[next(iter(pages)) - 1]
+        page_number = next(iter(pages))
+        if action.action_type in _PAGE_SCOPED_ACTIONS:
+            if page_number in seen_pages:
+                return False
+            seen_pages.add(page_number)
+        page = plan.pages[page_number - 1]
         if action.action_type is CorrectionActionType.ADJUST_MARGIN:
             if SoftConstraintKind.MARGIN not in page.soft_constraints:
                 return False
@@ -216,13 +242,24 @@ def actions_authorized_by_plan(
             ):
                 return False
             available = page.page_size.width - page.margins.left - page.margins.right
-            if sum(widths) > available + 1e-9:
+            gutters = sum(column.preferred_gutter_after or 0.0 for column in page.columns[:-1])
+            if sum(widths) + gutters > available + 1e-9:
                 return False
             continue
         if action.action_type is CorrectionActionType.ADJUST_GUTTER:
             if SoftConstraintKind.COLUMN_GUTTER not in page.soft_constraints:
                 return False
-            if action.after.gutter is None or action.after.gutter >= page.page_size.width:
+            # A single-column page has no gutter to adjust, and a gutter only
+            # fits in what the margins leave once every column has its minimum
+            # width.  ``CorrectionParameters`` already caps the raw value, so
+            # comparing against the full page width authorized nothing.
+            if action.after.gutter is None or len(page.columns) < 2:
+                return False
+            available = page.page_size.width - page.margins.left - page.margins.right
+            required = sum(column.min_width for column in page.columns) + action.after.gutter * (
+                len(page.columns) - 1
+            )
+            if required > available + 1e-9:
                 return False
             continue
         soft_rule = _OBJECT_SOFT_RULE.get(action.action_type)

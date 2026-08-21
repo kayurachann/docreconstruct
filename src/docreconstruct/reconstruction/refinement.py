@@ -90,16 +90,21 @@ def apply_layout_corrections(
                 f"unknown element {correction.element_id!r} on page {correction.page_number}"
             )
         old = element.bbox
-        width = max(0.0, old.width + correction.width_delta)
-        height = max(0.0, old.height + correction.height_delta)
-        x0 = min(max(0.0, old.x0 + correction.dx), page.width)
-        y0 = min(max(0.0, old.y0 + correction.dy), page.height)
-        element.bbox = BBox(
-            x0=x0,
-            y0=y0,
-            x1=min(page.width, x0 + width),
-            y1=min(page.height, y0 + height),
-        )
+        width = old.width + correction.width_delta
+        height = old.height + correction.height_delta
+        if width <= 0.0 or height <= 0.0:
+            raise ValueError(
+                f"correction for element {correction.element_id!r} on page "
+                f"{correction.page_number} collapses its box to {width:g}x{height:g}"
+            )
+        width = min(width, page.width)
+        height = min(height, page.height)
+        # Clamp the translated box as a unit. Clamping the corner and the far
+        # edge independently turns a move that reaches a page edge into a
+        # silent resize, and a large enough move into a zero-area box.
+        x0 = min(max(0.0, old.x0 + correction.dx), page.width - width)
+        y0 = min(max(0.0, old.y0 + correction.dy), page.height - height)
+        element.bbox = BBox(x0=x0, y0=y0, x1=x0 + width, y1=y0 + height)
         if correction.font_size_delta:
             current = element.style.font_size or 12.0
             element.style.font_size = max(1.0, current + correction.font_size_delta)
