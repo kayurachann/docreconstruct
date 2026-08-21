@@ -313,3 +313,171 @@ def test_table_html_is_converted_to_native_rows_with_conservative_spans() -> Non
     assert '<th rowspan="2">A</th><th colspan="2">B</th>' in html_output
     assert "<tr><td>C</td><td>D</td></tr>" in html_output
     assert "<th></th>" not in html_output
+
+
+def _rotated_document(rotation: float) -> Document:
+    return Document(
+        id="rotated",
+        pages=[
+            Page(
+                id="page-1",
+                number=1,
+                width=612,
+                height=792,
+                rotation=rotation,
+                metadata={"coordinate_unit": "pt"},
+                elements=[
+                    Element(
+                        id="heading",
+                        type=ElementType.TEXT,
+                        bbox=BBox(x0=72, y0=100, x1=272, y1=120),
+                        text="Rotated heading",
+                    )
+                ],
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("rotation", "width", "height", "box"),
+    [
+        (0.0, 612.0, 792.0, (72.0, 100.0)),
+        (90.0, 792.0, 612.0, (792.0 - 120.0, 72.0)),
+        (180.0, 612.0, 792.0, (612.0 - 272.0, 792.0 - 120.0)),
+        (270.0, 792.0, 612.0, (100.0, 612.0 - 272.0)),
+    ],
+)
+def test_page_rotation_reaches_both_plain_renderers(
+    rotation: float, width: float, height: float, box: tuple[float, float]
+) -> None:
+    """Providers store unrotated boxes plus ``Page.rotation``.
+
+    Both plain renderers read ``page.width``/``page.height`` directly, so a
+    landscape scan stored the usual way (portrait MediaBox plus ``/Rotate 90``)
+    came out as a portrait page with every element in the unrotated frame.
+    """
+
+    document = _rotated_document(rotation)
+
+    from docx import Document as WordDocument
+
+    section = WordDocument(io.BytesIO(DOCXRenderer().render(document))).sections[0]
+    assert (round(section.page_width.pt), round(section.page_height.pt)) == (
+        round(width),
+        round(height),
+    )
+    assert (section.orientation == 1) is (width > height)
+
+    markup = HTMLRenderer().render(document)
+    assert f"width:{width:g}px;height:{height:g}px" in markup
+    assert f"left:{box[0]:g}px;top:{box[1]:g}px" in markup
+
+
+def test_unrecognized_page_rotation_leaves_geometry_alone() -> None:
+    markup = HTMLRenderer().render(_rotated_document(37.0))
+
+    assert "width:612px;height:792px" in markup
+    assert "left:72px;top:100px" in markup
+
+
+def test_webp_picture_is_transcoded_instead_of_aborting_the_render(tmp_path: Path) -> None:
+    """python-docx rejects WEBP with a message-less UnrecognizedImageError.
+
+    It escaped the renderer's ``(OSError, ValueError)`` guard entirely, so a
+    single unsupported picture killed the whole document with a bare traceback.
+    """
+
+    from PIL import Image
+
+    source = tmp_path / "scan.webp"
+    Image.new("RGB", (120, 80), "steelblue").save(source, "WEBP")
+    document = Document(
+        id="webp",
+        pages=[
+            Page(
+                id="page-1",
+                number=1,
+                width=200,
+                height=200,
+                elements=[
+                    Element(
+                        id="picture",
+                        type=ElementType.IMAGE,
+                        bbox=BBox(x0=0, y0=0, x1=120, y1=80),
+                        metadata={"image": {"path": str(source), "mime_type": "image/webp"}},
+                    )
+                ],
+            )
+        ],
+    )
+
+    blob = DOCXRenderer(allow_local_files=True, local_file_root=str(tmp_path)).render(document)
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        media = [name for name in archive.namelist() if name.startswith("word/media/")]
+    assert media, "the picture should survive as an embedded part"
+
+
+def test_local_image_path_is_accepted_by_the_docx_renderer(tmp_path: Path) -> None:
+    """``add_picture`` treats a non-``str`` argument as an open stream.
+
+    Passing the ``Path`` returned by ``_image_source`` raised AttributeError
+    for every format, not just the ones Word cannot parse.
+    """
+
+    source = tmp_path / "scan.png"
+    source.write_bytes(_png_bytes())
+    document = Document(
+        id="local",
+        pages=[
+            Page(
+                id="page-1",
+                number=1,
+                width=200,
+                height=200,
+                elements=[
+                    Element(
+                        id="picture",
+                        type=ElementType.IMAGE,
+                        bbox=BBox(x0=0, y0=0, x1=40, y1=40),
+                        metadata={"image": {"path": str(source), "mime_type": "image/png"}},
+                    )
+                ],
+            )
+        ],
+    )
+
+    blob = DOCXRenderer(allow_local_files=True, local_file_root=str(tmp_path)).render(document)
+
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        assert any(name.startswith("word/media/") for name in archive.namelist())
+
+
+def test_undecodable_picture_raises_a_named_renderer_error(tmp_path: Path) -> None:
+    from docreconstruct.renderers.base import RendererError
+
+    source = tmp_path / "broken.png"
+    source.write_bytes(b"not an image at all")
+    document = Document(
+        id="broken",
+        pages=[
+            Page(
+                id="page-1",
+                number=1,
+                width=200,
+                height=200,
+                elements=[
+                    Element(
+                        id="picture",
+                        type=ElementType.IMAGE,
+                        bbox=BBox(x0=0, y0=0, x1=40, y1=40),
+                        metadata={"image": {"path": str(source), "mime_type": "image/png"}},
+                    )
+                ],
+            )
+        ],
+    )
+
+    with pytest.raises(RendererError, match="UnrecognizedImageError"):
+        DOCXRenderer(allow_local_files=True, local_file_root=str(tmp_path)).render(document)

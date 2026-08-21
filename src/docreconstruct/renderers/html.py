@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ._utils import (
+    PageDisplayFrame,
     allowed_local_path,
     bbox_tuple,
     element_metadata,
@@ -21,6 +22,7 @@ from ._utils import (
     finite_number,
     mapping,
     ordered_elements,
+    page_display_frame,
     pages,
     table_rows,
     table_spans,
@@ -44,8 +46,8 @@ def _css_length(candidate: Any, unit: str = "px") -> str | None:
     return f"{finite_number(candidate):g}{unit}"
 
 
-def _style_declarations(element: Any) -> str:
-    left, top, right, bottom = bbox_tuple(element)
+def _style_declarations(element: Any, frame: PageDisplayFrame) -> str:
+    left, top, right, bottom = frame.map_box(bbox_tuple(element))
     style = element_style(element)
     declarations = [
         f"left:{left:g}px",
@@ -76,7 +78,9 @@ def _style_declarations(element: Any) -> str:
     for source, target in (("color", "color"), ("background_color", "background-color")):
         if (color := _css_text(style.get(source))) is not None:
             declarations.append(f"{target}:{color}")
-    rotation = finite_number(style.get("rotation", 0.0))
+    # The page quarter turn rides on top of any per-element style rotation so
+    # glyphs face the same way as the frame they were placed in.
+    rotation = finite_number(style.get("rotation", 0.0)) + (frame.quadrant or 0.0)
     if rotation:
         declarations.extend((f"transform:rotate({rotation:g}deg)", "transform-origin:top left"))
     if style.get("opacity") is not None:
@@ -161,13 +165,14 @@ def _render_table(element: Any) -> str:
 
 def _render_element(
     element: Any,
+    frame: PageDisplayFrame,
     *,
     allow_local_files: bool = False,
     local_file_root: str | Path | None = None,
 ) -> str:
     kind = element_type(element)
     identifier = html.escape(str(value(element, "id", "")), quote=True)
-    style = html.escape(_style_declarations(element), quote=True)
+    style = html.escape(_style_declarations(element, frame), quote=True)
     common = (
         f'class="dr-element dr-{html.escape(kind, quote=True)}" '
         f'data-element-id="{identifier}" style="{style}"'
@@ -245,13 +250,14 @@ class HTMLRenderer(Renderer[str]):
         )
         page_html: list[str] = []
         for index, page in enumerate(pages(document), start=1):
-            width = max(1.0, finite_number(value(page, "width", 1.0), 1.0))
-            height = max(1.0, finite_number(value(page, "height", 1.0), 1.0))
+            frame = page_display_frame(page)
+            width, height = frame.width, frame.height
             page_id = html.escape(str(value(page, "id", index)), quote=True)
             number = html.escape(str(value(page, "number", index)), quote=True)
             contents = "".join(
                 _render_element(
                     element,
+                    frame,
                     allow_local_files=self.allow_local_files,
                     local_file_root=self.local_file_root,
                 )

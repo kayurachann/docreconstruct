@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ._utils import (
+    PageDisplayFrame,
     allowed_local_path,
     bbox_tuple,
     element_metadata,
@@ -21,6 +22,7 @@ from ._utils import (
     finite_number,
     mapping,
     ordered_elements,
+    page_display_frame,
     pages,
     table_rows,
     value,
@@ -34,8 +36,13 @@ _NATIVE_SPAN_ID = re.compile(r"-text-(\d+)-(\d+)-(\d+)$")
 def _require_docx() -> dict[str, Any]:
     try:
         from docx import Document as WordDocument
-        from docx.enum.section import WD_SECTION
+        from docx.enum.section import WD_ORIENT, WD_SECTION
         from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.image.exceptions import (
+            InvalidImageStreamError,
+            UnexpectedEndOfFileError,
+            UnrecognizedImageError,
+        )
         from docx.shared import Inches, Pt, RGBColor
     except (ImportError, ModuleNotFoundError) as exc:
         raise OptionalDependencyError(
@@ -44,11 +51,20 @@ def _require_docx() -> dict[str, Any]:
         ) from exc
     return {
         "Document": WordDocument,
+        "WD_ORIENT": WD_ORIENT,
         "WD_SECTION": WD_SECTION,
         "WD_ALIGN_PARAGRAPH": WD_ALIGN_PARAGRAPH,
         "Inches": Inches,
         "Pt": Pt,
         "RGBColor": RGBColor,
+        # python-docx raises these from its own image parser rather than from
+        # OSError/ValueError, so a caller that only guards the built-ins lets
+        # them escape as an uncaught, message-less traceback.
+        "IMAGE_ERRORS": (
+            InvalidImageStreamError,
+            UnexpectedEndOfFileError,
+            UnrecognizedImageError,
+        ),
     }
 
 
@@ -115,9 +131,9 @@ def _scan_page_margins(page: Any) -> dict[str, float] | None:
     source_type = enum_text(value(page, "source_type", "")).strip().lower()
     if source_type not in {"scanned", "image"}:
         return None
-    width = max(1.0, finite_number(value(page, "width", 1.0), 1.0))
-    height = max(1.0, finite_number(value(page, "height", 1.0), 1.0))
-    boxes = [bbox_tuple(element) for element in ordered_elements(page)]
+    frame = page_display_frame(page)
+    width, height = frame.width, frame.height
+    boxes = [frame.map_box(bbox_tuple(element)) for element in ordered_elements(page)]
     boxes = [box for box in boxes if box[2] > box[0] and box[3] > box[1]]
     if not boxes:
         return None
@@ -143,10 +159,13 @@ def _configure_section(
     """Apply source page geometry and return its coordinate units per inch."""
 
     units_per_inch = _page_units_per_inch(page, fallback_dpi)
-    page_width = max(1.0, finite_number(value(page, "width", 1.0), 1.0))
-    page_height = max(1.0, finite_number(value(page, "height", 1.0), 1.0))
-    section.page_width = api["Inches"](page_width / units_per_inch)
-    section.page_height = api["Inches"](page_height / units_per_inch)
+    frame = page_display_frame(page)
+    section.page_width = api["Inches"](frame.width / units_per_inch)
+    section.page_height = api["Inches"](frame.height / units_per_inch)
+    # Word paginates from the orientation flag, not from the raw dimensions.
+    section.orientation = (
+        api["WD_ORIENT"].LANDSCAPE if frame.width > frame.height else api["WD_ORIENT"].PORTRAIT
+    )
 
     margins = _explicit_page_margins(page) or _scan_page_margins(page)
     if margins is not None:
@@ -186,6 +205,54 @@ def _image_source(
         if path is not None:
             return path
     return None
+
+
+def _png_fallback(source: io.BytesIO | Path) -> io.BytesIO | None:
+    """Re-encode an image python-docx cannot parse, using the required Pillow.
+
+    Word reads a narrower set of formats than the OCR providers emit; WEBP in
+    particular is common for scans and is rejected outright.  Transcoding to
+    PNG keeps the picture instead of failing the whole document.
+    """
+
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover - Pillow is a hard dependency
+        return None
+    buffer = io.BytesIO()
+    try:
+        data = source.read_bytes() if isinstance(source, Path) else source.getvalue()
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            frame = image if image.mode in {"RGB", "RGBA", "L", "P"} else image.convert("RGBA")
+            frame.save(buffer, format="PNG")
+    except (OSError, ValueError):
+        return None
+    buffer.seek(0)
+    return buffer
+
+
+def _add_picture(
+    run: Any,
+    source: io.BytesIO | Path,
+    kwargs: dict[str, Any],
+    api: dict[str, Any],
+) -> None:
+    """Insert a picture, transcoding once if Word's parser refuses the bytes.
+
+    ``add_picture`` treats any non-``str`` argument as a stream, so a ``Path``
+    has to be spelled out before it reaches python-docx.
+    """
+
+    descriptor: Any = str(source) if isinstance(source, Path) else source
+    try:
+        run.add_picture(descriptor, **kwargs)
+        return
+    except api["IMAGE_ERRORS"]:
+        transcoded = _png_fallback(source)
+        if transcoded is None:
+            raise
+        run.add_picture(transcoded, **kwargs)
 
 
 def _apply_text_style(run: Any, element: Any, api: dict[str, Any]) -> None:
@@ -264,18 +331,18 @@ def _native_span_key(element: Any) -> tuple[int, int, int] | None:
     return tuple(int(group) for group in match.groups()) if match else None  # type: ignore[return-value]
 
 
-def _same_line(left: Any, right: Any, page: Any) -> bool:
+def _same_line(left: Any, right: Any, frame: PageDisplayFrame) -> bool:
     left_key, right_key = _native_span_key(left), _native_span_key(right)
     if left_key is not None and right_key is not None:
         return left_key[:2] == right_key[:2]
-    ax0, ay0, ax1, ay1 = bbox_tuple(left)
-    bx0, by0, bx1, by1 = bbox_tuple(right)
+    ax0, ay0, ax1, ay1 = frame.map_box(bbox_tuple(left))
+    bx0, by0, bx1, by1 = frame.map_box(bbox_tuple(right))
     left_height = max(1.0, ay1 - ay0)
     right_height = max(1.0, by1 - by0)
     overlap = max(0.0, min(ay1, by1) - max(ay0, by0))
     center_delta = abs((ay0 + ay1 - by0 - by1) / 2)
     horizontal_gap = bx0 - ax1
-    page_width = max(1.0, finite_number(value(page, "width", 1.0), 1.0))
+    page_width = frame.width
     vertically_aligned = overlap / min(
         left_height, right_height
     ) >= 0.45 or center_delta <= 0.35 * max(left_height, right_height)
@@ -302,8 +369,8 @@ def _styles_compatible(left: Any, right: Any) -> bool:
     return left_weight == right_weight
 
 
-def _line_bounds(line: list[Any]) -> tuple[float, float, float, float]:
-    boxes = [bbox_tuple(element) for element in line]
+def _line_bounds(line: list[Any], frame: PageDisplayFrame) -> tuple[float, float, float, float]:
+    boxes = [frame.map_box(bbox_tuple(element)) for element in line]
     return (
         min(box[0] for box in boxes),
         min(box[1] for box in boxes),
@@ -312,7 +379,7 @@ def _line_bounds(line: list[Any]) -> tuple[float, float, float, float]:
     )
 
 
-def _adjacent_lines(left: list[Any], right: list[Any], page: Any) -> bool:
+def _adjacent_lines(left: list[Any], right: list[Any], frame: PageDisplayFrame) -> bool:
     left_key, right_key = _native_span_key(left[0]), _native_span_key(right[0])
     if (
         left_key is not None
@@ -320,11 +387,11 @@ def _adjacent_lines(left: list[Any], right: list[Any], page: Any) -> bool:
         and (left_key[0] != right_key[0] or right_key[1] != left_key[1] + 1)
     ):
         return False
-    ax0, ay0, ax1, ay1 = _line_bounds(left)
-    bx0, by0, bx1, by1 = _line_bounds(right)
+    ax0, ay0, ax1, ay1 = _line_bounds(left, frame)
+    bx0, by0, bx1, by1 = _line_bounds(right, frame)
     line_height = max(1.0, ay1 - ay0, by1 - by0)
     gap = by0 - ay1
-    page_width = max(1.0, finite_number(value(page, "width", 1.0), 1.0))
+    page_width = frame.width
     left_aligned = abs(ax0 - bx0) <= max(5.0, 0.6 * line_height)
     not_a_new_column = abs(ax0 - bx0) <= 0.08 * page_width
     return (
@@ -335,25 +402,25 @@ def _adjacent_lines(left: list[Any], right: list[Any], page: Any) -> bool:
     )
 
 
-def _flow_groups(spans: list[Any], page: Any) -> list[list[list[Any]]]:
+def _flow_groups(spans: list[Any], frame: PageDisplayFrame) -> list[list[list[Any]]]:
     """Conservatively group provider spans into lines and flowing paragraphs."""
 
     lines: list[list[Any]] = []
     for span in spans:
-        if lines and _same_line(lines[-1][-1], span, page):
+        if lines and _same_line(lines[-1][-1], span, frame):
             lines[-1].append(span)
         else:
             lines.append([span])
     paragraphs: list[list[list[Any]]] = []
     for line in lines:
-        if paragraphs and _adjacent_lines(paragraphs[-1][-1], line, page):
+        if paragraphs and _adjacent_lines(paragraphs[-1][-1], line, frame):
             paragraphs[-1].append(line)
         else:
             paragraphs.append([line])
     return paragraphs
 
 
-def _span_separator(left: Any, right: Any, *, new_line: bool) -> str:
+def _span_separator(left: Any, right: Any, frame: PageDisplayFrame, *, new_line: bool) -> str:
     left_text, right_text = element_text(left), element_text(right)
     if not left_text or not right_text or left_text[-1].isspace() or right_text[0].isspace():
         return ""
@@ -361,17 +428,19 @@ def _span_separator(left: Any, right: Any, *, new_line: bool) -> str:
         return ""
     if new_line:
         return "" if left_text.endswith(("-", "‐", "‑")) else " "
-    _, _, left_x1, _ = bbox_tuple(left)
-    right_x0, _, _, _ = bbox_tuple(right)
-    gap = right_x0 - left_x1
-    left_width = max(0.0, bbox_tuple(left)[2] - bbox_tuple(left)[0])
+    left_box = frame.map_box(bbox_tuple(left))
+    right_box = frame.map_box(bbox_tuple(right))
+    gap = right_box[0] - left_box[2]
+    left_width = max(0.0, left_box[2] - left_box[0])
     visible_characters = max(1, len(left_text.strip()))
     average_character_width = left_width / visible_characters if left_width else 0.0
     return " " if gap > max(0.75, average_character_width * 0.25) else ""
 
 
-def _render_text_flow(document: Any, spans: list[Any], page: Any, api: dict[str, Any]) -> None:
-    for lines in _flow_groups(spans, page):
+def _render_text_flow(
+    document: Any, spans: list[Any], frame: PageDisplayFrame, api: dict[str, Any]
+) -> None:
+    for lines in _flow_groups(spans, frame):
         first = lines[0][0]
         paragraph = document.add_paragraph()
         _apply_paragraph_style(paragraph, first, api)
@@ -382,6 +451,7 @@ def _render_text_flow(document: Any, spans: list[Any], page: Any, api: dict[str,
                     separator = _span_separator(
                         previous,
                         span,
+                        frame,
                         new_line=line_index > 0 and span_index == 0,
                     )
                     if separator:
@@ -435,6 +505,7 @@ class DOCXRenderer(Renderer[bytes]):
                 api,
                 fallback_dpi=self.image_dpi,
             )
+            page_frame = page_display_frame(page)
             page_elements = ordered_elements(page)
             element_index = 0
             while element_index < len(page_elements):
@@ -444,7 +515,7 @@ class DOCXRenderer(Renderer[bytes]):
                     end = element_index + 1
                     while end < len(page_elements) and element_type(page_elements[end]) == "text":
                         end += 1
-                    _render_text_flow(document, page_elements[element_index:end], page, api)
+                    _render_text_flow(document, page_elements[element_index:end], page_frame, api)
                     element_index = end
                     continue
                 if kind == "table" and (rows := table_rows(element)):
@@ -475,17 +546,22 @@ class DOCXRenderer(Renderer[bytes]):
                         paragraph.paragraph_format.line_spacing = None
                         paragraph.paragraph_format.line_spacing_rule = None
                         run = paragraph.add_run()
-                        left, _, right, _ = bbox_tuple(element)
+                        left, _, right, _ = page_frame.map_box(bbox_tuple(element))
                         width_inches = max(0.0, right - left) / page_units_per_inch
                         kwargs = {"width": api["Inches"](width_inches)} if width_inches > 0 else {}
                         try:
-                            run.add_picture(source, **kwargs)
+                            _add_picture(run, source, kwargs, api)
                             element_index += 1
                             continue
-                        except (OSError, ValueError) as exc:
+                        except (OSError, ValueError, *api["IMAGE_ERRORS"]) as exc:
                             element_id = value(element, "id", "<unknown>")
+                            image = mapping(element_metadata(element).get("image"))
+                            mime = image.get("mime_type", "unknown")
+                            # UnrecognizedImageError carries an empty message.
+                            detail = str(exc) or type(exc).__name__
                             raise RendererError(
-                                f"could not add image for element {element_id!r}: {exc}"
+                                f"could not add image for element {element_id!r} "
+                                f"(mime {mime!r}): {detail}"
                             ) from exc
                     # Preserve the visible/alternative text when image bytes are
                     # unavailable; never fabricate a visual replacement.
