@@ -2,6 +2,11 @@ services:
   api:
     build:
       context: .
+      # `full` bundles Tesseract (vie/eng/chi_sim) and LibreOffice so the
+      # compose deployment is self-contained: server-side OCR evidence and
+      # render QA work with no cloud credential. Use `--target runtime` for
+      # the slim API-only image.
+      target: full
       args:
         DOCRECONSTRUCT_EXTRAS: api,pdf,docx
     init: true
