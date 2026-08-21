@@ -47,6 +47,47 @@ def _fail(exc: Exception) -> None:
     raise typer.Exit(code=2) from exc
 
 
+# On-device engines `convert` may select without any consent flag, in
+# preference order. Membership still requires the executable to be present.
+_CONVERT_LOCAL_ENGINES: tuple[str, ...] = ("tesseract_local",)
+
+
+def _installed_local_engines() -> list[str]:
+    """Return bundled on-device OCR engines whose executables are present."""
+
+    available: list[str] = []
+    for name in _CONVERT_LOCAL_ENGINES:
+        if name == "tesseract_local":
+            try:
+                from docreconstruct.providers.tesseract_local import _find_tesseract
+
+                _find_tesseract(None)
+            except Exception:  # noqa: BLE001 - absence, not failure
+                continue
+            available.append(name)
+    return available
+
+
+def _convert_extraction_mode(provider_names: list[str], registry: Any) -> Any:
+    """Pick the narrowest extraction mode the named providers can satisfy."""
+
+    from docreconstruct.extraction import ExtractionMode
+    from docreconstruct.providers import ProviderExecutionMode
+
+    local = hosted = False
+    for name in provider_names:
+        capabilities = registry.get_capabilities(name)
+        if capabilities is None:
+            raise KeyError(f"unknown provider {name!r}")
+        if ProviderExecutionMode.LOCAL in capabilities.execution_modes:
+            local = True
+        else:
+            hosted = True
+    if hosted:
+        return ExtractionMode.HYBRID if local else ExtractionMode.CLOUD
+    return ExtractionMode.LOCAL
+
+
 @cli.command("reconstruct")
 def reconstruct_command(
     source: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True),
@@ -128,6 +169,178 @@ def reconstruct_command(
         f"{len(document.pages)} page(s), {element_count} element(s), "
         f"providers: {', '.join(provider_names) or 'none'}"
     )
+
+
+@cli.command("convert")
+def convert_command(
+    source: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="PDF or raster scan to convert into an editable document.",
+    ),
+    output: Path | None = typer.Argument(
+        None,
+        help="Destination file; defaults to SOURCE with a .docx extension.",
+    ),
+    ocr_provider: str | None = typer.Option(
+        None,
+        "--ocr-provider",
+        "--ocr-providers",
+        help=(
+            "Override the auto-detected local OCR engine with a provider or "
+            "comma-separated ordered fallback providers."
+        ),
+    ),
+    allow_cloud: bool = typer.Option(
+        False,
+        "--allow-cloud",
+        help="Explicitly allow an overriding hosted provider to receive document bytes.",
+    ),
+    languages: str | None = typer.Option(
+        None,
+        "--languages",
+        help="Comma-separated OCR language hints, e.g. vie,eng.",
+    ),
+    keep_intermediates: bool = typer.Option(
+        False,
+        "--keep-intermediates",
+        help=(
+            "Keep the generated Markdown and OCR JSON beside OUTPUT so the "
+            "Markdown can be reviewed, corrected, and re-run with `hybrid`."
+        ),
+    ),
+    strict_qa: bool = typer.Option(
+        False,
+        "--strict-qa",
+        help="Exit with code 3 when any hybrid QA gate fails instead of warning.",
+    ),
+    load_provider_plugins: bool = typer.Option(
+        False,
+        "--load-provider-plugins",
+        help="Opt in to installed docreconstruct OCR provider entry points.",
+    ),
+) -> None:
+    """Convert a scan to an editable document with one command.
+
+    Runs an installed local OCR engine (Tesseract is detected automatically),
+    generates the Markdown content authority and JSON geometry evidence,
+    then rebuilds the document through the same three-authority pipeline as
+    `hybrid` and prints its QA score.
+    """
+
+    import tempfile
+    from contextlib import nullcontext
+
+    from docreconstruct.extraction import ExtractionMode, extract_to_markdown
+    from docreconstruct.providers import registry
+    from docreconstruct.reconstruction.hybrid_job import run_hybrid_job
+
+    try:
+        source = source.expanduser().resolve()
+        destination = (output or source.with_suffix(".docx")).expanduser().resolve()
+        if destination == source:
+            raise ValueError("OUTPUT would overwrite SOURCE; pass a different destination")
+        if load_provider_plugins:
+            registry.load_entry_points()
+        provider_names = [
+            item.strip()
+            for item in (ocr_provider or "").split(",")
+            if item.strip() and item.strip().casefold() != "auto"
+        ]
+        if provider_names:
+            mode = _convert_extraction_mode(provider_names, registry)
+        else:
+            provider_names = _installed_local_engines()
+            if not provider_names:
+                raise RuntimeError(
+                    "no local OCR engine was found; install Tesseract "
+                    "(https://tesseract-ocr.github.io/tessdoc/Installation.html) "
+                    "or name an engine explicitly with --ocr-provider"
+                )
+            mode = ExtractionMode.LOCAL
+        if mode is not ExtractionMode.LOCAL and not allow_cloud:
+            raise ValueError(
+                "--ocr-provider selected a hosted service that would receive the "
+                "document; pass --allow-cloud to permit that, or choose a local engine"
+            )
+        language_names = [item.strip() for item in (languages or "").split(",") if item.strip()]
+        workspace = (
+            nullcontext(str(destination.parent / f"{destination.stem}.convert"))
+            if keep_intermediates
+            else tempfile.TemporaryDirectory(prefix="docreconstruct-convert-")
+        )
+        with workspace as raw_workdir:
+            intermediates = Path(raw_workdir)
+            intermediates.mkdir(parents=True, exist_ok=True)
+            markdown_path = intermediates / f"{source.stem}.ocr.md"
+            extraction = extract_to_markdown(
+                source,
+                output=markdown_path,
+                mode=mode,
+                providers=provider_names,
+                allow_cloud=allow_cloud,
+                languages=language_names,
+                require_geometry=True,
+                evidence_directory=intermediates / "evidence",
+                registry=registry,
+            )
+            if not extraction.evidence_outputs:
+                raise RuntimeError("OCR produced no canonical geometry evidence")
+            (intermediates / "extraction.run.json").write_text(
+                extraction.manifest.model_dump_json(indent=2) + "\n",
+                encoding="utf-8",
+            )
+            evidence_paths = tuple(path.resolve() for path in extraction.evidence_outputs)
+            job = run_hybrid_job(
+                markdown_path,
+                source,
+                evidence=evidence_paths,
+                evidence_provider_hints={str(path): "json" for path in evidence_paths},
+                output=destination,
+            )
+    except (DocReconstructError, ImportError, KeyError, RuntimeError, ValueError, OSError) as exc:
+        _fail(exc)
+        return
+    validation = job.validation
+    console.print(f"[green]Wrote[/green] {job.reconstruction.output.path}")
+    console.print(
+        "OCR: "
+        + ", ".join(extraction.manifest.successful_providers)
+        + f"; mode: {extraction.manifest.mode.value}"
+    )
+    console.print(
+        f"QA gates: {validation.score * 100:.2f}% "
+        f"({validation.passed_gates}/{validation.measured_gates} measured gates)"
+    )
+    if keep_intermediates:
+        console.print(f"[green]Kept intermediates[/green] {intermediates}")
+        console.print(f"  Markdown content authority: {markdown_path}")
+        for path in evidence_paths:
+            console.print(f"  OCR evidence: {path}")
+        console.print(
+            "Fix the Markdown by hand, then rebuild with: docreconstruct hybrid "
+            f'"{markdown_path}" "{source}" '
+            + " ".join(f'-E "{path}"' for path in evidence_paths)
+            + f' -o "{destination}"'
+        )
+    else:
+        console.print(
+            "Pass --keep-intermediates to keep the generated Markdown and OCR JSON "
+            "for review and correction."
+        )
+    if not validation.passed:
+        message = (
+            f"{validation.measured_gates - validation.passed_gates} QA gate(s) failed; "
+            "automatic quality is bounded by the OCR engine. Use --keep-intermediates "
+            "to review and correct the generated Markdown."
+        )
+        if strict_qa:
+            console.print(f"[red]{message}[/red]")
+            raise typer.Exit(code=3)
+        console.print(f"[yellow]{message}[/yellow]")
 
 
 @cli.command("extract")
@@ -1326,6 +1539,7 @@ def _callback(
 
 _COMMANDS = {
     "reconstruct",
+    "convert",
     "extract",
     "hybrid",
     "analyze",

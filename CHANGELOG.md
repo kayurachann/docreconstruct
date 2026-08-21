@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once
 the project reaches a stable API.
 
+## [Unreleased]
+
+### Added
+- `docreconstruct convert SOURCE [OUTPUT]` — one-command scan → editable DOCX.
+  Auto-detects an installed local OCR engine (Tesseract first, `--ocr-provider`
+  overrides), generates the Markdown content authority and JSON geometry
+  evidence automatically, runs the same three-authority pipeline as `hybrid`,
+  and prints its QA score. `--keep-intermediates` retains the generated
+  Markdown/JSON for hand correction and re-running `hybrid`; `--strict-qa`
+  fails closed when any QA gate fails.
+
 ## [0.1.0] — 2026-08-21
 
 First tagged release. Everything below was landed across seven merged pull
