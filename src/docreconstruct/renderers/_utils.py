@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import html.parser
+import logging
 import math
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -248,6 +249,35 @@ def element_metadata(element: Any) -> dict[str, Any]:
     if not data:
         data = mapping(value(element, "attributes", None))
     return data
+
+
+# XML 1.0 forbids these codepoints outright: no escape can represent them, so
+# lxml rejects the whole tree rather than the offending run. Tab, LF and CR are
+# legal and deliberately absent.
+_XML_ILLEGAL = {
+    codepoint: None
+    for codepoint in (*range(0x00, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0xFFFE, 0xFFFF)
+}
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def xml_safe_text(value: Any) -> str:
+    """Drop codepoints XML 1.0 forbids, keeping tab, newline and carriage return.
+
+    OCR of a page-break glyph or a damaged byte stream routinely yields a form
+    feed or a NUL. Passing one to python-docx aborts the entire document with a
+    ValueError from lxml, so a single bad character costs every other page.
+    """
+
+    text = "" if value is None else str(value)
+    cleaned = text.translate(_XML_ILLEGAL)
+    if cleaned != text:
+        _LOGGER.warning(
+            "removed %d XML-illegal control character(s) from rendered text",
+            len(text) - len(cleaned),
+        )
+    return cleaned
 
 
 def finite_number(number: Any, default: float = 0.0) -> float:

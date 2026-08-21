@@ -51,6 +51,7 @@ from docreconstruct.reconstruction.markdown_content import (
 from docreconstruct.reconstruction.markdown_inline import parse_markdown_inline
 from docreconstruct.reconstruction.math_omml import append_omml, equation_row_count
 from docreconstruct.reconstruction.scan_layout import PixelBox, ScanDocumentLayout, ScanRegionKind
+from docreconstruct.renderers._utils import xml_safe_text
 
 _FONT = "Times New Roman"
 _HAN_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -374,6 +375,7 @@ def _set_paragraph_mark_math_format(paragraph: Paragraph, size: float) -> None:
 
 
 def _math_runs(paragraph: Paragraph, value: str, *, size: float, bold: bool = False) -> None:
+    value = xml_safe_text(value)
     value = (
         value.replace("\\%", "%")
         .replace("\\times", "×")
@@ -404,6 +406,10 @@ def _add_rich_text(
     bold_prefix: bool = False,
     east_asia_heading: bool = False,
 ) -> None:
+    # OCR of a page-break glyph or a damaged byte stream yields codepoints XML
+    # 1.0 cannot represent at all. lxml then rejects the whole tree, so one bad
+    # character in one run used to cost the entire reconstructed document.
+    text = xml_safe_text(text)
     if bold_prefix:
         match = re.match(
             r"^((?:(?:Câu|Question|Q\.?|Bài|Item)\s*[\w.-]+\s*[:.)]"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from docx import Document as WordDocument
 from docx.oxml.ns import qn
 
@@ -95,3 +96,39 @@ def test_genuine_inline_math_still_parses() -> None:
     segments = parse_markdown_inline("Einstein wrote $E=mc^2$ in 1905.")
 
     assert [segment.value for segment in segments if segment.is_math] == ["E=mc^2"]
+
+
+def test_long_backtick_run_does_not_backtrack_quadratically() -> None:
+    """The code-span fence used to retry every length at every offset.
+
+    A run of backticks made the parser take 0.71s at 4000 characters and 68s at
+    8000 — a denial of service reachable from ordinary reviewed Markdown.
+    """
+
+    import time
+
+    timings = []
+    for length in (2000, 8000):
+        source = "`" * length
+        start = time.perf_counter()
+        segments = parse_markdown_inline(source)
+        timings.append(time.perf_counter() - start)
+        assert "".join(segment.source for segment in segments) == source
+
+    # Generous bound: the pre-fix parser needed ~68s for the 8000 case.
+    assert timings[1] < 1.0
+    # Doubling the input twice must not quadruple the time.
+    assert timings[1] < timings[0] * 12
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["`a`", "``a`b``", "```x``y```", "````deep````", "``unclosed`", "`$a$`"],
+)
+def test_code_spans_of_every_fence_width_stay_one_protected_slice(source: str) -> None:
+    """Capping the fence at three backticks would mis-slice ````deep````."""
+
+    segments = parse_markdown_inline(source)
+
+    assert "".join(segment.source for segment in segments) == source
+    assert [segment.value for segment in segments if segment.is_math] == []

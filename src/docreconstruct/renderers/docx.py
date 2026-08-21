@@ -26,6 +26,7 @@ from ._utils import (
     pages,
     table_rows,
     value,
+    xml_safe_text,
 )
 from .base import OptionalDependencyError, Renderer, RendererError
 
@@ -455,9 +456,9 @@ def _render_text_flow(
                         new_line=line_index > 0 and span_index == 0,
                     )
                     if separator:
-                        separator_run = paragraph.add_run(separator)
+                        separator_run = paragraph.add_run(xml_safe_text(separator))
                         _apply_text_style(separator_run, previous, api)
-                run = paragraph.add_run(element_text(span))
+                run = paragraph.add_run(xml_safe_text(element_text(span)))
                 _apply_text_style(run, span, api)
                 previous = span
 
@@ -489,9 +490,9 @@ class DOCXRenderer(Renderer[bytes]):
         document = api["Document"]()
         metadata = mapping(value(source_document, "metadata", None))
         if metadata.get("title"):
-            document.core_properties.title = str(metadata["title"])
+            document.core_properties.title = xml_safe_text(metadata["title"])
         if metadata.get("author"):
-            document.core_properties.author = str(metadata["author"])
+            document.core_properties.author = xml_safe_text(metadata["author"])
 
         source_pages = pages(source_document)
         for page_index, page in enumerate(source_pages):
@@ -526,7 +527,7 @@ class DOCXRenderer(Renderer[bytes]):
                         for row_index, row in enumerate(rows):
                             for column_index, text in enumerate(row):
                                 cell = table.cell(row_index, column_index)
-                                cell.text = text
+                                cell.text = xml_safe_text(text)
                         element_index += 1
                         continue
                 if kind in {"image", "figure", "chart", "signature", "stamp"}:
@@ -576,7 +577,7 @@ class DOCXRenderer(Renderer[bytes]):
 
                 paragraph = _paragraph_for(document, element)
                 _apply_paragraph_style(paragraph, element, api)
-                run = paragraph.add_run(text)
+                run = paragraph.add_run(xml_safe_text(text))
                 _apply_text_style(run, element, api)
                 element_index += 1
 

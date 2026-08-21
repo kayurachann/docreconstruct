@@ -481,3 +481,82 @@ def test_undecodable_picture_raises_a_named_renderer_error(tmp_path: Path) -> No
 
     with pytest.raises(RendererError, match="UnrecognizedImageError"):
         DOCXRenderer(allow_local_files=True, local_file_root=str(tmp_path)).render(document)
+
+
+@pytest.mark.parametrize(
+    ("label", "text", "expected"),
+    [
+        ("form feed", "page\x0cbreak", "pagebreak"),
+        ("nul", "a\x00b", "ab"),
+        ("vertical tab", "a\x0bb", "ab"),
+        ("bell", "a\x07b", "ab"),
+        ("tab is legal", "a\tb", "a\tb"),
+    ],
+)
+def test_control_characters_do_not_abort_the_docx_render(
+    label: str, text: str, expected: str
+) -> None:
+    """XML 1.0 cannot represent these at all, so lxml rejects the whole tree.
+
+    A single form feed from OCR of a page-break glyph used to cost the entire
+    document, with an uncaught ValueError rather than a renderer error. HTML
+    and Markdown were never affected.
+    """
+
+    from docx import Document as WordDocument
+
+    document = Document(
+        id="control",
+        pages=[
+            Page(
+                id="page-1",
+                number=1,
+                width=600,
+                height=800,
+                elements=[
+                    Element(
+                        id="before",
+                        type=ElementType.TEXT,
+                        bbox=BBox(x0=0, y0=0, x1=100, y1=20),
+                        text="clean before",
+                    ),
+                    Element(
+                        id="dirty",
+                        type=ElementType.TEXT,
+                        bbox=BBox(x0=0, y0=200, x1=100, y1=220),
+                        text=text,
+                    ),
+                    Element(
+                        id="after",
+                        type=ElementType.TEXT,
+                        bbox=BBox(x0=0, y0=400, x1=100, y1=420),
+                        text="clean after",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    rendered = WordDocument(io.BytesIO(DOCXRenderer().render(document)))
+    body = "\n".join(paragraph.text for paragraph in rendered.paragraphs)
+
+    assert expected in body
+    # The neighbouring elements must survive too.
+    assert "clean before" in body and "clean after" in body
+
+
+def test_control_characters_survive_the_hybrid_docx_text_path() -> None:
+    """The hybrid renderer is the primary reconstruction path and had the same hole."""
+
+    from docx import Document as WordDocument
+
+    from docreconstruct.reconstruction.hybrid_docx import _add_rich_text, _math_runs
+
+    document = WordDocument()
+    paragraph = document.add_paragraph()
+    _add_rich_text(paragraph, "page\x0cbreak", size=11.0)
+    assert paragraph.text == "pagebreak"
+
+    math_paragraph = document.add_paragraph()
+    _math_runs(math_paragraph, "x\x0c_{1}", size=11.0)
+    assert math_paragraph.text == "x1"

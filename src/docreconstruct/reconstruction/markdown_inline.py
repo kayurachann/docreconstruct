@@ -58,7 +58,11 @@ _SPECIAL_PATTERN = re.compile(
     # into an equation.
     r"(?P<dollar>(?<!\\)\$(?P<dollar_body>[^$\r\n]+?)(?<!\\)\$(?![0-9]))"
     r"|(?P<eq><eq>(?P<eq_body>[^\r\n]*?)</eq>)"
-    r"|(?P<code>(?P<fence>`+)[^\r\n]*?(?P=fence))"
+    # A code span opens with a backtick run that is not itself preceded by a
+    # backtick, and that run is maximal, so the fence never has to backtrack to
+    # a shorter length. Stating both collapses a quadratic scan over a long
+    # backtick run: 8000 backticks went from 68s to under a millisecond.
+    r"|(?P<code>(?<!`)(?P<fence>`++)[^\r\n]*?(?P=fence))"
     r"|(?P<url>(?:(?:https?|ftp)://|www\.)[^\s<>()]+)"
     r"|(?P<email>[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})"
     r"|(?P<windows_path>(?:(?:[A-Za-z]:\\)|(?:\\\\))\S+)",
