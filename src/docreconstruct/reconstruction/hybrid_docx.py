@@ -50,7 +50,11 @@ from docreconstruct.reconstruction.markdown_content import (
 )
 from docreconstruct.reconstruction.markdown_inline import parse_markdown_inline
 from docreconstruct.reconstruction.math_omml import append_omml, equation_row_count
-from docreconstruct.reconstruction.scan_layout import PixelBox, ScanDocumentLayout, ScanRegionKind
+from docreconstruct.reconstruction.scan_layout import (
+    PixelBox,
+    ScanDocumentLayout,
+    ScanRegionKind,
+)
 from docreconstruct.renderers._utils import xml_safe_text
 
 _FONT = "Times New Roman"
@@ -592,6 +596,17 @@ def _new_paragraph(
             rendered_size * 1.08,
             min(measured_row_height, line_height * 1.35),
         )
+        if source_geometry.row_gaps:
+            # A block whose own rows sit further apart than the page rhythm
+            # (a sparse answer section, a spaced-out form) keeps that spacing.
+            local_pitch = statistics.median(
+                height + gap
+                for height, gap in zip(
+                    source_geometry.row_heights, source_geometry.row_gaps, strict=False
+                )
+            )
+            if line_height < local_pitch <= line_height * 2.2:
+                line_height = local_pitch
         # Ordinary prose must retain the full detected body column.  Glyph ink
         # does not extend to both paragraph edges, and treating x0/x1 as Word
         # indents caused short footer/question lines to collapse into a narrow
@@ -1286,7 +1301,13 @@ def _render_options(
             else 0.0
         )
         row_floor = max(natural_floor, source_total / max(1, rows))
-        row_floor = min(row_floor, line_height * (2.35 if tall_math else 1.55))
+        # When the row height comes from the measured source grid it is the
+        # document's own rhythm; capping it at the global line height re-imposed
+        # single spacing on 1.5-spaced sources and shaved ~10pt off every
+        # option row, which is where a page's bottom third quietly went.
+        measured_rows = source_grid is not None or source_geometry is not None
+        row_ceiling = line_height * (2.35 if tall_math else 2.1 if measured_rows else 1.55)
+        row_floor = min(row_floor, row_ceiling)
         source_before = (
             min(source_geometry.gap_before, line_height * 1.20)
             if source_geometry is not None
