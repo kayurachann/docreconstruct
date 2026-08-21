@@ -68,6 +68,39 @@ def _installed_local_engines() -> list[str]:
     return available
 
 
+def _convert_engine_plan(source: Path) -> tuple[list[str], str | None]:
+    """Choose default engines, preferring a loss-free native PDF text layer.
+
+    A born-digital PDF carries exact wording and geometry; OCR-ing its raster
+    would discard both. Image-heavy PDFs that still carry a text layer keep
+    the OCR default (their thousands of embedded images make the native route
+    much slower) but return a note so the user can opt in. Classification is
+    best-effort — any analysis failure simply falls back to installed OCR.
+    """
+
+    engines: list[str] = []
+    note: str | None = None
+    if source.suffix.casefold() == ".pdf":
+        try:
+            from docreconstruct.preprocessing import SourceKind, analyze_source
+
+            analysis = analyze_source(source)
+        except Exception:  # noqa: BLE001 - classification is best-effort
+            analysis = None
+        if analysis is not None and analysis.pages:
+            if analysis.kind is SourceKind.NATIVE:
+                engines.append("native_pdf")
+            elif any(page.native_characters >= 20 for page in analysis.pages):
+                note = (
+                    "This PDF carries an embedded text layer alongside heavy image "
+                    "content. OCR is the default here; --ocr-provider native_pdf "
+                    "uses the exact embedded wording instead (slower on "
+                    "formula-heavy files)."
+                )
+    engines.extend(_installed_local_engines())
+    return engines, note
+
+
 def _convert_extraction_mode(provider_names: list[str], registry: Any) -> Any:
     """Pick the narrowest extraction mode the named providers can satisfy."""
 
@@ -223,12 +256,14 @@ def convert_command(
         help="Opt in to installed docreconstruct OCR provider entry points.",
     ),
 ) -> None:
-    """Convert a scan to an editable document with one command.
+    """Convert a scan or PDF to an editable document with one command.
 
-    Runs an installed local OCR engine (Tesseract is detected automatically),
-    generates the Markdown content authority and JSON geometry evidence,
-    then rebuilds the document through the same three-authority pipeline as
-    `hybrid` and prints its QA score.
+    Born-digital PDFs use their exact embedded text layer directly; scans run
+    through an installed local OCR engine (Tesseract is detected
+    automatically). Either way the Markdown content authority and JSON
+    geometry evidence are generated for you, then the document is rebuilt
+    through the same three-authority pipeline as `hybrid` and its QA score is
+    printed.
     """
 
     import tempfile
@@ -253,13 +288,15 @@ def convert_command(
         if provider_names:
             mode = _convert_extraction_mode(provider_names, registry)
         else:
-            provider_names = _installed_local_engines()
+            provider_names, engine_note = _convert_engine_plan(source)
             if not provider_names:
                 raise RuntimeError(
                     "no local OCR engine was found; install Tesseract "
                     "(https://tesseract-ocr.github.io/tessdoc/Installation.html) "
                     "or name an engine explicitly with --ocr-provider"
                 )
+            if engine_note:
+                console.print(engine_note)
             mode = ExtractionMode.LOCAL
         if mode is not ExtractionMode.LOCAL and not allow_cloud:
             raise ValueError(
@@ -267,6 +304,12 @@ def convert_command(
                 "document; pass --allow-cloud to permit that, or choose a local engine"
             )
         language_names = [item.strip() for item in (languages or "").split(",") if item.strip()]
+        # Hybrid reconstruction crops figures from the source pixels, so raw
+        # image bytes in the native evidence would be pure dead weight.
+        extraction_provider_options: dict[str, dict[str, Any]] | None = None
+        if "native_pdf" in provider_names:
+            extraction_provider_options = {name: {} for name in provider_names}
+            extraction_provider_options["native_pdf"] = {"include_image_bytes": False}
         workspace = (
             nullcontext(str(destination.parent / f"{destination.stem}.convert"))
             if keep_intermediates
@@ -284,6 +327,7 @@ def convert_command(
                 allow_cloud=allow_cloud,
                 languages=language_names,
                 require_geometry=True,
+                provider_options=extraction_provider_options,
                 evidence_directory=intermediates / "evidence",
                 registry=registry,
             )

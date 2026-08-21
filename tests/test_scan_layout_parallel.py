@@ -187,6 +187,42 @@ def test_unqualified_pdf_is_rejected_before_any_raster_is_decoded(
     assert decoded == []
 
 
+def test_born_digital_page_with_one_small_image_is_not_treated_as_a_scan(
+    tmp_path: Path,
+) -> None:
+    """A sole embedded logo or figure must not become the page raster.
+
+    pypdf exposes no placement geometry, so the fast path used to accept any
+    single-image page and analyze an 80x60 figure as if it were the whole
+    612x792 page, which collapsed every downstream evidence projection with
+    aspect mismatches. Aspect disagreement now routes the document to the
+    rendering fallback, which reports the true page frame.
+    """
+
+    pymupdf = pytest.importorskip("pymupdf")
+    figure = io.BytesIO()
+    Image.new("RGB", (80, 60), "navy").save(figure, format="PNG")
+    path = tmp_path / "digital.pdf"
+    document = pymupdf.open()
+    try:
+        page = document.new_page(width=612, height=792)
+        page.insert_text((72, 96), "Body text keeps its own page frame.")
+        page.insert_image(pymupdf.Rect(72, 160, 232, 280), stream=figure.getvalue())
+        document.save(str(path))
+    finally:
+        document.close()
+
+    with pytest.raises(ValueError, match="does not span the page"):
+        scan_layout._extract_with_pypdf(path)
+
+    layout = scan_layout.analyze_scan_source(path)
+    assert len(layout.pages) == 1
+    rendered = layout.pages[0]
+    # The fallback renders the true page frame; its raster keeps the page's
+    # 612x792 display aspect instead of the embedded figure's 80x60 one.
+    assert rendered.width / rendered.height == pytest.approx(612 / 792, rel=0.01)
+
+
 def _rotated_scan_pdf(path: Path, rotation: int) -> None:
     """Write a one-raster scan page carrying ``/Rotate``, as scanners emit."""
 
