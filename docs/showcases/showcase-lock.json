@@ -1,0 +1,23 @@
+{
+  "calculus-derivation": {
+    "media_parts": 0,
+    "office_math": 18,
+    "pages": 1,
+    "qa_gates_passed": 34,
+    "qa_gates_total": 35
+  },
+  "math-exam": {
+    "media_parts": 0,
+    "office_math": 30,
+    "pages": 1,
+    "qa_gates_passed": 26,
+    "qa_gates_total": 35
+  },
+  "vietnamese-exam": {
+    "media_parts": 0,
+    "office_math": 0,
+    "pages": 1,
+    "qa_gates_passed": 34,
+    "qa_gates_total": 35
+  }
+}

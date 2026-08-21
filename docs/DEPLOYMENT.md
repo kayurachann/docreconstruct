@@ -1,9 +1,16 @@
-# Running docreconstruct as a public website on free third-party infrastructure
+# Self-hosting docreconstruct (for yourself or a trusted group)
 
-This guide describes a deployment where users only upload files in their
-browser and download a finished, editable Word document — no local install, no
-cloud OCR credential, no paid service anywhere in the stack. Everything below
-is free software on infrastructure with a genuinely free tier.
+> **Not ready for the public internet.** The API has no authentication, no
+> rate limiting and no job queue; CPU-bound work (including 8–12 s LibreOffice
+> renders) runs synchronously inside the request. Hosting it for strangers
+> also means *receiving strangers' documents* — a privacy responsibility this
+> project does not manage for you. Until auth, rate limiting and a worker
+> queue exist, deploy only for yourself or people you trust, behind access
+> control you operate (VPN, reverse-proxy auth, a private network).
+
+This guide describes a self-hosted deployment where you upload files in a
+browser and download an editable Word document — no local Python install on
+the client, no cloud OCR credential, no paid service anywhere in the stack.
 
 ## What the stack is
 
@@ -51,9 +58,9 @@ Tesseract + LibreOffice is roughly 1.5 GB.
 
 | Host | Free tier | Fit |
 | --- | --- | --- |
-| **Hugging Face Spaces** (Docker Space) | 2 vCPU, 16 GB RAM, no credit card | Best starting point. Add `app_port: 8000` to the Space README metadata. Sleeps after inactivity (cold start ~1 min); public URL and HTTPS included. |
+| **Hugging Face Spaces** (Docker Space) | 2 vCPU, 16 GB RAM, no credit card | Convenient for *your own* use. A Space URL is public by default — set the Space to private, or treat anything submitted there as exposed. Add `app_port: 8000` to the Space README metadata; sleeps after inactivity. |
 | **Oracle Cloud Always Free** | 4 ARM OCPU, 24 GB RAM VM, always-on | The most capable truly free option; a real VM you operate (card required at signup, not charged). `docker compose up -d` and a reverse proxy. |
-| **Google Cloud Run** | 2M requests/month, scale-to-zero | Good for bursty public use; set memory ≥ 2 GiB. Cold starts are noticeable with a 1.5 GB image. Card required. |
+| **Google Cloud Run** | 2M requests/month, scale-to-zero | Scale-to-zero fits intermittent personal use; set memory ≥ 2 GiB. Cold starts are noticeable with a 1.5 GB image. Card required. |
 
 Render/Railway/Fly free tiers are too small for LibreOffice (512 MB-class
 instances) — use the slim `runtime` target there and skip render QA, or skip
@@ -80,12 +87,14 @@ say exactly how good each result was.
 
 ## Operational notes
 
-- The API has no authentication or rate limiting; put a reverse proxy or the
-  host platform's controls in front of anything public.
+- The API has no authentication or rate limiting — that is why this page is
+  titled self-hosting, not public deployment. Do not expose it unprotected.
 - Uploads are staged under the process temp directory and deleted after each
   request; error messages redact server paths; page and byte budgets refuse
   decompression-bomb-shaped inputs. These are already in the codebase.
-- The static `site/` can be served by any static host (GitHub Pages included);
+- The GitHub Pages deployment of `site/` has been taken down until a real
+  backend exists — a form that cannot submit anywhere only costs credibility.
+  The static `site/` can still be served next to your own private backend;
   point its endpoint field at the API URL. Its provider list is driven by
   `/v1/hybrid/capabilities`, so a server offering `tesseract_local` shows the
   free engine automatically.
