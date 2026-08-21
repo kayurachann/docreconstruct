@@ -220,7 +220,13 @@ jobs:
             if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then break; fi
             sleep 2
           done
-          curl -fsS http://127.0.0.1:8000/health
+          if ! curl -fsS http://127.0.0.1:8000/health; then
+            echo '--- container state ---'
+            docker ps -a
+            echo '--- container logs ---'
+            docker logs dr
+            exit 7
+          fi
           curl -fsS http://127.0.0.1:8000/v1/hybrid/capabilities | tee capabilities.json
           python - <<'PY'
           import json
