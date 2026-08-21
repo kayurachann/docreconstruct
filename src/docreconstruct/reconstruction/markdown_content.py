@@ -1,8 +1,27 @@
-"""Lossless structural parsing for Markdown used as a content authority."""
+"""Lossless structural parsing for Markdown used as a content authority.
+
+Two front-ends produce the same block-token stream:
+
+* ``markdown-it`` (the default when markdown-it-py is installed) delegates
+  block segmentation — headings, fences, thematic breaks, HTML blocks,
+  paragraphs, lists, block quotes — to a maintained CommonMark
+  implementation.  Only segmentation is delegated: block text is always
+  taken verbatim from the source lines, never from rendered inline HTML,
+  so the content authority is preserved character for character.
+* ``legacy`` is the project's original line scanner, kept selectable behind
+  ``DOCRECONSTRUCT_MARKDOWN_FRONTEND=legacy`` while the two run in parallel.
+
+Both front-ends share one domain-classification layer (display-math
+splitting, exam options, group labels, heading heuristics, structural
+roles), so a front-end choice can only move block boundaries, never rewrite
+text.  ``scripts/diff_markdown_frontends.py`` diffs the two block streams
+over a corpus.
+"""
 
 from __future__ import annotations
 
 import html
+import os
 import re
 from collections.abc import Mapping
 from enum import StrEnum
@@ -11,6 +30,13 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from docreconstruct.renderers._utils import rows_and_spans_from_html
+
+try:  # Segmentation library; the legacy scanner remains the offline fallback.
+    from markdown_it import MarkdownIt
+except ImportError:  # pragma: no cover - exercised on installs without the wheel
+    MarkdownIt = None  # type: ignore[assignment,misc]
+
+MARKDOWN_FRONTEND_ENV = "DOCRECONSTRUCT_MARKDOWN_FRONTEND"
 
 
 class MarkdownBlockKind(StrEnum):
@@ -80,7 +106,7 @@ _GROUP_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 _NUMBERED_GROUP_PATTERN = re.compile(r"^(?P<label>\d{1,4}[.)])\s+")
-_SOLUTION_GROUP_PATTERN = re.compile(r"^(?P<label>[A-Z]\s*[-\u2012-\u2015]\s*\d+)\b")
+_SOLUTION_GROUP_PATTERN = re.compile(r"^(?P<label>[A-Z]\s*[-‒-―]\s*\d+)\b")
 _DISPLAY_MATH_PATTERN = re.compile(r"^\$\$\s*(.*?)\s*\$\$$", flags=re.DOTALL)
 # Display math is a block construct even when prose surrounds it on the same
 # line, so a paragraph carrying one is split around it rather than keeping the
@@ -113,6 +139,8 @@ _ESCAPED_BLOCK_MARKER = re.compile(
     flags=re.MULTILINE,
 )
 
+_TokenTuple = tuple[MarkdownBlockKind, str, dict[str, str | int]]
+
 
 def _unescape_block_markers(value: str) -> str:
     return _ESCAPED_BLOCK_MARKER.sub(r"\1", value)
@@ -122,7 +150,7 @@ def _plain(value: str) -> str:
     # The block-marker escape is deliberately left in place here: block kinds
     # are decided from this string, and unescaping first would let ``\- item``
     # be classified as a list again. It is stripped once, on the finished block.
-    return html.unescape(value.strip()).replace("\u00a0", " ")
+    return html.unescape(value.strip()).replace(" ", " ")
 
 
 def _html_attributes(value: str) -> dict[str, str]:
@@ -325,22 +353,26 @@ def _group_label(text: str) -> str | None:
     return match.group("label").strip().casefold() if match else None
 
 
-def parse_markdown_content(source: str | Path) -> MarkdownContent:
-    """Parse Markdown locally while retaining exact text, HTML tables, and assets."""
+class _LineScanner:
+    """The shared block machine: exact text in, classified block tokens out.
 
-    path = Path(source).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    # ``utf-8-sig`` drops a leading BOM if present; a BOM glued to the
-    # first "#" turns the document title into an ordinary paragraph.
-    raw_lines = path.read_text(encoding="utf-8-sig").splitlines()
-    tokens: list[tuple[MarkdownBlockKind, str, dict[str, str | int]]] = []
-    paragraph: list[str] = []
-    list_indent: int | None = None
-    in_code = False
-    code_lines: list[str] = []
+    The legacy front-end feeds it every source line; the markdown-it
+    front-end feeds it the line slices that CommonMark segmentation
+    delimits.  All domain classification — display-math splitting, option
+    splitting, heading heuristics — lives here so the two front-ends can
+    never disagree about what a piece of text means, only about where a
+    block begins and ends.
+    """
+
+    def __init__(self) -> None:
+        self.tokens: list[_TokenTuple] = []
+        self._paragraph: list[str] = []
+        self._list_indent: int | None = None
+        self._in_code = False
+        self._code_lines: list[str] = []
 
     def append_text(
+        self,
         value: str,
         metadata: Mapping[str, str | int] | None = None,
     ) -> None:
@@ -349,7 +381,7 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             return
         display_math = _DISPLAY_MATH_PATTERN.match(value)
         if display_math:
-            tokens.append(
+            self.tokens.append(
                 (
                     MarkdownBlockKind.EQUATION,
                     display_math.group(1).strip(),
@@ -363,8 +395,8 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             for span in spans:
                 head = value[cursor : span.start()].strip()
                 if head:
-                    append_text(head, metadata)
-                tokens.append(
+                    self.append_text(head, metadata)
+                self.tokens.append(
                     (
                         MarkdownBlockKind.EQUATION,
                         span.group("body").strip(),
@@ -374,19 +406,19 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
                 cursor = span.end()
             tail = value[cursor:].strip()
             if tail:
-                append_text(tail, metadata)
+                self.append_text(tail, metadata)
             return
         if _SECTION_START_PATTERN.match(value):
             split = _CAPITALIZED_GROUP_PATTERN.search(value)
             if split is not None:
-                tokens.append(
+                self.tokens.append(
                     (
                         MarkdownBlockKind.HEADING,
                         value[: split.start()].rstrip(),
                         dict(metadata or {}),
                     )
                 )
-                append_text(value[split.end() :], metadata)
+                self.append_text(value[split.end() :], metadata)
                 return
         for option in _split_options(value):
             kind = (
@@ -398,47 +430,173 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
                 if _looks_like_heading(option)
                 else MarkdownBlockKind.PARAGRAPH
             )
-            tokens.append((kind, option, dict(metadata or {})))
+            self.tokens.append((kind, option, dict(metadata or {})))
 
-    def flush_paragraph() -> None:
-        nonlocal list_indent
-        list_indent = None
-        if not paragraph:
+    def flush_paragraph(self) -> None:
+        self._list_indent = None
+        if not self._paragraph:
             return
-        value = " ".join(line.strip() for line in paragraph)
-        paragraph.clear()
-        append_text(value)
+        value = " ".join(line.strip() for line in self._paragraph)
+        self._paragraph.clear()
+        self.append_text(value)
 
-    index = 0
-    while index < len(raw_lines):
-        line = raw_lines[index]
-        stripped = line.strip()
-        if stripped.startswith("```"):
-            flush_paragraph()
-            if in_code:
-                tokens.append((MarkdownBlockKind.CODE, "\n".join(code_lines), {}))
-                code_lines = []
-            in_code = not in_code
+    def feed(self, raw_lines: list[str]) -> None:
+        """Process source lines exactly as the original scanner did."""
+
+        index = 0
+        while index < len(raw_lines):
+            line = raw_lines[index]
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                self.flush_paragraph()
+                if self._in_code:
+                    self.tokens.append((MarkdownBlockKind.CODE, "\n".join(self._code_lines), {}))
+                    self._code_lines = []
+                self._in_code = not self._in_code
+                index += 1
+                continue
+            if self._in_code:
+                self._code_lines.append(line)
+                index += 1
+                continue
+            if not stripped:
+                self.flush_paragraph()
+                index += 1
+                continue
+            if _THEMATIC_BREAK_PATTERN.fullmatch(stripped):
+                self.flush_paragraph()
+                self.tokens.append((MarkdownBlockKind.RULE, "", {"syntax": stripped}))
+                index += 1
+                continue
+            html_image = _html_image(stripped)
+            if html_image is not None:
+                self.flush_paragraph()
+                alt, image_source, image_metadata = html_image
+                self.tokens.append(
+                    (
+                        MarkdownBlockKind.IMAGE,
+                        _plain(alt),
+                        {**image_metadata, "source": image_source},
+                    )
+                )
+                index += 1
+                continue
+            html_container = _html_text_container(stripped)
+            if html_container is not None:
+                self.flush_paragraph()
+                value, container_metadata = html_container
+                self.append_text(value, container_metadata)
+                index += 1
+                continue
+            heading = _HEADING_PATTERN.match(stripped)
+            if heading:
+                self.flush_paragraph()
+                self.tokens.append(
+                    (
+                        MarkdownBlockKind.HEADING,
+                        _plain(heading.group(2)),
+                        {"level": len(heading.group(1))},
+                    )
+                )
+                index += 1
+                continue
+            image = _IMAGE_PATTERN.match(stripped)
+            if image:
+                self.flush_paragraph()
+                self.tokens.append(
+                    (
+                        MarkdownBlockKind.IMAGE,
+                        _plain(image.group(1)),
+                        {"source": image.group(2).strip()},
+                    )
+                )
+                index += 1
+                continue
+            if stripped.lower().startswith("<table"):
+                self.flush_paragraph()
+                table_lines = [stripped]
+                while "</table>" not in table_lines[-1].lower() and index + 1 < len(raw_lines):
+                    index += 1
+                    table_lines.append(raw_lines[index].strip())
+                self.tokens.append((MarkdownBlockKind.TABLE, "\n".join(table_lines), {}))
+                index += 1
+                continue
+            # A list marker starts its own block.  Without this every item fell
+            # through to the paragraph buffer, and `flush_paragraph` joined the
+            # whole list into one run-on block whose kind was decided by the first
+            # marker alone — four bullets became a single justified Word paragraph,
+            # and consecutive numbered items could not start their own groups.
+            indent = len(line) - len(line.lstrip())
+            if _LIST_ITEM_PATTERN.match(stripped):
+                self.flush_paragraph()
+                self._list_indent = indent
+            elif self._list_indent is not None and indent <= self._list_indent:
+                # Only a more-indented line continues the open item; anything at or
+                # left of the marker has left the list.
+                self.flush_paragraph()
+            self._paragraph.append(stripped)
             index += 1
-            continue
-        if in_code:
-            code_lines.append(line)
-            index += 1
-            continue
+
+    def finish(self) -> list[_TokenTuple]:
+        self.flush_paragraph()
+        if self._in_code and self._code_lines:
+            self.tokens.append((MarkdownBlockKind.CODE, "\n".join(self._code_lines), {}))
+            self._in_code = False
+            self._code_lines = []
+        return self.tokens
+
+
+def _legacy_tokens(raw_lines: list[str]) -> list[_TokenTuple]:
+    scanner = _LineScanner()
+    scanner.feed(raw_lines)
+    return scanner.finish()
+
+
+def _matching_close(stream: list, index: int, open_type: str, close_type: str) -> int:
+    depth = 0
+    for position in range(index, len(stream)):
+        token_type = stream[position].type
+        if token_type == open_type:
+            depth += 1
+        elif token_type == close_type:
+            depth -= 1
+            if depth == 0:
+                return position
+    return len(stream) - 1
+
+
+_LIST_OPEN_TYPES = {"bullet_list_open", "ordered_list_open"}
+
+
+def _feed_html_lines(scanner: _LineScanner, raw_lines: list[str], start: int, stop: int) -> int:
+    """Route an HTML block through the shared per-line handlers.
+
+    Returns the first line index not consumed.  A ``<table>`` runs to its
+    closing tag even when blank lines split it across CommonMark HTML
+    blocks, matching the legacy scanner's whole-table consumption.
+    """
+
+    index = start
+    while index < stop:
+        stripped = raw_lines[index].strip()
         if not stripped:
-            flush_paragraph()
+            scanner.flush_paragraph()
             index += 1
             continue
-        if _THEMATIC_BREAK_PATTERN.fullmatch(stripped):
-            flush_paragraph()
-            tokens.append((MarkdownBlockKind.RULE, "", {"syntax": stripped}))
+        if stripped.lower().startswith("<table"):
+            scanner.flush_paragraph()
+            table_lines = [stripped]
+            while "</table>" not in table_lines[-1].lower() and index + 1 < len(raw_lines):
+                index += 1
+                table_lines.append(raw_lines[index].strip())
+            scanner.tokens.append((MarkdownBlockKind.TABLE, "\n".join(table_lines), {}))
             index += 1
             continue
         html_image = _html_image(stripped)
         if html_image is not None:
-            flush_paragraph()
+            scanner.flush_paragraph()
             alt, image_source, image_metadata = html_image
-            tokens.append(
+            scanner.tokens.append(
                 (
                     MarkdownBlockKind.IMAGE,
                     _plain(alt),
@@ -449,62 +607,123 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
             continue
         html_container = _html_text_container(stripped)
         if html_container is not None:
-            flush_paragraph()
+            scanner.flush_paragraph()
             value, container_metadata = html_container
-            append_text(value, container_metadata)
+            scanner.append_text(value, container_metadata)
             index += 1
             continue
-        heading = _HEADING_PATTERN.match(stripped)
-        if heading:
-            flush_paragraph()
-            tokens.append(
-                (
-                    MarkdownBlockKind.HEADING,
-                    _plain(heading.group(2)),
-                    {"level": len(heading.group(1))},
-                )
-            )
-            index += 1
-            continue
-        image = _IMAGE_PATTERN.match(stripped)
-        if image:
-            flush_paragraph()
-            tokens.append(
-                (
-                    MarkdownBlockKind.IMAGE,
-                    _plain(image.group(1)),
-                    {"source": image.group(2).strip()},
-                )
-            )
-            index += 1
-            continue
-        if stripped.lower().startswith("<table"):
-            flush_paragraph()
-            table_lines = [stripped]
-            while "</table>" not in table_lines[-1].lower() and index + 1 < len(raw_lines):
-                index += 1
-                table_lines.append(raw_lines[index].strip())
-            tokens.append((MarkdownBlockKind.TABLE, "\n".join(table_lines), {}))
-            index += 1
-            continue
-        # A list marker starts its own block.  Without this every item fell
-        # through to the paragraph buffer, and `flush_paragraph` joined the
-        # whole list into one run-on block whose kind was decided by the first
-        # marker alone — four bullets became a single justified Word paragraph,
-        # and consecutive numbered items could not start their own groups.
-        indent = len(line) - len(line.lstrip())
-        if _LIST_ITEM_PATTERN.match(stripped):
-            flush_paragraph()
-            list_indent = indent
-        elif list_indent is not None and indent <= list_indent:
-            # Only a more-indented line continues the open item; anything at or
-            # left of the marker has left the list.
-            flush_paragraph()
-        paragraph.append(stripped)
+        scanner._paragraph.append(stripped)
         index += 1
-    flush_paragraph()
-    if in_code and code_lines:
-        tokens.append((MarkdownBlockKind.CODE, "\n".join(code_lines), {}))
+    scanner.flush_paragraph()
+    return index
+
+
+def _markdown_it_tokens(raw_lines: list[str]) -> list[_TokenTuple]:
+    """Segment with CommonMark, classify with the shared line machine."""
+
+    parser = MarkdownIt("commonmark")
+    # Two deliberate divergences from pure CommonMark, both inherited from
+    # the corpus this parser serves: a ``---`` line after prose is a
+    # thematic break (not a setext heading), and four-space indentation is
+    # OCR page layout (not an indented code block).
+    parser.disable(["lheading", "code"])
+    stream = parser.parse("\n".join(raw_lines))
+    scanner = _LineScanner()
+    consumed_line = 0
+    index = 0
+    while index < len(stream):
+        token = stream[index]
+        if token.map is not None and token.map[1] <= consumed_line:
+            index += 1
+            continue
+        if token.type == "heading_open":
+            line = raw_lines[token.map[0]].strip() if token.map is not None else ""
+            heading = _HEADING_PATTERN.match(line)
+            if heading is not None:
+                scanner.tokens.append(
+                    (
+                        MarkdownBlockKind.HEADING,
+                        _plain(heading.group(2)),
+                        {"level": len(heading.group(1))},
+                    )
+                )
+            index = _matching_close(stream, index, "heading_open", "heading_close")
+        elif token.type == "fence":
+            body = token.content[:-1] if token.content.endswith("\n") else token.content
+            scanner.tokens.append((MarkdownBlockKind.CODE, body, {}))
+        elif token.type == "hr":
+            line = raw_lines[token.map[0]].strip() if token.map is not None else ""
+            scanner.tokens.append((MarkdownBlockKind.RULE, "", {"syntax": line}))
+        elif token.type == "html_block" and token.map is not None:
+            consumed_line = _feed_html_lines(
+                scanner,
+                raw_lines,
+                max(token.map[0], consumed_line),
+                token.map[1],
+            )
+        elif token.type == "paragraph_open" and token.map is not None:
+            # Paragraph, list, and quote extents come from CommonMark, but the
+            # lines themselves run through the shared machine so per-line
+            # semantics (image lines, list-marker splits, indentation rules)
+            # cannot drift between the two front-ends.
+            scanner.feed(raw_lines[max(token.map[0], consumed_line) : token.map[1]])
+            scanner.flush_paragraph()
+            index = _matching_close(stream, index, "paragraph_open", "paragraph_close")
+        elif token.type in _LIST_OPEN_TYPES and token.map is not None:
+            scanner.feed(raw_lines[max(token.map[0], consumed_line) : token.map[1]])
+            scanner.flush_paragraph()
+            index = _matching_close(
+                stream,
+                index,
+                token.type,
+                token.type.replace("_open", "_close"),
+            )
+        elif token.type == "blockquote_open" and token.map is not None:
+            scanner.feed(raw_lines[max(token.map[0], consumed_line) : token.map[1]])
+            scanner.flush_paragraph()
+            index = _matching_close(stream, index, "blockquote_open", "blockquote_close")
+        index += 1
+    return scanner.finish()
+
+
+def _resolve_frontend(requested: str | None) -> str:
+    value = (requested or os.environ.get(MARKDOWN_FRONTEND_ENV, "")).strip().casefold()
+    if not value:
+        return "markdown-it" if MarkdownIt is not None else "legacy"
+    if value in {"markdown-it", "markdown_it", "markdownit"}:
+        if MarkdownIt is None:
+            raise ValueError(
+                "the markdown-it front-end was requested but markdown-it-py is not installed"
+            )
+        return "markdown-it"
+    if value == "legacy":
+        return "legacy"
+    raise ValueError(f"unknown Markdown front-end {value!r}; use 'markdown-it' or 'legacy'")
+
+
+def parse_markdown_content(
+    source: str | Path,
+    *,
+    frontend: str | None = None,
+) -> MarkdownContent:
+    """Parse Markdown locally while retaining exact text, HTML tables, and assets.
+
+    ``frontend`` selects the block segmenter: ``"markdown-it"`` (default when
+    markdown-it-py is installed), or ``"legacy"`` for the original line
+    scanner.  The ``DOCRECONSTRUCT_MARKDOWN_FRONTEND`` environment variable
+    selects it process-wide; an explicit argument wins.
+    """
+
+    path = Path(source).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    # ``utf-8-sig`` drops a leading BOM if present; a BOM glued to the
+    # first "#" turns the document title into an ordinary paragraph.
+    raw_lines = path.read_text(encoding="utf-8-sig").splitlines()
+    if _resolve_frontend(frontend) == "markdown-it":
+        tokens = _markdown_it_tokens(raw_lines)
+    else:
+        tokens = _legacy_tokens(raw_lines)
 
     blocks: list[MarkdownBlock] = []
     current_group: str | None = None
@@ -553,6 +772,7 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
 
 
 __all__ = [
+    "MARKDOWN_FRONTEND_ENV",
     "MarkdownBlock",
     "MarkdownBlockKind",
     "MarkdownContent",
