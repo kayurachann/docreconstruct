@@ -39,6 +39,9 @@ dependencies = [
   # Compiled exact Levenshtein for the evaluator; metrics.py keeps a
   # dependency-free Myers fallback for installs without a wheel.
   "rapidfuzz>=3.9,<4",
+  # CommonMark block segmentation for the content authority; the legacy
+  # line scanner stays selectable via DOCRECONSTRUCT_MARKDOWN_FRONTEND.
+  "markdown-it-py>=3,<5",
 ]
 
 [project.urls]
