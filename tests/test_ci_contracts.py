@@ -96,3 +96,40 @@ def test_coverage_policy_tracks_every_fusion_implementation_module() -> None:
         "src/docreconstruct/normalization/fusion_sources.py",
         "src/docreconstruct/normalization/fusion_spatial.py",
     }
+
+
+def test_asgi_entry_point_imports_without_optional_numeric_stack() -> None:
+    """The slim server image installs only the ``api,pdf,docx`` extras.
+
+    A module-level ``import numpy`` anywhere on the entry point's import path
+    makes every such container die at boot with ModuleNotFoundError — which is
+    exactly how the Docker smoke-test job failed the first time it ran the
+    shipped image. Heavy numeric imports must stay lazy.
+    """
+
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = (
+        "import sys\n"
+        "class Blocker:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name == 'numpy' or name.startswith('numpy.'):\n"
+        "            raise ModuleNotFoundError(\"No module named 'numpy'\")\n"
+        "        return None\n"
+        "sys.meta_path.insert(0, Blocker())\n"
+        "import docreconstruct.api.app\n"
+        "print('ok')\n"
+    )
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=root,
+        env={**__import__("os").environ, "PYTHONPATH": str(root / "src")},
+    )
+
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert "ok" in result.stdout

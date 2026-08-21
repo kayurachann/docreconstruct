@@ -63,4 +63,17 @@ material visible in these user-provided examples. Original rights remain with
 their respective owners. Inclusion does not imply endorsement. Review source
 rights and privacy before redistributing or reusing any showcase asset.
 
+## Regenerating every showcase
+
+Each showcase directory now commits its `content.md` (the content authority,
+recovered from the shipped `editable.docx` — the original review files were
+never published). CI rebuilds every showcase from these inputs on each push
+and fails when the result drifts from [showcase-lock.json](showcase-lock.json):
+
+```bash
+python scripts/reproduce_showcases.py
+```
+
+A showcase that cannot be regenerated is marketing, not evidence; these can be.
+
 See [SHA256SUMS.txt](SHA256SUMS.txt) for exact artifact fingerprints.
