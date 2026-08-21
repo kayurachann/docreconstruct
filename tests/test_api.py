@@ -934,6 +934,11 @@ def test_empty_upload_is_rejected(client: TestClient) -> None:
         },
         {"provider_options": {"custom": {"template_path": "/etc/private-template.docx"}}},
         {"renderer_options": {"template_path": "/etc/private-template.docx"}},
+        # ``tesseract_local`` passes this straight to ``subprocess.run`` as
+        # ``argv[0]``, so an upload client must not be able to set it.
+        {"provider_options": {"tesseract_local": {"executable": "/bin/sh"}}},
+        {"provider_options": {"custom": {"tesseract_executable": "/bin/sh"}}},
+        {"provider_options": {"custom": {"command": "/bin/sh"}}},
     ],
 )
 def test_upload_api_rejects_server_file_options(

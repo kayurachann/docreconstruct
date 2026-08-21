@@ -78,9 +78,13 @@ class AnalyzeOptions(BaseModel):
             "authorization",
             "base_url",
             "client_secret",
+            "binary",
+            "cmd",
+            "command",
             "credential",
             "credentials",
             "endpoint",
+            "executable",
             "file",
             "filename",
             "input_file",
@@ -107,6 +111,11 @@ class AnalyzeOptions(BaseModel):
             "token",
         }
         secret_suffixes = ("_api_key", "_password", "_secret", "_token")
+        # Subprocess-backed providers resolve these into ``argv[0]``, so an
+        # upload client that sets one chooses which program the server runs.
+        # Matching the suffix as well as the bare name keeps the guard closed
+        # for providers that spell it ``tesseract_executable`` or ``ocr_binary``.
+        program_suffixes = ("_binary", "_cmd", "_command", "_executable")
 
         def inspect(value: Any, location: str) -> None:
             if isinstance(value, dict):
@@ -116,6 +125,7 @@ class AnalyzeOptions(BaseModel):
                     if (
                         normalized in blocked_names
                         or normalized.endswith(secret_suffixes)
+                        or normalized.endswith(program_suffixes)
                         or normalized.endswith("_endpoint")
                         or normalized.endswith("_directory")
                         or normalized.endswith("_dir")
