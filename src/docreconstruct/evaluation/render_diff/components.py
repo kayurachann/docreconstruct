@@ -8,12 +8,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from PIL import Image, ImageFilter
 
 from docreconstruct.evaluation.visual import _foreground_mask, _load_image, _opaque_rgb, _pillow
 
 from .models import RenderNormalizedBox, RenderPixelBox
+
+
+def _require_numpy() -> Any:
+    """Import numpy at call time, matching the project's lazy-dependency idiom.
+
+    This module sits on the import path of the ASGI entry point, and the slim
+    server image installs only the ``api,pdf,docx`` extras. A module-level
+    ``import numpy`` made every such container die at boot — caught by the CI
+    smoke test the first time it ran the shipped image.
+    """
+
+    import numpy
+
+    return numpy
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +98,7 @@ def dilate(mask: Any, radius: int) -> Any:
 def difference_masks(reference: Any, candidate: Any, *, tolerance: int) -> tuple[Any, Any]:
     """Return unmatched reference ink and unmatched candidate ink masks."""
 
+    np = _require_numpy()
     ref = np.asarray(reference, dtype=np.uint8) > 0
     cand = np.asarray(candidate, dtype=np.uint8) > 0
     candidate_near = np.asarray(dilate(candidate, tolerance), dtype=np.uint8) > 0
@@ -114,9 +128,10 @@ def _union(parent: dict[int, int], left: int, right: int) -> int:
     return root
 
 
-def _connected_boxes(binary: np.ndarray[Any, Any]) -> list[tuple[int, int, int, int]]:
+def _connected_boxes(binary: Any) -> list[tuple[int, int, int, int]]:
     """Run-length 8-connected components without an optional SciPy dependency."""
 
+    np = _require_numpy()
     parent: dict[int, int] = {}
     records: list[tuple[int, int, int, int]] = []
     previous: list[tuple[int, int, int]] = []
@@ -165,6 +180,7 @@ def _connected_boxes(binary: np.ndarray[Any, Any]) -> list[tuple[int, int, int, 
 def _signature(mask: Any, bbox: RenderPixelBox, *, size: int = 24) -> int:
     crop = mask.crop((bbox.x0, bbox.y0, bbox.x1, bbox.y1))
     resized = crop.resize((size, size), Image.Resampling.NEAREST)
+    np = _require_numpy()
     values = np.asarray(resized, dtype=np.uint8).reshape(-1) > 0
     packed = np.packbits(values, bitorder="big").tobytes()
     return int.from_bytes(packed, byteorder="big", signed=False)
@@ -181,6 +197,7 @@ def extract_components(mask: Any) -> tuple[ForegroundComponent, ...]:
             Image.Resampling.NEAREST,
         )
     grouping_radius = max(1, min(8, round(min(working.size) * 0.003)))
+    np = _require_numpy()
     grouped = np.asarray(dilate(working, grouping_radius), dtype=np.uint8) > 0
     minimum_ink = max(4, mask.width * mask.height // 1_000_000)
     components: list[ForegroundComponent] = []
