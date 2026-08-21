@@ -217,9 +217,13 @@ bản tiếng Trung xen kẽ. Bộ lập bố cục chung ánh xạ 10 khối c�
 đủ 18 dòng của tài liệu gốc; tệp DOCX hoàn chỉnh được kết xuất thành một trang
 A4, giữ 8 biểu thức Office Math và 13 dòng công thức riêng, đồng thời không để lộ
 ký hiệu căn chỉnh của TeX. Quy trình QA của dự án vượt qua 34/34 tiêu chí đo được
-với độ tương đồng hình ảnh chuẩn hóa theo vùng tiền cảnh là 92,58%. Kết quả này
-cho thấy chất lượng đã được cải thiện, nhưng không chứng minh mọi ký tự hoặc mệnh
-đề toán học đều chính xác về nghĩa.
+tại thời điểm tạo tệp showcase; bộ tiêu chí nay đã tăng lên 39. Con số 92,58%
+được lưu lại có trước metric hiện hành và không được so sánh trực tiếp: đo lại
+bằng `VISUAL_METRIC_VERSION = 2.2`, chính tệp này đạt **31,46%**, vì metric 2.2
+chấm mức khớp của vùng tiền cảnh, biên và vùng thay vì khớp pixel thô (độ tương
+đồng pixel của nó là 94,71%). Xem bảng đo lại cho cả ba showcase tại
+[docs/showcases/README.md](../showcases/README.md). Điểm tương đồng tự động
+không chứng minh mọi ký tự hoặc mệnh đề toán học đều chính xác về nghĩa.
 
 ### Đề thi Ngữ văn lần thứ hai của Trường THPT Chuyên Tuyên Quang (Nguồn: VNExpress)
 
