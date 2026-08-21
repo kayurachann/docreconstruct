@@ -8,6 +8,7 @@ import io
 from contextlib import suppress
 from pathlib import Path
 
+from docreconstruct.exceptions import UnsupportedInputError
 from docreconstruct.ir import (
     BBox,
     Document,
@@ -34,12 +35,20 @@ def image_to_document(source: str | Path) -> Document:
     intentionally absent until an OCR provider contributes observations.
     """
 
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageOps, UnidentifiedImageError
 
     path = Path(source).expanduser().resolve()
     digest = _content_digest(path)
     pages: list[Page] = []
-    with Image.open(path) as image:
+    try:
+        opened = Image.open(path)
+    except (UnidentifiedImageError, OSError) as exc:
+        # A raster Pillow cannot decode is ordinary bad input, not a server
+        # fault. Letting the OSError escape reached the API's unhandled branch
+        # and answered 500 with a logged traceback, mirroring the PDF path
+        # before it raised UnsupportedInputError.
+        raise UnsupportedInputError(f"could not open image: {path.name}") from exc
+    with opened as image:
         frames = getattr(image, "n_frames", 1)
         for index in range(frames):
             if frames > 1:

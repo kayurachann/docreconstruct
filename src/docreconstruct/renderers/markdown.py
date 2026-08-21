@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ._utils import (
@@ -15,6 +16,34 @@ from ._utils import (
     table_rows,
 )
 from .base import Renderer
+
+# A line that opens a block gets a backslash so re-parsing keeps the element
+# kind the IR declared. Inline markers are deliberately left alone: the element
+# text may legitimately carry emphasis, and escaping it would be visible.
+_BLOCK_MARKER = re.compile(r"^(\s{0,3})(#{1,6}(?=\s|$)|[-+*](?=\s)|\d{1,4}[.)](?=\s)|>|```|~~~)")
+_BREAK_LINE = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$")
+
+
+def _escape_block(text: str) -> str:
+    """Neutralize block openers so a paragraph does not re-parse as structure.
+
+    Without this a text element reading "# Section 3 of the contract" comes
+    back as a heading, and one reading "---" comes back as a thematic rule with
+    no text at all — the content is simply gone.
+    """
+
+    lines = []
+    for line in text.split("\n"):
+        if _BREAK_LINE.match(line):
+            stripped = line.lstrip()
+            lines.append(line[: len(line) - len(stripped)] + "\\" + stripped)
+            continue
+        match = _BLOCK_MARKER.match(line)
+        if match:
+            lines.append(match.group(1) + "\\" + line[match.start(2) :])
+            continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _escape_cell(text: str) -> str:
@@ -53,7 +82,7 @@ class MarkdownRenderer(Renderer[str]):
                 kind = element_type(element)
                 text = element_text(element)
                 if kind == "title":
-                    blocks.append(f"# {text}")
+                    blocks.append(f"# {_escape_block(text)}")
                 elif kind == "heading":
                     level = int(
                         max(
@@ -69,10 +98,10 @@ class MarkdownRenderer(Renderer[str]):
                             ),
                         )
                     )
-                    blocks.append(f"{'#' * level} {text}")
+                    blocks.append(f"{'#' * level} {_escape_block(text)}")
                 elif kind == "list_item":
                     marker = "1." if element_metadata(element).get("ordered") else "-"
-                    blocks.append(f"{marker} {text}")
+                    blocks.append(f"{marker} {_escape_block(text)}")
                 elif kind == "table":
                     blocks.append(_table_markdown(table_rows(element)) or text)
                 elif kind in {"image", "figure", "chart"}:
@@ -88,7 +117,7 @@ class MarkdownRenderer(Renderer[str]):
                     else:
                         blocks.append(f"[{kind}: {alt}]")
                 elif text:
-                    blocks.append(text)
+                    blocks.append(_escape_block(text))
             if page_index < len(pages(document)):
                 blocks.append("---")
         return "\n\n".join(block for block in blocks if block != "") + ("\n" if blocks else "")

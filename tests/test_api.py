@@ -207,6 +207,8 @@ def test_analyze_stages_upload_and_delegates_to_pipeline(
         "engines": ["fake"],
         "fusion": True,
         "provider_options": None,
+        # The service caps pages; the CLI and library stay unlimited.
+        "max_pages": 400,
     }
     assert not call["source"].exists()
 
@@ -1014,3 +1016,110 @@ def test_identically_named_upload_parts_do_not_overwrite_each_other(
     assert candidate_bytes == b"CANDIDATE BYTES"
     # The client-visible filename is still preserved for provenance.
     assert reference_path.name == candidate_path.name == "doc.png"
+
+
+def _many_page_pdf(pages: int) -> bytes:
+    fitz = pytest.importorskip("pymupdf")
+    document = fitz.open()
+    for _ in range(pages):
+        document.new_page(width=612, height=792)
+    payload = document.tobytes(deflate=True)
+    document.close()
+    return bytes(payload)
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/analyze", "/v1/route"])
+def test_ingestion_endpoints_refuse_an_unreasonable_page_count(
+    client: TestClient, endpoint: str
+) -> None:
+    """The byte-size gate says nothing about page count.
+
+    An 828 KiB PDF decoded to 5000 pages of IR and a 4 MiB response, so a
+    small upload could exhaust the process. 413 is the right answer: the input
+    is too large in the sense that status describes.
+    """
+
+    payload = _many_page_pdf(600)
+
+    response = client.post(endpoint, files={"file": ("many.pdf", payload, "application/pdf")})
+
+    assert response.status_code == 413
+    assert "above the" in response.text
+
+
+@pytest.mark.parametrize("endpoint", ["/v1/analyze", "/v1/route"])
+def test_ordinary_page_counts_still_pass(client: TestClient, endpoint: str) -> None:
+    payload = _many_page_pdf(3)
+
+    response = client.post(endpoint, files={"file": ("few.pdf", payload, "application/pdf")})
+
+    assert response.status_code == 200
+
+
+def test_page_limit_is_operator_configurable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCRECONSTRUCT_MAX_API_PAGES", "10")
+    payload = _many_page_pdf(20)
+
+    response = client.post("/v1/analyze", files={"file": ("many.pdf", payload, "application/pdf")})
+
+    assert response.status_code == 413
+
+
+@pytest.mark.parametrize(
+    ("filename", "payload", "media_type"),
+    [
+        ("broken.pdf", b"%PDF-1.4 truncated", "application/pdf"),
+        ("broken.png", b"\x89PNG not really", "image/png"),
+    ],
+)
+def test_error_details_do_not_echo_server_filesystem_paths(
+    client: TestClient, filename: str, payload: bytes, media_type: str
+) -> None:
+    """Provider errors quote the staging path they were handed.
+
+    Echoing it tells an unauthenticated caller exactly where its upload landed,
+    which is also the missing half of a chain: learn the path, then point a
+    subprocess-backed provider option at it.
+    """
+
+    import tempfile
+
+    response = client.post("/v1/analyze", files={"file": (filename, payload, media_type)})
+
+    assert response.status_code == 422
+    body = response.text
+    assert tempfile.gettempdir().lower() not in body.lower()
+    assert "docreconstruct-analyze" not in body
+    # The basename is still there, so the message stays useful.
+    assert filename in body
+
+
+def test_unreadable_image_is_client_error_not_server_error(client: TestClient) -> None:
+    """Pillow's UnidentifiedImageError is an OSError, which reached the 500 branch."""
+
+    response = client.post(
+        "/v1/analyze", files={"file": ("broken.png", b"\x89PNG not really", "image/png")}
+    )
+
+    assert response.status_code == 422
+    assert "could not open image" in response.text
+
+
+def test_windows_reserved_device_name_does_not_become_an_empty_upload(
+    client: TestClient,
+) -> None:
+    """Windows resolves NUL to a device: every byte written is discarded.
+
+    The size counter still saw the bytes, so the emptiness check passed and the
+    request failed much later as unreadable content.
+    """
+
+    response = client.post(
+        "/v1/analyze", files={"file": ("NUL", b"%PDF-1.4 truncated", "application/pdf")}
+    )
+
+    # The staged part falls back to the safe name, exactly as "." and ".." do.
+    assert response.status_code == 422
+    assert "uploaded file is empty" not in response.text

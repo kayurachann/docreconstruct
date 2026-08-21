@@ -9,12 +9,13 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict, is_dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Annotated, Any, TypeVar, cast
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -123,6 +124,44 @@ def _package_version() -> str:
         return "0.1.0"
 
 
+# Windows resolves these stems to DOS devices rather than files, whatever
+# directory they appear in. Opening one succeeds and every byte written is
+# discarded, so an upload named ``NUL`` becomes a zero-byte input that passes
+# the size check and fails much later as unreadable content.
+_WINDOWS_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{digit}" for digit in "123456789"}
+    | {f"LPT{digit}" for digit in "123456789"}
+)
+
+
+def _is_reserved_device_name(filename: str) -> bool:
+    # Windows strips trailing dots and spaces before resolving a device, and a
+    # reserved stem still redirects when it carries an extension.
+    stem = filename.rstrip(". ").partition(".")[0]
+    return stem.upper() in _WINDOWS_RESERVED_STEMS
+
+
+_DEFAULT_MAX_API_PAGES = 400
+
+
+def _api_page_limit() -> int:
+    """Page ceiling for the ingestion endpoints.
+
+    The byte-size gate says nothing about page count: an 828 KiB PDF decodes to
+    5000 pages of IR and a 4 MiB response. Operators can raise or lower this.
+    """
+
+    raw_value = os.getenv("DOCRECONSTRUCT_MAX_API_PAGES")
+    if raw_value is None:
+        return _DEFAULT_MAX_API_PAGES
+    try:
+        pages = int(raw_value)
+    except ValueError:
+        return _DEFAULT_MAX_API_PAGES
+    return pages if pages > 0 else _DEFAULT_MAX_API_PAGES
+
+
 def _upload_limit() -> int:
     raw_value = os.getenv("DOCRECONSTRUCT_MAX_UPLOAD_MB", "50")
     try:
@@ -170,7 +209,7 @@ async def _stage_upload(
     """
 
     filename = Path(upload.filename or fallback_name).name
-    if filename in {"", ".", ".."}:
+    if filename in {"", ".", ".."} or _is_reserved_device_name(filename):
         filename = fallback_name
     target_directory = directory / role if role else directory
     target_directory.mkdir(parents=True, exist_ok=True)
@@ -242,6 +281,40 @@ def _result_warnings(result: Any) -> list[str]:
     return list(dict.fromkeys(warnings))
 
 
+def _redact_server_paths(text: str) -> str:
+    """Reduce any per-request staging path in a detail string to its basename.
+
+    Provider and PDF errors quote the path they were handed, which is inside
+    this process's temporary directory. Echoing it back tells an unauthenticated
+    caller exactly where its own upload landed on the server's filesystem.
+    """
+
+    roots = {
+        str(Path(tempfile.gettempdir()).resolve()),
+        tempfile.gettempdir(),
+    }
+    # Some libraries (PyMuPDF among them) report the path already escaped, so
+    # the root arrives with doubled separators and would not match otherwise.
+    roots |= {root.replace("\\", "\\\\") for root in roots}
+    pattern = re.compile(
+        "|".join(
+            # A path may be quoted or JSON-escaped by the reporting library, so
+            # both separators are accepted and trailing punctuation is excluded.
+            re.escape(root) + r"(?:\\{1,2}|/)[^\s'\"`,;:)\]}]*"
+            for root in sorted(roots, key=len, reverse=True)
+        )
+    )
+
+    def to_basename(match: re.Match[str]) -> str:
+        return PurePath(match.group(0).replace("\\\\", "\\")).name
+
+    return pattern.sub(to_basename, text)
+
+
+def _detail(exc: Exception) -> str:
+    return _redact_server_paths(str(exc))
+
+
 def _raise_pipeline_error(exc: Exception) -> None:
     if isinstance(exc, HTTPException):
         raise exc
@@ -249,20 +322,20 @@ def _raise_pipeline_error(exc: Exception) -> None:
         # The upload passed the byte-size gate but would decode to more pages or
         # pixels than this process will hold, so it is too large in the sense
         # 413 describes rather than malformed.
-        raise HTTPException(status_code=413, detail=str(exc)) from exc
+        raise HTTPException(status_code=413, detail=_detail(exc)) from exc
     if isinstance(exc, (UnsupportedInputError, ValueError, KeyError, FileNotFoundError)):
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=_detail(exc)) from exc
     if isinstance(exc, (ProviderUnavailableError, RendererUnavailableError)):
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=_detail(exc)) from exc
     if isinstance(exc, (ImportError, ModuleNotFoundError)):
         raise HTTPException(
             status_code=503,
-            detail=f"an optional reconstruction component is unavailable: {exc}",
+            detail=(f"an optional reconstruction component is unavailable: {_detail(exc)}"),
         ) from exc
     if isinstance(exc, RuntimeError):
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=_detail(exc)) from exc
     if isinstance(exc, DocReconstructError):
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=_detail(exc)) from exc
     logger.exception("Unhandled document processing error", exc_info=exc)
     raise HTTPException(status_code=500, detail="document processing failed") from exc
 
@@ -763,6 +836,7 @@ def create_app() -> FastAPI:
                 engines=parsed.engines or None,
                 fusion=parsed.fusion,
                 provider_options=provider_options,
+                max_pages=_api_page_limit(),
             )
             return AnalysisResponse(
                 document=_document_payload(result),
@@ -801,6 +875,7 @@ def create_app() -> FastAPI:
                 engines=parsed.engines or None,
                 fusion=parsed.fusion,
                 provider_options=provider_options,
+                max_pages=_api_page_limit(),
             )
             routing = importlib.import_module("docreconstruct.routing")
             policy = routing.RoutingPolicy(confidence_threshold=parsed.confidence_threshold)

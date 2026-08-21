@@ -105,7 +105,23 @@ _CJK_SECTION_PATTERN = re.compile(
 )
 
 
+# The exact inverse of renderers.markdown._escape_block: a backslash that only
+# exists to stop a line opening a block is not part of the author's text.
+_ESCAPED_BLOCK_MARKER = re.compile(
+    r"^(\s{0,3})\\(?=(?:#{1,6}(?:\s|$)|[-+*]\s|\d{1,4}[.)]\s|>|```|~~~"
+    r"|(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$))",
+    flags=re.MULTILINE,
+)
+
+
+def _unescape_block_markers(value: str) -> str:
+    return _ESCAPED_BLOCK_MARKER.sub(r"\1", value)
+
+
 def _plain(value: str) -> str:
+    # The block-marker escape is deliberately left in place here: block kinds
+    # are decided from this string, and unescaping first would let ``\- item``
+    # be classified as a list again. It is stripped once, on the finished block.
     return html.unescape(value.strip()).replace("\u00a0", " ")
 
 
@@ -519,7 +535,9 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
                 id=f"md-{block_index + 1}",
                 index=block_index,
                 kind=kind,
-                text="" if kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE} else text,
+                text=""
+                if kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+                else _unescape_block_markers(text),
                 source=source_reference,
                 level=level,
                 group_id=current_group,

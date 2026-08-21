@@ -285,3 +285,57 @@ def test_exif_transposed_page_frame_matches_the_transposed_raster(tmp_path: Path
 
     assert (page.width, page.height) == actual
     assert page.rotation == 90.0
+
+
+@pytest.mark.parametrize(
+    ("output_name", "output_format"),
+    [("report.docx", "html"), ("report.html", "docx"), ("report.md", "json")],
+)
+def test_conflicting_output_name_and_format_are_rejected(
+    tmp_path: Path, output_name: str, output_format: str
+) -> None:
+    """The extension lost to --output-format, silently and without a warning.
+
+    `reconstruct scan.png -o report.docx --output-format html` exited 0 having
+    written HTML into a file Word cannot open.
+    """
+
+    source = tmp_path / "scan.png"
+    Image.new("RGB", (200, 120), "white").save(source)
+    destination = tmp_path / output_name
+
+    result = runner.invoke(
+        cli,
+        ["reconstruct", str(source), "-o", str(destination), "--output-format", output_format],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "conflicts with" in result.output
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("output_name", "output_format"),
+    [
+        ("report.html", "html"),
+        # Aliases must agree rather than trip the guard.
+        ("report.htm", "html"),
+        ("report.md", "markdown"),
+        # An unrecognized suffix stays the caller's business.
+        ("report.out", "html"),
+    ],
+)
+def test_agreeing_or_unknown_output_names_are_accepted(
+    tmp_path: Path, output_name: str, output_format: str
+) -> None:
+    source = tmp_path / "scan.png"
+    Image.new("RGB", (200, 120), "white").save(source)
+    destination = tmp_path / output_name
+
+    result = runner.invoke(
+        cli,
+        ["reconstruct", str(source), "-o", str(destination), "--output-format", output_format],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert destination.exists()
