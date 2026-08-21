@@ -209,3 +209,34 @@ def test_cli_compare_rejects_renderer_path_with_native_backend(tmp_path: Path) -
 
     assert result.exit_code == 2
     assert "requires --render-backend auto or libreoffice" in result.output
+
+
+def test_benchmark_reports_failures_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``benchmark`` printed "Wrote ..." and exited 0 even when every case failed.
+
+    Its three sibling commands all print a succeeded/failed line and exit 3, so
+    a CI job gating on this one silently passed a fully broken run.
+    """
+
+    from docreconstruct import evaluation
+
+    dataset = tmp_path / "manifest.json"
+    dataset.write_text('{"cases": []}', encoding="utf-8")
+    output = tmp_path / "report.json"
+
+    def fake_run(source: Path, **kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            successful_cases=0,
+            failed_cases=3,
+            mean_score=None,
+            to_dict=lambda: {"results": []},
+        )
+
+    monkeypatch.setattr(evaluation, "run_benchmark", fake_run)
+    result = runner.invoke(cli, ["benchmark", str(dataset), "--output", str(output)])
+
+    assert result.exit_code == 3, result.output
+    assert "0 succeeded, 3 failed" in result.output
+    assert "mean score: unavailable" in result.output

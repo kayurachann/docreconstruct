@@ -95,8 +95,21 @@ class BenchmarkReport:
 
     @property
     def mean_score(self) -> float | None:
-        scores = [result.score for result in self.results if result.score is not None]
-        return sum(scores) / len(scores) if scores else None
+        """Average across every case, scoring a crashed case as zero.
+
+        ``EvaluationReport.score`` is a non-optional float, so ``score is None``
+        means exactly "this case raised and was recorded with an error".
+        Dropping those from the denominator let a run that mostly crashed
+        report the headline score of its few survivors, and matches neither
+        ``ReconstructionBenchmarkRunner`` (which records 0.0 for a failed case)
+        nor the operator's reading of the number.
+        """
+
+        if not self.results:
+            return None
+        return sum(
+            result.score if result.score is not None else 0.0 for result in self.results
+        ) / len(self.results)
 
     @property
     def component_means(self) -> dict[str, float | None]:
@@ -109,7 +122,12 @@ class BenchmarkReport:
                 if result.evaluation is not None
                 and getattr(result.evaluation.fidelity, component) is not None
             ]
-            means[component] = sum(scores) / len(scores) if scores else None
+            # A component mean cannot be zero-filled: "no successful case
+            # measured this" and "every case scored zero" are different claims.
+            # Withhold the number instead of averaging a shrunken population.
+            means[component] = (
+                sum(scores) / len(scores) if scores and not self.failed_cases else None
+            )
         return means
 
     def to_dict(self) -> dict[str, Any]:

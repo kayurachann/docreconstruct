@@ -204,6 +204,19 @@ def test_end_to_end_ocr_benchmark_records_manifests_failures_and_slices(
 
     slices = first.slice_means
     assert slices["language"]["vi"].mean_score == pytest.approx(1.0)
+    # ``mean_score`` averages FidelityScore.overall, which spreads the
+    # unmeasurable components over the measured ones. Both sides of an OCR
+    # case are Markdown, so layout/structure/visual are never measured and the
+    # headline cannot fall far however wrong the recognition is. The strict
+    # pair says what was actually measured.
+    assert first.mean_measurement_coverage is not None
+    assert first.mean_measurement_coverage < 1.0
+    assert first.mean_overall_strict is not None
+    assert first.mean_overall_strict <= first.mean_score
+    assert slices["language"]["vi"].mean_overall_strict is not None
+    # Editability is a hand-written constant on the Markdown branch, not a
+    # measurement, so it must not be published as a component mean.
+    assert first.component_means["editability"] is None
     assert slices["script"]["Latn"].total_cases == 2
     assert slices["document_type"]["invoice"].successful_cases == 1
     assert slices["degradation"]["blur"].successful_cases == 0

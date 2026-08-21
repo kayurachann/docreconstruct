@@ -767,10 +767,19 @@ def benchmark_command(
     try:
         from docreconstruct import evaluation
 
-        result = evaluation.run_benchmark(dataset, profile=profile)
+        report = evaluation.run_benchmark(dataset, profile=profile)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(_json(result) + "\n", encoding="utf-8")
+        output.write_text(_json(report) + "\n", encoding="utf-8")
         console.print(f"[green]Wrote[/green] {output.resolve()}")
+        mean = "unavailable" if report.mean_score is None else f"{report.mean_score:.6f}"
+        console.print(
+            f"cases: {report.successful_cases} succeeded, {report.failed_cases} failed; "
+            f"mean score: {mean}"
+        )
+        if report.failed_cases:
+            raise typer.Exit(code=3)
+    except typer.Exit:
+        raise
     except (DocReconstructError, ImportError, RuntimeError, ValueError, OSError) as exc:
         _fail(exc)
 
