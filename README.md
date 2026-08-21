@@ -29,10 +29,11 @@ not silently "fixed" from pixels.
 pip install -e ".[all]"
 ```
 
-One command — scan in, editable DOCX out. Runs a local OCR engine
-([Tesseract](https://tesseract-ocr.github.io/tessdoc/Installation.html) is
-detected automatically), generates the Markdown content and JSON geometry
-evidence for you, and prints its own QA score:
+One command — scan or PDF in, editable DOCX out. Born-digital PDFs use their
+exact embedded text layer with no OCR at all; scans run through a local OCR
+engine ([Tesseract](https://tesseract-ocr.github.io/tessdoc/Installation.html)
+is detected automatically). Either way the Markdown content and JSON geometry
+evidence are generated for you, and the QA score is printed:
 
 ```bash
 python -m docreconstruct.cli convert scan.pdf out.docx

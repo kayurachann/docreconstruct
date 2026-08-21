@@ -224,6 +224,98 @@ def test_convert_cleans_intermediates_by_default(
     assert "--keep-intermediates" in result.output
 
 
+def test_convert_engine_plan_prefers_native_pdf_for_born_digital_pdfs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import docreconstruct.cli as cli_module
+    import docreconstruct.preprocessing as preprocessing_module
+    from docreconstruct.preprocessing import SourceKind
+
+    monkeypatch.setattr(cli_module, "_installed_local_engines", lambda: ["tesseract_local"])
+    pdf = tmp_path / "document.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+
+    def analysis(kind: SourceKind, characters: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            kind=kind,
+            pages=[SimpleNamespace(native_characters=characters)],
+        )
+
+    monkeypatch.setattr(
+        preprocessing_module,
+        "analyze_source",
+        lambda source: analysis(SourceKind.NATIVE, 900),
+    )
+    engines, note = cli_module._convert_engine_plan(pdf)
+    assert engines == ["native_pdf", "tesseract_local"]
+    assert note is None
+
+    monkeypatch.setattr(
+        preprocessing_module,
+        "analyze_source",
+        lambda source: analysis(SourceKind.HYBRID, 900),
+    )
+    engines, note = cli_module._convert_engine_plan(pdf)
+    assert engines == ["tesseract_local"]
+    assert note is not None and "native_pdf" in note
+
+    monkeypatch.setattr(
+        preprocessing_module,
+        "analyze_source",
+        lambda source: analysis(SourceKind.SCANNED, 0),
+    )
+    engines, note = cli_module._convert_engine_plan(pdf)
+    assert engines == ["tesseract_local"]
+    assert note is None
+
+    scan = _scan(tmp_path)
+    engines, note = cli_module._convert_engine_plan(scan)
+    assert engines == ["tesseract_local"]
+    assert note is None
+
+
+def test_convert_uses_native_text_layer_without_ocr_end_to_end(tmp_path: Path) -> None:
+    import json
+
+    pymupdf = pytest.importorskip("pymupdf")
+
+    figure = tmp_path / "figure.png"
+    Image.new("RGB", (80, 60), "navy").save(figure)
+    source = tmp_path / "digital.pdf"
+    pdf = pymupdf.open()
+    page = pdf.new_page(width=612, height=792)
+    page.insert_text((72, 96), "Born-digital wording stays exact.", fontsize=14)
+    page.insert_text((72, 128), "No OCR engine touches this file.", fontsize=12)
+    page.insert_image(pymupdf.Rect(72, 160, 232, 280), filename=str(figure))
+    pdf.save(str(source))
+    pdf.close()
+    output = tmp_path / "digital.docx"
+
+    result = runner.invoke(cli, ["convert", str(source), str(output), "--keep-intermediates"])
+
+    assert result.exit_code == 0, result.output
+    assert "OCR: native_pdf; mode: local" in result.output
+    with zipfile.ZipFile(output) as package:
+        document_xml = package.read("word/document.xml").decode("utf-8")
+    assert "Born-digital wording stays exact." in document_xml
+    workspace = tmp_path / "digital.convert"
+    evidence_files = list((workspace / "evidence").glob("*.json"))
+    assert evidence_files
+    evidence = json.loads(evidence_files[0].read_text(encoding="utf-8"))
+    image_elements = [
+        element
+        for page_payload in evidence["pages"]
+        for element in page_payload["elements"]
+        if element["type"] == "image"
+    ]
+    assert image_elements
+    assert all(
+        "bytes" not in (element.get("metadata", {}).get("image") or {})
+        for element in image_elements
+    )
+
+
 @pytest.mark.parametrize(("strict", "expected_code"), [(False, 0), (True, 3)])
 def test_convert_reports_failed_qa_gates_and_only_strict_mode_fails(
     tmp_path: Path,
