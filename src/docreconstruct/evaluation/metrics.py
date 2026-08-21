@@ -28,6 +28,11 @@ from docreconstruct.renderers._utils import (
 
 from .assignment import minimum_cost_assignment
 
+try:  # A maintained C++ implementation replaces the hand-rolled fast path.
+    from rapidfuzz.distance import Levenshtein as _RapidfuzzLevenshtein
+except ImportError:  # pragma: no cover - exercised on installs without wheels
+    _RapidfuzzLevenshtein = None  # type: ignore[assignment]
+
 TEXT_METRIC_VERSION = "2.0.0"
 LAYOUT_METRIC_VERSION = "3.0.0-alpha.1"
 STRUCTURE_METRIC_VERSION = "3.0.0-alpha.1"
@@ -64,15 +69,31 @@ def _distance(reference: Sequence[Any], candidate: Sequence[Any]) -> int:
     """Levenshtein edit distance for arbitrary sequences.
 
     The element matcher evaluates this once per candidate pair inside an
-    O(n^2) grid, so the row-at-a-time dynamic program — one Python loop
-    iteration per matrix cell — dominated evaluation: a page of 20x20
-    paragraphs of ~500 characters spent 22.1 s in 100.5 million cells.
+    O(n^2) grid, so its speed dominates evaluation.  rapidfuzz's compiled
+    Levenshtein is the primary implementation: it returns the same exact
+    integer for strings and for sequences of hashable items.  When rapidfuzz
+    is not installed the dependency-free Myers bit-vector formulation below
+    answers instead, and sequences whose items cannot be hashed fall back to
+    the dense dynamic program in both configurations.
+    """
 
-    Myers' bit-vector formulation carries one matrix column per machine word
-    instead, so a whole column advances per iteration.  It returns the same
-    integer, not an approximation, and is used whenever the items can be
-    hashed into the pattern bitmasks; anything else falls back to the dense
-    loop.
+    if _RapidfuzzLevenshtein is not None:
+        try:
+            return int(_RapidfuzzLevenshtein.distance(reference, candidate))
+        except TypeError:  # unhashable items
+            return _dense_distance(reference, candidate)
+    return _myers_distance(reference, candidate)
+
+
+def _myers_distance(reference: Sequence[Any], candidate: Sequence[Any]) -> int:
+    """Dependency-free exact fallback for installs without rapidfuzz.
+
+    Myers' bit-vector formulation carries one matrix column per machine word,
+    so a whole column advances per Python iteration — the row-at-a-time
+    dynamic program spent 22.1 s in 100.5 million cells on a page of 20x20
+    paragraphs of ~500 characters.  It returns the same integer, not an
+    approximation, and is used whenever the items can be hashed into the
+    pattern bitmasks; anything else falls back to the dense loop.
     """
 
     if len(reference) < len(candidate):
