@@ -52,7 +52,11 @@ _BARE_MATH_PATTERN = re.compile(
 # The latter are consumed as whole slices, so a TeX-looking substring inside
 # one of them can never be promoted to math by the bare-fragment pass.
 _SPECIAL_PATTERN = re.compile(
-    r"(?P<dollar>(?<!\\)\$(?P<dollar_body>[^$\r\n]+?)(?<!\\)\$)"
+    # The trailing digit guard is Pandoc's: a closing "$" immediately followed
+    # by a digit is a second currency amount, not the end of a math span, so
+    # "costs $5 and $10" keeps both dollar signs instead of turning "5 and "
+    # into an equation.
+    r"(?P<dollar>(?<!\\)\$(?P<dollar_body>[^$\r\n]+?)(?<!\\)\$(?![0-9]))"
     r"|(?P<eq><eq>(?P<eq_body>[^\r\n]*?)</eq>)"
     r"|(?P<code>(?P<fence>`+)[^\r\n]*?(?P=fence))"
     r"|(?P<url>(?:(?:https?|ftp)://|www\.)[^\s<>()]+)"

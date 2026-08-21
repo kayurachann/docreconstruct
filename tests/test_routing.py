@@ -119,3 +119,55 @@ def test_specialists_are_selected_by_region_type() -> None:
 
     assert tasks["table"].primary_provider == "paddleocr"
     assert tasks["hand"].primary_provider == "olmocr"
+
+
+def test_already_recognized_scanned_page_still_routes_its_elements() -> None:
+    """An OCR'd page must not swallow element-level work.
+
+    ``_initial_page_task`` returned a whole-page extraction for every raster
+    page, and ``plan`` then skipped the page's elements, so a scanned page that
+    already carried recognized text produced no retry tasks and ignored
+    ``--force-elements`` entirely.
+    """
+
+    document = Document(
+        id="scan",
+        pages=[
+            Page(
+                id="p1",
+                number=1,
+                width=100,
+                height=200,
+                source_type=SourceType.SCANNED,
+                elements=[
+                    Element(
+                        id="amount",
+                        type=ElementType.TEXT,
+                        bbox=BBox(x0=10, y0=10, x1=70, y1=20),
+                        text="$12,804,92I",
+                        confidence=0.61,
+                        provenance=Provenance(engine="paddleocr", text_confidence=0.61),
+                    ),
+                    Element(
+                        id="tbl",
+                        type=ElementType.TABLE,
+                        bbox=BBox(x0=10, y0=40, x1=90, y1=120),
+                        text="a b",
+                        confidence=0.97,
+                        provenance=Provenance(engine="paddleocr", text_confidence=0.97),
+                    ),
+                ],
+            )
+        ],
+    )
+
+    plan = build_routing_plan(document, force_element_ids=["tbl"])
+    by_element = {task.element_id: task for task in plan.tasks}
+
+    assert "amount" in by_element
+    assert by_element["amount"].action is RoutingAction.RETRY
+    assert RoutingReason.LOW_CONFIDENCE in by_element["amount"].reasons
+    assert "tbl" in by_element
+    assert RoutingReason.FORCED_REPAIR in by_element["tbl"].reasons
+    # The page keeps its single whole-page extraction only when it has no text.
+    assert not any(task.id.endswith("-ocr") for task in plan.tasks)
