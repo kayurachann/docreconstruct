@@ -23,6 +23,7 @@ from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from docreconstruct.evaluation.math_reference import cross_check_math_sources
 from docreconstruct.evaluation.visual import DEFAULT_RENDERED_VISUAL_MIN_SCORE
 from docreconstruct.evidence import (
     ProviderHints,
@@ -1750,6 +1751,7 @@ def validate_hybrid(
     expected_rows = sum(equation_row_count(expression) for expression in display_expressions)
     actual_rows = _display_row_count(display_math)
     source_math_expectations = _source_math_expectations(markdown)
+    independent_math = cross_check_math_sources(expressions)
     math_ooxml = _math_ooxml_metrics(root, display_math)
     geometry_matches, geometry = _section_geometry(root, scan, plan, markdown)
     sections = list(root.iter(_WORD + "sectPr"))
@@ -2207,6 +2209,23 @@ def validate_hybrid(
             actual=cjk_mapped_runs,
         ),
     ]
+    if independent_math["available"]:
+        gates.append(
+            HybridValidationGate(
+                name="independent_math_projection",
+                passed=not independent_math["disagreements"],
+                expected=[],
+                actual=independent_math["disagreements"],
+                detail=(
+                    "Expected visible math text is derived a second time through "
+                    "latex2mathml, which shares no code with the OMML bridge; a "
+                    "normalized character-multiset disagreement between the two "
+                    "derivations is an error signal in one of them.  Expressions "
+                    "outside the shared grammar are listed as unanswered in "
+                    "metrics.independent_math_cross_check, not compared."
+                ),
+            )
+        )
     if evidence_paths:
         evidence_errors = evidence_metrics["evidence_errors"]
         ambiguous_detections = evidence_metrics["evidence_ambiguous_detections"]
@@ -2394,6 +2413,7 @@ def validate_hybrid(
         "native_office_math": len(actual_math),
         "native_equation_arrays": len(list(root.iter(_MATH + "eqArr"))),
         "native_display_rows": actual_rows,
+        "independent_math_cross_check": independent_math,
         **math_ooxml,
         "drawings": drawings,
         "media_parts": len(media),
@@ -2441,6 +2461,26 @@ def validate_hybrid(
         **flow,
         **plan_geometry,
     }
+    unmeasured = (
+        (
+            ["office_font_substitution"]
+            + (
+                ["rendered_body_foreground_coverage"]
+                if body_foreground is not None and not body_foreground["measured_pages"]
+                else []
+            )
+        )
+        if visual_metrics is not None
+        else [
+            "rendered_pixel_similarity",
+            "rendered_fill",
+            "office_font_substitution",
+            "office_line_wrapping",
+            "renderer_confirmed_pagination",
+        ]
+    )
+    if not independent_math["available"]:
+        unmeasured.append("independent_math_projection")
     report = HybridValidationReport(
         content=str(content_path),
         layout=str(layout_path),
@@ -2454,24 +2494,7 @@ def validate_hybrid(
         measured_gates=len(gates),
         gates=gates,
         metrics=metrics,
-        unmeasured=(
-            (
-                ["office_font_substitution"]
-                + (
-                    ["rendered_body_foreground_coverage"]
-                    if body_foreground is not None and not body_foreground["measured_pages"]
-                    else []
-                )
-            )
-            if visual_metrics is not None
-            else [
-                "rendered_pixel_similarity",
-                "rendered_fill",
-                "office_font_substitution",
-                "office_line_wrapping",
-                "renderer_confirmed_pagination",
-            ]
-        ),
+        unmeasured=unmeasured,
     )
     if _phase_seconds is not None:
         qa_total = perf_counter() - qa_started

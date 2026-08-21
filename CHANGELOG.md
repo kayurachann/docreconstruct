@@ -4,6 +4,32 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow SemVer once
 the project reaches a stable API.
 
+## [Unreleased]
+
+### Fixed
+- Scan layout: a PDF page whose sole embedded image is a small figure or logo
+  is no longer analyzed as if that image were the whole page (the pypdf
+  fast path now requires the raster to share the page's display aspect before
+  standing in for it; everything else renders the true page frame). This
+  restored evidence alignment for born-digital PDFs carrying one image.
+
+### Added
+- `docreconstruct convert SOURCE [OUTPUT]` — one-command scan → editable DOCX.
+  Auto-detects an installed local OCR engine (Tesseract first, `--ocr-provider`
+  overrides), generates the Markdown content authority and JSON geometry
+  evidence automatically, runs the same three-authority pipeline as `hybrid`,
+  and prints its QA score. `--keep-intermediates` retains the generated
+  Markdown/JSON for hand correction and re-running `hybrid`; `--strict-qa`
+  fails closed when any QA gate fails.
+- `convert` classifies PDFs before choosing an engine: born-digital PDFs use
+  the loss-free `native_pdf` text layer with no OCR at all, image-heavy PDFs
+  that still carry a text layer keep the OCR default but print a hint that
+  `--ocr-provider native_pdf` uses the exact embedded wording instead.
+- `native_pdf` accepts an `include_image_bytes` option; `convert` disables it
+  because hybrid reconstruction crops figures from the source pixels, which
+  keeps formula-heavy evidence JSON at geometry size instead of embedding
+  every image's raw bytes.
+
 ## [0.1.0] — 2026-08-21
 
 First tagged release. Everything below was landed across seven merged pull

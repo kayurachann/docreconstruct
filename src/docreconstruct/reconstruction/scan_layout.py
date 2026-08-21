@@ -2042,6 +2042,24 @@ def _pypdf_pages(pages_view: Any) -> list[tuple[Image.Image, float, float]]:
             image = image.rotate(-rotation, expand=True)
             if rotation % 180:
                 pdf_width, pdf_height = pdf_height, pdf_width
+        # A page qualifies for this fast path only when its sole raster IS the
+        # page. pypdf exposes no placement geometry, but a stored scan always
+        # shares the page's display aspect; a born-digital page whose one image
+        # is a logo or figure does not, and analyzing that image as the page
+        # collapses every downstream projection. Aspect disagreement therefore
+        # sends the whole document to the rendering fallback.
+        if (
+            pdf_width <= 0
+            or pdf_height <= 0
+            or not math.isclose(
+                image.width / image.height,
+                pdf_width / pdf_height,
+                rel_tol=0.05,
+            )
+        ):
+            raise ValueError(
+                "PDF page's sole raster does not span the page; render the page instead"
+            )
         pages.append((image, pdf_width, pdf_height))
     return pages
 

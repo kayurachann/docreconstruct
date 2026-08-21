@@ -29,16 +29,25 @@ not silently "fixed" from pixels.
 pip install -e ".[all]"
 ```
 
+One command — scan or PDF in, editable DOCX out. Born-digital PDFs use their
+exact embedded text layer with no OCR at all; scans run through a local OCR
+engine ([Tesseract](https://tesseract-ocr.github.io/tessdoc/Installation.html)
+is detected automatically). Either way the Markdown content and JSON geometry
+evidence are generated for you, and the QA score is printed:
+
+```bash
+python -m docreconstruct.cli convert scan.pdf out.docx
+```
+
+Automatic quality is bounded by the OCR engine, and the "never invent text"
+rule still holds: the OCR output *is* the content authority, errors included.
+Add `--keep-intermediates` to keep the generated Markdown next to the output,
+fix OCR mistakes by hand, and re-run the `hybrid` command below.
+
 Best quality — three authorities (reviewed Markdown + original scan + OCR JSON):
 
 ```bash
 python -m docreconstruct.cli hybrid content.md original.pdf -E evidence.json -o out.docx
-```
-
-One file in, editable DOCX out (quality bounded by the OCR engine you have):
-
-```bash
-python -m docreconstruct.cli reconstruct scan.pdf -o out.docx
 ```
 
 Evaluate any result against the source image, with the same metric CI uses:
@@ -47,9 +56,10 @@ Evaluate any result against the source image, with the same metric CI uses:
 python -m docreconstruct.cli hybrid content.md original.pdf -o out.docx --qa-backend libreoffice
 ```
 
-The three-file requirement is the price of the "never invent text" rule; the
-Markdown for the showcases below ships in `docs/showcases/*/content.md` so
-every number here can be regenerated with one command (CI does exactly that).
+`convert` generates the three inputs automatically; reviewing the Markdown by
+hand is what buys best quality. The Markdown for the showcases below ships in
+`docs/showcases/*/content.md` so every number here can be regenerated with one
+command (CI does exactly that).
 
 ## Showcases
 

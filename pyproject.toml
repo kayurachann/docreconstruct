@@ -36,6 +36,12 @@ dependencies = [
   "typer>=0.12,<1",
   "rich>=13.7,<15",
   "Pillow>=12.3,<13",
+  # Compiled exact Levenshtein for the evaluator; metrics.py keeps a
+  # dependency-free Myers fallback for installs without a wheel.
+  "rapidfuzz>=3.9,<4",
+  # CommonMark block segmentation for the content authority; the legacy
+  # line scanner stays selectable via DOCRECONSTRUCT_MARKDOWN_FRONTEND.
+  "markdown-it-py>=3,<5",
 ]
 
 [project.urls]
@@ -52,6 +58,9 @@ docx = [
   "python-docx>=1.1,<2",
 ]
 hybrid = [
+  # Independent LaTeX->MathML derivation for QA's math cross-check gate;
+  # without it the gate is honestly reported as unmeasured.
+  "latex2mathml>=3.77,<4",
   "numpy>=1.26,<3",
   "PyMuPDF>=1.24,<2",
   "pypdf>=6.15,<7",
@@ -77,6 +86,7 @@ dev = [
 ]
 all = [
   "PyMuPDF>=1.24,<2",
+  "latex2mathml>=3.77,<4",
   "numpy>=1.26,<3",
   "pypdf>=6.15,<7",
   "python-docx>=1.1,<2",

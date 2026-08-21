@@ -130,12 +130,23 @@ class NativePDFProvider(Provider):
         effective_context = context or ProviderContext()
         if source_label and effective_context.source is None:
             effective_context = effective_context.model_copy(update={"source": source_label})
+        # Raw image bytes make each image renderable straight from the IR but
+        # dominate serialized size on formula-heavy PDFs; callers that only
+        # need text and geometry (e.g. hybrid evidence) can opt out.
+        include_image_bytes = effective_context.options.get("include_image_bytes") is not False
         pages: list[Page] = []
         warnings: list[str] = []
         try:
             for page_index in range(pdf.page_count):
                 pdf_page = pdf.load_page(page_index)
-                pages.append(self._extract_page(pdf_page, page_index, warnings))
+                pages.append(
+                    self._extract_page(
+                        pdf_page,
+                        page_index,
+                        warnings,
+                        include_image_bytes=include_image_bytes,
+                    )
+                )
         finally:
             pdf.close()
 
@@ -147,7 +158,14 @@ class NativePDFProvider(Provider):
         )
         return ProviderResult(provider=self.name, document=document, warnings=warnings)
 
-    def _extract_page(self, pdf_page: Any, page_index: int, warnings: list[str]) -> Page:
+    def _extract_page(
+        self,
+        pdf_page: Any,
+        page_index: int,
+        warnings: list[str],
+        *,
+        include_image_bytes: bool = True,
+    ) -> Page:
         page_number = page_index + 1
         elements: list[Element] = []
         try:
@@ -170,7 +188,7 @@ class NativePDFProvider(Provider):
                 extension = block.get("ext")
                 mime_type = f"image/{extension}" if extension else "application/octet-stream"
                 image_payload = {
-                    "bytes": block.get("image"),
+                    "bytes": block.get("image") if include_image_bytes else None,
                     "mime_type": mime_type,
                     "extension": extension,
                     "width": block.get("width"),

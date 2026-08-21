@@ -1277,3 +1277,49 @@ def test_native_tables_gate_ignores_the_renderer_own_layout_scaffolding() -> Non
     assert not hybrid_validation._is_layout_furniture(table(None))
     assert not hybrid_validation._is_layout_furniture(table("Quarterly results"))
     assert not hybrid_validation._is_layout_furniture(table("docreconstruct:other"))
+
+
+def test_independent_math_projection_gate_cross_checks_via_latex2mathml(
+    tmp_path: Path,
+) -> None:
+    """The math expectation must come from a path the OMML bridge does not own.
+
+    ``latex_visible_text`` both renders the artifact and used to produce the
+    expected text, so a parser defect satisfied its own expectation.  The
+    gate compares against latex2mathml instead; on the healthy fixture the two
+    independent derivations must agree for every expression.
+    """
+
+    pytest.importorskip("latex2mathml")
+    markdown, layout = _fixture(tmp_path)
+    output = tmp_path / "independent-math.docx"
+    reconstruct_hybrid(markdown, layout, output=output)
+
+    report = validate_hybrid(markdown, layout, output)
+
+    assert _gate(report, "independent_math_projection").passed
+    cross_check = report.metrics["independent_math_cross_check"]
+    assert cross_check["available"] is True
+    assert cross_check["expressions"] == 2
+    assert cross_check["disagreements"] == []
+    assert cross_check["agreements"] + len(cross_check["unanswered"]) == 2
+    assert "independent_math_projection" not in report.unmeasured
+
+
+def test_independent_math_is_unmeasured_without_latex2mathml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing optional dependency must be reported, never silently passed."""
+
+    markdown, layout = _fixture(tmp_path)
+    output = tmp_path / "no-reference-path.docx"
+    reconstruct_hybrid(markdown, layout, output=output)
+    monkeypatch.setattr("docreconstruct.evaluation.math_reference._latex2mathml", None)
+
+    report = validate_hybrid(markdown, layout, output)
+
+    assert "independent_math_projection" not in {gate.name for gate in report.gates}
+    assert "independent_math_projection" in report.unmeasured
+    assert report.metrics["independent_math_cross_check"]["available"] is False
+    assert report.passed
