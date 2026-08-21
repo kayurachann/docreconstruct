@@ -154,3 +154,42 @@ def test_selection_reads_class_declaration_without_constructing_provider() -> No
 
     assert [item.provider for item in allowed] == ["never_constructed"]
     assert denied[0].missing == ["no_credentials"]
+
+
+def test_raster_extension_aliases_reach_the_same_providers() -> None:
+    """Providers spell the same format differently in ``supported_inputs``.
+
+    Comparing raw tokens meant ``.jpg`` matched only the one provider that
+    declares "jpg" and ``.tif`` matched nothing at all, even though seven and
+    six providers respectively handle those files.
+    """
+
+    def matching(input_format: str) -> set[str]:
+        return {
+            recommendation.provider
+            for recommendation in recommend_providers(
+                CapabilityRequest(input_format=input_format), registry=registry
+            )
+            if not recommendation.missing
+        }
+
+    jpeg = matching("jpeg")
+    tiff = matching("tiff")
+
+    assert jpeg and tiff
+    for alias in ("jpg", ".jpg", "JPG", ".jpeg"):
+        assert matching(alias) == jpeg
+    for alias in ("tif", ".tif", "TIF", ".tiff"):
+        assert matching(alias) == tiff
+
+
+def test_language_tokens_are_not_folded_by_the_format_aliases() -> None:
+    tokens = {
+        recommendation.provider
+        for recommendation in recommend_providers(
+            CapabilityRequest(languages=["vi"]), registry=registry
+        )
+        if not recommendation.missing
+    }
+
+    assert tokens

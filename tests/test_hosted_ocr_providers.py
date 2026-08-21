@@ -468,3 +468,68 @@ def test_azure_live_call_posts_then_polls_through_mocked_http_without_persisting
     assert result.metadata["request_id"] == "azure-request"
     assert slept == []
     assert "azure-secret" not in result.model_dump_json()
+
+
+def test_mistral_page_range_response_keeps_its_absolute_page_numbers() -> None:
+    """Mistral's ``index`` is always zero-based.
+
+    The provider inferred that only when the response happened to contain
+    index 0, so every page-range request came back shifted: pages 2-4 of a
+    document were labelled 1-3 and silently overwrote the wrong originals.
+    """
+
+    payload = _mistral_payload()
+    first = payload["pages"][0]
+    payload["pages"] = [
+        {**first, "index": index, "blocks": first["blocks"], "images": []} for index in (1, 2, 3)
+    ]
+
+    result = MistralOCRProvider().parse(payload)
+
+    assert [page.number for page in result.document.pages] == [2, 3, 4]
+
+
+def test_mistral_full_document_numbering_is_unchanged() -> None:
+    payload = _mistral_payload()
+    first = payload["pages"][0]
+    payload["pages"] = [{**first, "index": index, "images": []} for index in (0, 1, 2)]
+
+    result = MistralOCRProvider().parse(payload)
+
+    assert [page.number for page in result.document.pages] == [1, 2, 3]
+
+
+def test_mistral_blocks_without_geometry_are_kept_against_the_page_box() -> None:
+    """A bbox-less block was dropped entirely.
+
+    Losing it also suppressed the markdown fallback, so a response whose blocks
+    all lacked geometry produced a page with no elements at all rather than the
+    recognized text. Sibling providers keep the content and label the
+    coordinate system instead.
+    """
+
+    payload = _mistral_payload()
+    page_payload = payload["pages"][0]
+    for block in page_payload["blocks"]:
+        block.pop("bbox")
+    page_payload["images"][0] = {
+        "id": "figure-1.png",
+        "image_base64": "data:image/png;base64,AAAA",
+    }
+
+    page = MistralOCRProvider().parse(payload).document.pages[0]
+
+    title = next(element for element in page.elements if element.type is ElementType.TITLE)
+    assert title.text_candidates[0].value == "# Sample title"
+    assert title.bbox == BBox(x0=0, y0=0, x1=1000, y1=1400)
+    assert title.metadata["coordinate_system"] == "full_page_fallback"
+
+    image = next(element for element in page.elements if element.type is ElementType.IMAGE)
+    assert image.metadata["coordinate_system"] == "full_page_fallback"
+
+
+def test_mistral_blocks_with_geometry_are_labelled_as_source() -> None:
+    page = MistralOCRProvider().parse(_mistral_payload()).document.pages[0]
+    title = next(element for element in page.elements if element.type is ElementType.TITLE)
+
+    assert title.metadata["coordinate_system"] == "source"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import html.parser
+import logging
 import math
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -250,6 +251,35 @@ def element_metadata(element: Any) -> dict[str, Any]:
     return data
 
 
+# XML 1.0 forbids these codepoints outright: no escape can represent them, so
+# lxml rejects the whole tree rather than the offending run. Tab, LF and CR are
+# legal and deliberately absent.
+_XML_ILLEGAL = {
+    codepoint: None
+    for codepoint in (*range(0x00, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0xFFFE, 0xFFFF)
+}
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def xml_safe_text(value: Any) -> str:
+    """Drop codepoints XML 1.0 forbids, keeping tab, newline and carriage return.
+
+    OCR of a page-break glyph or a damaged byte stream routinely yields a form
+    feed or a NUL. Passing one to python-docx aborts the entire document with a
+    ValueError from lxml, so a single bad character costs every other page.
+    """
+
+    text = "" if value is None else str(value)
+    cleaned = text.translate(_XML_ILLEGAL)
+    if cleaned != text:
+        _LOGGER.warning(
+            "removed %d XML-illegal control character(s) from rendered text",
+            len(text) - len(cleaned),
+        )
+    return cleaned
+
+
 def finite_number(number: Any, default: float = 0.0) -> float:
     try:
         result = float(number)
@@ -289,6 +319,62 @@ def bbox_tuple(bbox_or_element: Any) -> tuple[float, float, float, float]:
             return (0.0, 0.0, 0.0, 0.0)
     left, top, right, bottom = result
     return (min(left, right), min(top, bottom), max(left, right), max(top, bottom))
+
+
+@dataclasses.dataclass(frozen=True)
+class PageDisplayFrame:
+    """Display-space geometry for a page whose IR box is stored unrotated.
+
+    Providers record ``Page.width``/``Page.height`` in the PDF's own coordinate
+    space and keep the quarter turn separately in ``Page.rotation``, so a
+    landscape scan is normally stored as a portrait box plus ``rotation=90``.
+    Renderers that read the raw box emit the wrong paper size and leave every
+    element box in the unrotated frame.  ``quadrant`` is ``None`` when the
+    rotation is not a quarter turn, in which case the geometry is passed
+    through untouched rather than guessed at.
+    """
+
+    width: float
+    height: float
+    quadrant: float | None
+
+    @property
+    def rotated(self) -> bool:
+        return bool(self.quadrant)
+
+    def map_box(self, box: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        """Rotate an unrotated element box into the display frame."""
+
+        x0, y0, x1, y1 = box
+        if self.quadrant == 90.0:
+            return (self.width - y1, x0, self.width - y0, x1)
+        if self.quadrant == 180.0:
+            return (self.width - x1, self.height - y1, self.width - x0, self.height - y0)
+        if self.quadrant == 270.0:
+            return (y0, self.height - x1, y1, self.height - x0)
+        return box
+
+
+def page_display_frame(page: Any) -> PageDisplayFrame:
+    """Resolve the paper size and box mapping a reader actually sees.
+
+    Mirrors ``evidence_matching._orthogonal_page_box``, which is the canonical
+    re-application of ``Page.rotation`` elsewhere in the pipeline.
+    """
+
+    width = max(1.0, finite_number(value(page, "width", 1.0), 1.0))
+    height = max(1.0, finite_number(value(page, "height", 1.0), 1.0))
+    rotation = finite_number(value(page, "rotation", 0.0)) % 360.0
+    quadrant = next(
+        (angle for angle in (0.0, 90.0, 180.0, 270.0) if abs(rotation - angle) <= 1e-6),
+        None,
+    )
+    if quadrant is None or quadrant == 0.0:
+        return PageDisplayFrame(width=width, height=height, quadrant=None)
+    if quadrant == 180.0:
+        return PageDisplayFrame(width=width, height=height, quadrant=180.0)
+    # A quarter turn swaps the paper's long and short edges.
+    return PageDisplayFrame(width=height, height=width, quadrant=quadrant)
 
 
 def ordered_elements(page: Any) -> list[Any]:

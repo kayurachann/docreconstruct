@@ -525,3 +525,25 @@ def test_report_redacts_paths_urls_snippets_and_failure_messages(tmp_path: Path)
         == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
     assert metadata["pipeline_note"] == "OCR/parser fallback remains enabled"
+
+
+def test_failed_case_is_labelled_with_the_backend_that_would_have_rendered() -> None:
+    """``render_docx_pages`` always reports ``used_backend="libreoffice"``.
+
+    Labelling a failure with the *requested* backend produced a second profile
+    under ``--qa-backend auto``, which made ``_slice_summary`` see two profiles
+    and erase ``mean_quality_score`` for the entire report, while splitting
+    ``quality_profiles`` into groups whose means excluded each other's cases.
+    """
+
+    from docreconstruct.evaluation.reconstruction_benchmark import _failed_quality_profile
+    from docreconstruct.evaluation.visual import VISUAL_METRIC_VERSION
+
+    rendered = f"rendered_visual|backend=libreoffice|metric={VISUAL_METRIC_VERSION}"
+
+    assert _failed_quality_profile("auto") == rendered
+    assert _failed_quality_profile("libreoffice") == rendered
+    # "native" does no visual rendering at all, and an unknown backend must
+    # degrade to "incomplete" rather than invent a comparable profile.
+    assert _failed_quality_profile("native") is None
+    assert _failed_quality_profile("pandoc") is None

@@ -402,10 +402,21 @@ class _LatexParser:
 
     def _argument(self) -> list[Any]:
         self._skip_spaces()
-        if self.position < len(self.source) and self.source[self.position] == "{":
+        if self.position >= len(self.source):
+            return []
+        character = self.source[self.position]
+        if character == "{":
             self.position += 1
             return self.parse("}")
-        return self._atom()
+        if character in "\\}_^":
+            # Control sequences (``x^\alpha``) and the deliberate handling of
+            # malformed ``_``/``^``/``}`` both belong to ``_atom``.
+            return self._atom()
+        # TeX binds an unbraced argument to exactly one character, so the
+        # superscript of ``a^2+b^2`` is ``2`` alone.  ``_atom`` would instead
+        # run to the next delimiter and swallow ``+b`` into the script.
+        self.position += 1
+        return [_run(character)]
 
     def _raw_group(self) -> str:
         self._skip_spaces()

@@ -850,9 +850,12 @@ def _evaluate_docx_artifact(path: Path) -> EditabilityMetrics:
         editable_elements=editable,
         flattened_elements=drawings,
         total_elements=total,
-        editable_ratio=editable / total if total else 1.0,
-        native_text_ratio=paragraphs / total if total else 1.0,
-        native_structure_ratio=tables / total if total else 1.0,
+        # A body with no content is not vacuously perfect: the raster branch
+        # below already reports explicit zeros for an uneditable artifact, and
+        # the text/markdown constant in evaluator.py spells structure as 0.0.
+        editable_ratio=editable / total if total else 0.0,
+        native_text_ratio=paragraphs / total if total else 0.0,
+        native_structure_ratio=tables / total if total else 0.0,
     )
 
 
@@ -911,9 +914,9 @@ def evaluate_editability(candidate: Any, output_format: str | None = None) -> Ed
         editable_elements=editable,
         flattened_elements=flattened,
         total_elements=total,
-        editable_ratio=editable / total if total else 1.0,
-        native_text_ratio=native_text / total if total else 1.0,
-        native_structure_ratio=native_structure / total if total else 1.0,
+        editable_ratio=editable / total if total else 0.0,
+        native_text_ratio=native_text / total if total else 0.0,
+        native_structure_ratio=native_structure / total if total else 0.0,
     )
 
 

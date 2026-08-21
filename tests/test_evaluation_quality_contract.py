@@ -432,3 +432,51 @@ def test_distance_falls_back_for_unhashable_items() -> None:
     right = [["a"], ["x"], ["c"]]
 
     assert _distance(left, right) == 1
+
+
+def test_content_free_docx_is_not_editable(tmp_path: Path) -> None:
+    """An empty body scored a perfect 1.0 on all three editability ratios.
+
+    It even claimed ``native_structure_ratio == 1.0`` — that the document was
+    100% native tables — which contradicts the raster branch's explicit zeros
+    and the hand-written text/markdown constant's ``structure = 0.0``.
+    """
+
+    import zipfile
+
+    output = tmp_path / "empty.docx"
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/'
+            'package/2006/content-types">'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        )
+        archive.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/'
+            'package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.'
+            'openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="word/document.xml"/></Relationships>',
+        )
+        archive.writestr(
+            "word/document.xml",
+            '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/'
+            'wordprocessingml/2006/main"><w:body><w:sectPr/></w:body></w:document>',
+        )
+
+    metrics = evaluate_editability(output)
+
+    assert metrics.total_elements == 0
+    assert metrics.score == 0.0
+    assert metrics.native_structure_ratio == 0.0
+
+
+@pytest.mark.parametrize("candidate", [{"pages": []}, {"pages": [{"elements": []}]}])
+def test_element_free_ir_is_not_editable(candidate: dict[str, object]) -> None:
+    metrics = evaluate_editability(candidate)
+
+    assert metrics.total_elements == 0
+    assert metrics.score == 0.0

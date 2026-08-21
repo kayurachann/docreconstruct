@@ -173,3 +173,36 @@ def test_remote_endpoint_requires_https_and_explicit_operator_trust() -> None:
                 options={"allow_remote": True, "endpoint": "https://gpu.example.com"}
             ),
         )
+
+
+def _capture_request(source: Any) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def transport(**kwargs: Any) -> HTTPResponse:
+        captured.update(kwargs)
+        return HTTPResponse(status=200, headers={}, body=json.dumps(_server_payload()).encode())
+
+    PaddleOCRVLServerProvider(transport=transport).parse(
+        source,
+        context=ProviderContext(
+            options={"allow_remote": True, "endpoint": "http://localhost:8080"}
+        ),
+    )
+    return dict(json.loads(captured["body"]))
+
+
+def test_https_pdf_url_is_not_announced_as_an_image() -> None:
+    """A retained URL is never fetched, so it has no real media type.
+
+    ``load_hosted_source`` labels it "application/octet-stream", and keying the
+    fileType off that alone told the server every HTTPS PDF was an image, so it
+    decoded page one as a raster and dropped the rest of the document.
+    """
+
+    assert _capture_request("https://example.com/reports/quarterly.pdf")["fileType"] == 0
+    assert _capture_request("https://example.com/reports/QUARTERLY.PDF?sig=x")["fileType"] == 0
+    assert _capture_request("https://example.com/scans/page-1.png")["fileType"] == 1
+
+
+def test_unrecognizable_url_omits_file_type_for_the_server_to_infer() -> None:
+    assert "fileType" not in _capture_request("https://example.com/download/opaque-id")

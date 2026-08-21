@@ -274,6 +274,8 @@ class OCRSliceSummary:
     successful_cases: int
     mean_score: float | None
     component_means: dict[str, float | None]
+    mean_overall_strict: float | None = None
+    mean_measurement_coverage: float | None = None
 
     @property
     def failed_cases(self) -> int:
@@ -285,6 +287,8 @@ class OCRSliceSummary:
             "successful_cases": self.successful_cases,
             "failed_cases": self.failed_cases,
             "mean_score": self.mean_score,
+            "mean_overall_strict": self.mean_overall_strict,
+            "mean_measurement_coverage": self.mean_measurement_coverage,
             "component_means": self.component_means,
         }
 
@@ -298,8 +302,38 @@ def _component_means(results: Sequence[OCRBenchmarkResult]) -> dict[str, float |
             if result.evaluation is not None
             and (value := getattr(result.evaluation.fidelity, component)) is not None
         ]
-        means[component] = sum(scores) / len(scores) if scores else None
+        if not scores:
+            means[component] = None
+            continue
+        # Both sides of an OCR case are Markdown by construction, so the
+        # evaluator supplies a hand-written EditabilityMetrics constant rather
+        # than measuring the candidate.  Publishing that literal as a component
+        # mean reads as a perfect score for something nobody measured.
+        if component == "editability" and _is_synthetic_editability(results):
+            means[component] = None
+            continue
+        means[component] = sum(scores) / len(scores)
     return means
+
+
+def _is_synthetic_editability(results: Sequence[OCRBenchmarkResult]) -> bool:
+    """True when every scored case took the evaluator's text/markdown branch."""
+
+    formats = {
+        str(result.evaluation.metadata.get("candidate_kind", "")).strip().lower()
+        for result in results
+        if result.evaluation is not None
+    }
+    return bool(formats) and formats <= {"text", "markdown", "html"}
+
+
+def _mean_of(results: Sequence[OCRBenchmarkResult], attribute: str) -> float | None:
+    values = [
+        getattr(result.evaluation.fidelity, attribute)
+        for result in results
+        if result.evaluation is not None
+    ]
+    return sum(values) / len(values) if values else None
 
 
 def _slice_summary(results: Sequence[OCRBenchmarkResult]) -> OCRSliceSummary:
@@ -309,6 +343,8 @@ def _slice_summary(results: Sequence[OCRBenchmarkResult]) -> OCRSliceSummary:
         successful_cases=len(scores),
         mean_score=sum(scores) / len(scores) if scores else None,
         component_means=_component_means(results),
+        mean_overall_strict=_mean_of(results, "overall_strict"),
+        mean_measurement_coverage=_mean_of(results, "measurement_coverage"),
     )
 
 
@@ -337,6 +373,21 @@ class OCRBenchmarkReport:
     @property
     def component_means(self) -> dict[str, float | None]:
         return _component_means(self.results)
+
+    @property
+    def mean_overall_strict(self) -> float | None:
+        """Mean of the non-deprecated headline, which only counts what it measured.
+
+        ``mean_score`` averages ``FidelityScore.overall``, which spreads the
+        unmeasurable components over the measured ones and so cannot fall below
+        roughly 0.36 for a Markdown-vs-Markdown case however wrong the OCR is.
+        """
+
+        return _mean_of(self.results, "overall_strict")
+
+    @property
+    def mean_measurement_coverage(self) -> float | None:
+        return _mean_of(self.results, "measurement_coverage")
 
     @property
     def slice_means(self) -> dict[str, dict[str, OCRSliceSummary]]:
@@ -385,6 +436,8 @@ class OCRBenchmarkReport:
                 "successful_cases": self.successful_cases,
                 "failed_cases": self.failed_cases,
                 "mean_score": self.mean_score,
+                "mean_overall_strict": self.mean_overall_strict,
+                "mean_measurement_coverage": self.mean_measurement_coverage,
                 "component_means": self.component_means,
                 "slice_means": {
                     dimension: {value: summary.to_dict() for value, summary in values.items()}

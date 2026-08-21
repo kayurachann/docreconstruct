@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from docreconstruct.analysis import infer_reading_order
-from docreconstruct.exceptions import ReconstructionError, UnsupportedInputError
+from docreconstruct.exceptions import (
+    LayoutBudgetExceededError,
+    ReconstructionError,
+    UnsupportedInputError,
+)
 from docreconstruct.ir import Document
 from docreconstruct.preprocessing import analyze_source, image_to_document
 from docreconstruct.profiles import ReconstructionProfile
@@ -126,12 +130,18 @@ def analyze(
     engines: Sequence[str] | str | None = None,
     fusion: bool = False,
     provider_options: Mapping[str, Any] | None = None,
+    max_pages: int | None = None,
 ) -> Document:
     """Extract a source into canonical IR without rendering it.
 
     Heavy OCR engines are deliberately not vendored. Built-in PaddleOCR,
     MinerU, and olmOCR adapters consume saved JSON; live provider plugins can
     declare ``live_inference=True`` and receive the original source here.
+
+    ``max_pages`` is opt-in and defaults to no limit, so CLI and library callers
+    keep working on long documents. The service sets it, because a page count is
+    not bounded by an upload's byte size: an 828 KiB PDF expands to 5000 pages
+    of IR. It is checked against the inspection, before any per-page work.
     """
 
     path = Path(source).expanduser().resolve()
@@ -146,6 +156,13 @@ def analyze(
     except Exception as exc:  # inspection must not discard otherwise valid provider evidence
         source_inspection = None
         inspection = {"warning": f"Source inspection unavailable: {exc}"}
+    if max_pages is not None and source_inspection is not None:
+        page_count = len(source_inspection.pages)
+        if page_count > max_pages:
+            raise LayoutBudgetExceededError(
+                f"source has {page_count} pages, above the {max_pages}-page limit "
+                "for this entry point"
+            )
     context_width = context_height = None
     if source_inspection is not None and len(source_inspection.pages) == 1:
         context_width = source_inspection.pages[0].width

@@ -298,7 +298,7 @@ def prepare_markdown_layout_sources(
             f"The layout authority must be a PDF or raster image ({supported})."
         )
 
-    markdown_text = markdown_path.read_text(encoding="utf-8")
+    markdown_text = markdown_path.read_text(encoding="utf-8-sig")
     if not markdown_text.strip():
         raise ValueError(f"Markdown source is empty: {markdown_path}")
     if layout_suffix == ".pdf":

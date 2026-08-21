@@ -172,7 +172,7 @@ class DocumentRouter:
                 fallbacks=[],
                 reasons=[RoutingReason.NATIVE_FIRST],
             )
-        if page.source_type in {SourceType.IMAGE, SourceType.SCANNED}:
+        if page.source_type in {SourceType.IMAGE, SourceType.SCANNED} and not native_text:
             return self._task(
                 task_id=f"route-page-{page.number}-ocr",
                 page=page,

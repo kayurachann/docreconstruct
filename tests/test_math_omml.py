@@ -286,3 +286,47 @@ def test_invalid_display_geometry_options_are_rejected() -> None:
         build_omml(r"\begin{aligned}x\\y\end{aligned}", row_spacing=1.5)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="at least one point"):
         build_omml(r"\begin{aligned}x\\y\end{aligned}", row_spacing=0)
+
+
+@pytest.mark.parametrize(
+    ("latex", "expected"),
+    [
+        (r"a^2+b^2=c^2", "a2+b2=c2"),
+        (r"a^2b^2", "a2b2"),
+        (r"n^2-n^1", "n2-n1"),
+        (r"a_i+b_i", "ai+bi"),
+        (r"x_1+x_2", "x1+x2"),
+        # Braced arguments already behaved; they must keep behaving.
+        (r"a^{2}+b^{2}=c^{2}", "a2+b2=c2"),
+        # A control sequence is still a single argument.
+        (r"x^\alpha+1", "x\u03b1+1"),
+        (r"\frac\alpha\beta", "\u03b1\u03b2"),
+    ],
+)
+def test_unbraced_script_argument_binds_to_one_character(latex: str, expected: str) -> None:
+    """TeX binds ``a^2+b`` as ``(a^2)+b``, not ``a^(2+b)``.
+
+    Consuming to the next delimiter dropped everything after the first script
+    from the rendered equation.
+    """
+
+    assert latex_visible_text(latex) == expected
+
+
+def test_unbraced_command_arguments_split_across_operands() -> None:
+    math = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+    fraction = build_omml(r"\frac12").find(f"{math}f")
+
+    assert fraction is not None
+    numerator = fraction.find(f"{math}num")
+    denominator = fraction.find(f"{math}den")
+    assert numerator is not None and denominator is not None
+    assert "".join(node.text or "" for node in numerator.iter(f"{math}t")) == "1"
+    assert "".join(node.text or "" for node in denominator.iter(f"{math}t")) == "2"
+
+    radical = build_omml(r"\sqrt2x")
+    radicand = radical.find(f"{math}rad/{math}e")
+    assert radicand is not None
+    assert "".join(node.text or "" for node in radicand.iter(f"{math}t")) == "2"
+    # ``x`` belongs beside the radical, not underneath it.
+    assert latex_visible_text(r"\sqrt2x") == "2x"

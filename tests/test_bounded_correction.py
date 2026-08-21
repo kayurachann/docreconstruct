@@ -48,6 +48,7 @@ from docreconstruct.reconstruction.correction import (
     compare_objectives,
     run_bounded_correction,
 )
+from docreconstruct.reconstruction.correction.invariants import actions_authorized_by_plan
 
 _CONTENT_SHA = "a" * 64
 _LAYOUT_SHA = "b" * 64
@@ -637,3 +638,156 @@ def test_invalid_initial_candidate_is_returned_unchanged_without_proposals() -> 
     assert result.artifact == b"invalid"
     assert result.report.terminal_reason is TerminalReason.INITIAL_INVARIANT_VIOLATION
     assert HardInvariantViolation.AUTHORITY_HASH in result.report.initial_invariant_violations
+
+
+def _font_action(*, before: float, after: float) -> CorrectionAction:
+    return CorrectionAction(
+        action_type=CorrectionActionType.ADJUST_FONT_SIZE,
+        object_ids=("paragraph-1",),
+        before=CorrectionParameters(font_size=before),
+        after=CorrectionParameters(font_size=after),
+        reason="repair visual geometry",
+        predicted_effect=PredictedEffect(target=ObjectiveComponent.VISUAL, expected_delta=0.1),
+    )
+
+
+def _gutter_action(*, before: float, after: float) -> CorrectionAction:
+    return CorrectionAction(
+        action_type=CorrectionActionType.ADJUST_GUTTER,
+        object_ids=("paragraph-1",),
+        before=CorrectionParameters(gutter=before),
+        after=CorrectionParameters(gutter=after),
+        reason="widen the column gutter",
+        predicted_effect=PredictedEffect(target=ObjectiveComponent.VISUAL, expected_delta=0.1),
+    )
+
+
+def _two_column_plan() -> ConstraintPlan:
+    plan = _plan()
+    page = plan.pages[0]
+
+    def column(column_id: str, x0: float, x1: float, owns: bool) -> ColumnConstraint:
+        return ColumnConstraint(
+            column_id=column_id,
+            preferred_bbox=BBox(x0=x0, y0=50, x1=x1, y1=750),
+            min_width=200,
+            max_width=300,
+            object_ids=("paragraph-1",) if owns else (),
+            provenance="content_bbox_fallback",
+            soft_constraints=(SoftConstraintKind.COLUMN_GUTTER,),
+        )
+
+    updated = page.model_copy(
+        update={
+            "columns": (
+                column("page-1-column-1", 50, 290, True),
+                column("page-1-column-2", 310, 550, False),
+            )
+        }
+    )
+    return plan.model_copy(update={"pages": (updated,)})
+
+
+def test_conflicting_actions_on_one_object_are_not_authorized_together() -> None:
+    """Distinct fingerprints do not make two actions compatible.
+
+    Two different font sizes for the same paragraph both passed the fingerprint
+    check and were handed to the builder in an order the batch never specified.
+    """
+
+    plan = _plan()
+    assessment = _assessment(plan)
+
+    assert not actions_authorized_by_plan(
+        plan, assessment, [_font_action(before=12, after=11), _font_action(before=12, after=13)]
+    )
+    # One action of the same shape is still fine.
+    assert actions_authorized_by_plan(plan, assessment, [_font_action(before=12, after=11)])
+
+
+def test_gutter_must_fit_between_the_margins_beside_its_columns() -> None:
+    """The old check compared the gutter to the whole page width.
+
+    ``CorrectionParameters`` already caps the raw value well below that, so the
+    guard authorized every gutter the schema allowed — including ones that
+    cannot coexist with the columns' own minimum widths.
+    """
+
+    single = _plan()
+    assessment = _assessment(single)
+    # A one-column page has no gutter to adjust at all.
+    assert not actions_authorized_by_plan(
+        single, assessment, [_gutter_action(before=270, after=288)]
+    )
+
+    two = _two_column_plan()
+    # 600pt page less 50pt margins leaves 500pt; two 200pt minimums leave 100pt.
+    assert actions_authorized_by_plan(two, assessment, [_gutter_action(before=92, after=100)])
+    assert not actions_authorized_by_plan(two, assessment, [_gutter_action(before=95, after=101)])
+    assert not actions_authorized_by_plan(two, assessment, [_gutter_action(before=270, after=288)])
+
+
+def test_restated_before_cannot_walk_a_setting_past_its_delta_limit() -> None:
+    """``before`` comes from the proposer, so the delta limit bounds nothing.
+
+    Each action stayed within the 2.0pt per-action limit relative to its own
+    claimed starting point, letting three iterations move the font from 12pt to
+    18pt while every individual step looked compliant.
+    """
+
+    plan = _plan()
+    initial = _assessment(plan)
+    better = _assessment(plan, visual_score=0.75)
+    best = _assessment(plan, visual_score=0.85)
+    evaluator = _Evaluator({b"base": initial, b"second": better, b"third": best})
+    artifacts = iter([b"second", b"third"])
+
+    result = run_bounded_correction(
+        b"base",
+        plan,
+        propose=_QueueProposer(
+            [
+                [_font_action(before=12, after=14)],
+                # The engine applied 14pt; this claims it starts from 16pt.
+                [_font_action(before=16, after=18)],
+                None,
+            ]
+        ),
+        build_candidate=lambda artifact, actions, constraint: next(artifacts),
+        evaluate_candidate=evaluator,
+        limits=CorrectionLimits(max_iterations=3, minimum_objective_delta=0.01),
+    )
+
+    first, second = result.report.iterations[0], result.report.iterations[1]
+    assert first.accepted
+    assert not second.accepted
+    assert second.decision is IterationDecision.ACTION_NOT_AUTHORIZED
+    # The escalating action never reached the builder, so 14pt is final.
+    assert result.artifact == b"second"
+
+
+def test_before_matching_the_applied_state_is_still_accepted() -> None:
+    plan = _plan()
+    initial = _assessment(plan)
+    better = _assessment(plan, visual_score=0.75)
+    best = _assessment(plan, visual_score=0.85)
+    evaluator = _Evaluator({b"base": initial, b"second": better, b"third": best})
+    artifacts = iter([b"second", b"third"])
+
+    result = run_bounded_correction(
+        b"base",
+        plan,
+        propose=_QueueProposer(
+            [
+                [_font_action(before=12, after=14)],
+                [_font_action(before=14, after=15)],
+                None,
+            ]
+        ),
+        build_candidate=lambda artifact, actions, constraint: next(artifacts),
+        evaluate_candidate=evaluator,
+        limits=CorrectionLimits(max_iterations=3, minimum_objective_delta=0.01),
+    )
+
+    assert [record.accepted for record in result.report.iterations[:2]] == [True, True]
+    assert result.artifact == b"third"

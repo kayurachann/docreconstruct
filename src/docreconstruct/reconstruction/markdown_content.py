@@ -82,6 +82,12 @@ _GROUP_PATTERN = re.compile(
 _NUMBERED_GROUP_PATTERN = re.compile(r"^(?P<label>\d{1,4}[.)])\s+")
 _SOLUTION_GROUP_PATTERN = re.compile(r"^(?P<label>[A-Z]\s*[-\u2012-\u2015]\s*\d+)\b")
 _DISPLAY_MATH_PATTERN = re.compile(r"^\$\$\s*(.*?)\s*\$\$$", flags=re.DOTALL)
+# Display math is a block construct even when prose surrounds it on the same
+# line, so a paragraph carrying one is split around it rather than keeping the
+# literal ``$$`` delimiters in its text.
+_DISPLAY_MATH_SPAN = re.compile(
+    r"(?<!\\)\$\$\s*(?P<body>(?:(?!\$\$).)+?)\s*(?<!\\)\$\$", flags=re.DOTALL
+)
 _THEMATIC_BREAK_PATTERN = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
 _LIST_ITEM_PATTERN = re.compile(r"^(?:[-*+]|\d{1,4}[.)])\s+\S")
 _OPTION_START = re.compile(r"(?<!\S)(?=[A-D][.)]\s+)")
@@ -99,7 +105,23 @@ _CJK_SECTION_PATTERN = re.compile(
 )
 
 
+# The exact inverse of renderers.markdown._escape_block: a backslash that only
+# exists to stop a line opening a block is not part of the author's text.
+_ESCAPED_BLOCK_MARKER = re.compile(
+    r"^(\s{0,3})\\(?=(?:#{1,6}(?:\s|$)|[-+*]\s|\d{1,4}[.)]\s|>|```|~~~"
+    r"|(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$))",
+    flags=re.MULTILINE,
+)
+
+
+def _unescape_block_markers(value: str) -> str:
+    return _ESCAPED_BLOCK_MARKER.sub(r"\1", value)
+
+
 def _plain(value: str) -> str:
+    # The block-marker escape is deliberately left in place here: block kinds
+    # are decided from this string, and unescaping first would let ``\- item``
+    # be classified as a list again. It is stripped once, on the finished block.
     return html.unescape(value.strip()).replace("\u00a0", " ")
 
 
@@ -309,7 +331,9 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
     path = Path(source).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
-    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    # ``utf-8-sig`` drops a leading BOM if present; a BOM glued to the
+    # first "#" turns the document title into an ordinary paragraph.
+    raw_lines = path.read_text(encoding="utf-8-sig").splitlines()
     tokens: list[tuple[MarkdownBlockKind, str, dict[str, str | int]]] = []
     paragraph: list[str] = []
     list_indent: int | None = None
@@ -332,6 +356,25 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
                     dict(metadata or {}),
                 )
             )
+            return
+        spans = list(_DISPLAY_MATH_SPAN.finditer(value))
+        if spans:
+            cursor = 0
+            for span in spans:
+                head = value[cursor : span.start()].strip()
+                if head:
+                    append_text(head, metadata)
+                tokens.append(
+                    (
+                        MarkdownBlockKind.EQUATION,
+                        span.group("body").strip(),
+                        dict(metadata or {}),
+                    )
+                )
+                cursor = span.end()
+            tail = value[cursor:].strip()
+            if tail:
+                append_text(tail, metadata)
             return
         if _SECTION_START_PATTERN.match(value):
             split = _CAPITALIZED_GROUP_PATTERN.search(value)
@@ -492,7 +535,9 @@ def parse_markdown_content(source: str | Path) -> MarkdownContent:
                 id=f"md-{block_index + 1}",
                 index=block_index,
                 kind=kind,
-                text="" if kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE} else text,
+                text=""
+                if kind in {MarkdownBlockKind.IMAGE, MarkdownBlockKind.TABLE}
+                else _unescape_block_markers(text),
                 source=source_reference,
                 level=level,
                 group_id=current_group,

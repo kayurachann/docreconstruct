@@ -298,3 +298,48 @@ def test_benchmark_manifest_is_stable_and_sorted(tmp_path: Path) -> None:
 
     direct = BenchmarkRunner().run([BenchmarkCase("one", reference, candidate)])
     assert direct.successful_cases == 1
+
+
+def test_crashed_case_drags_the_mean_instead_of_vanishing(tmp_path: Path) -> None:
+    """``mean_score`` dropped failed cases from numerator *and* denominator.
+
+    A run where nine of ten cases crashed reported the surviving case's score
+    as the headline, so a broken pipeline could look flawless.
+    """
+
+    document = Document(
+        id="doc",
+        pages=[
+            Page(
+                id="p1",
+                number=1,
+                width=100,
+                height=100,
+                elements=[
+                    Element(
+                        id="e1",
+                        type=ElementType.TEXT,
+                        bbox=BBox(x0=0, y0=0, x1=50, y1=10),
+                        text="hello",
+                    )
+                ],
+            )
+        ],
+    )
+    reference = tmp_path / "reference.json"
+    reference.write_text(document.model_dump_json(), encoding="utf-8")
+    missing = tmp_path / "does-not-exist.json"
+
+    report = BenchmarkRunner().run(
+        [
+            BenchmarkCase("ok", reference, reference),
+            BenchmarkCase("broken", reference, missing),
+        ]
+    )
+
+    assert report.successful_cases == 1
+    assert report.failed_cases == 1
+    # One perfect case and one crash is a half score, not a perfect one.
+    assert report.mean_score == pytest.approx(0.5)
+    # A component measured on only half the population is not published.
+    assert report.component_means["text"] is None

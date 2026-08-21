@@ -76,6 +76,32 @@ def reconstruct_command(
     """Analyze SOURCE and write an editable or inspectable reconstruction."""
 
     from docreconstruct.pipeline import reconstruct
+    from docreconstruct.reconstruction import TargetFormat
+
+    def _known_format(value: str) -> TargetFormat | None:
+        try:
+            return TargetFormat.parse(value)
+        except ValueError:
+            return None
+
+    # An explicit --output-format wins over the filename, which silently wrote
+    # HTML into a file called report.docx. Only complain when both are named
+    # and genuinely disagree; an unrecognized suffix stays the caller's business.
+    if output_format and output is not None and output.suffix:
+        chosen = _known_format(output_format)
+        implied = _known_format(output.suffix)
+        if (
+            chosen is not None
+            and implied is not None
+            and TargetFormat.AUTO not in {chosen, implied}
+            and chosen is not implied
+        ):
+            _fail(
+                ValueError(
+                    f"--output-format {output_format!r} conflicts with the {output.suffix!r} "
+                    f"extension of {output.name!r}; drop one or make them agree"
+                )
+            )
 
     selected_format = output_format or (output.suffix.lstrip(".") if output else None) or "docx"
     suffix = "md" if selected_format == "markdown" else selected_format.lstrip(".")
@@ -767,10 +793,19 @@ def benchmark_command(
     try:
         from docreconstruct import evaluation
 
-        result = evaluation.run_benchmark(dataset, profile=profile)
+        report = evaluation.run_benchmark(dataset, profile=profile)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(_json(result) + "\n", encoding="utf-8")
+        output.write_text(_json(report) + "\n", encoding="utf-8")
         console.print(f"[green]Wrote[/green] {output.resolve()}")
+        mean = "unavailable" if report.mean_score is None else f"{report.mean_score:.6f}"
+        console.print(
+            f"cases: {report.successful_cases} succeeded, {report.failed_cases} failed; "
+            f"mean score: {mean}"
+        )
+        if report.failed_cases:
+            raise typer.Exit(code=3)
+    except typer.Exit:
+        raise
     except (DocReconstructError, ImportError, RuntimeError, ValueError, OSError) as exc:
         _fail(exc)
 

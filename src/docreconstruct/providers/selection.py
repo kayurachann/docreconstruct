@@ -127,8 +127,8 @@ def _evaluate(
     missing: list[str] = []
 
     if request.input_format:
-        requested_input = _normalize_token(request.input_format)
-        supported = {_normalize_token(value) for value in capabilities.supported_inputs}
+        requested_input = _normalize_input_format(request.input_format)
+        supported = {_normalize_input_format(value) for value in capabilities.supported_inputs}
         _record(requested_input in supported, f"input:{requested_input}", matched, missing)
 
     for feature in _BOOLEAN_FEATURES:
@@ -232,3 +232,15 @@ def _record(
 
 def _normalize_token(value: str) -> str:
     return value.strip().lower().lstrip(".").replace("-", "_")
+
+
+# Providers spell the same raster format differently in supported_inputs, and
+# a caller naturally passes the file's own extension.  Both sides are folded
+# so ".tif" reaches the providers that declare "tiff".  Language tokens keep
+# using _normalize_token, where these aliases would be wrong.
+_INPUT_FORMAT_ALIASES = {"jpg": "jpeg", "tif": "tiff"}
+
+
+def _normalize_input_format(value: str) -> str:
+    token = _normalize_token(value)
+    return _INPUT_FORMAT_ALIASES.get(token, token)

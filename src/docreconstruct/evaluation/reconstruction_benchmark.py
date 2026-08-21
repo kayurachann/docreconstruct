@@ -997,10 +997,27 @@ def _rendered_quality(
     return score, profile
 
 
+# ``render_docx_pages`` reports ``used_backend="libreoffice"`` for every case it
+# actually renders, whatever the caller requested, so a failure has to be
+# labelled with the backend that *would* have run.  Anything unrecognised
+# degrades to "incomplete" rather than to a second, incomparable profile.
+_RESOLVED_RENDER_BACKENDS = {"auto": "libreoffice", "libreoffice": "libreoffice"}
+
+
 def _failed_quality_profile(render_backend: str) -> str | None:
+    """Label a failed case with the profile its successful peers receive.
+
+    A profile that disagrees with the successful cases makes ``_slice_summary``
+    see two distinct profiles, which drops ``mean_quality_score`` to ``None``
+    for the whole report and splits ``quality_profiles`` into groups whose
+    means silently exclude each other's cases.
+    """
+
     if render_backend == "native":
         return None
-    backend = render_backend if render_backend == "libreoffice" else f"unresolved({render_backend})"
+    backend = _RESOLVED_RENDER_BACKENDS.get(render_backend)
+    if backend is None:
+        return None
     return f"rendered_visual|backend={backend}|metric={VISUAL_METRIC_VERSION}"
 
 

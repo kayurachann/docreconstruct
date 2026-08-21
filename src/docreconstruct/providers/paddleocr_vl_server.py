@@ -40,6 +40,31 @@ from .base import (
 )
 from .paddleocr import PaddleOCRProvider
 
+_IMAGE_SUFFIXES = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
+
+
+def _file_type(source: Any, media_type: str) -> int | None:
+    """Return the server's fileType: 0 for PDF, 1 for image, None to omit.
+
+    ``load_hosted_source`` labels every retained URL "application/octet-stream"
+    because it never fetches it, so keying off the media type alone declared
+    each HTTPS PDF an image and the server rasterized page one only.
+    """
+
+    if media_type == "application/pdf":
+        return 0
+    if media_type.startswith("image/"):
+        return 1
+    if isinstance(source, str) and source.lower().startswith(("https://", "http://")):
+        suffix = Path(urlparse(source).path).suffix.casefold()
+        if suffix == ".pdf":
+            return 0
+        if suffix in _IMAGE_SUFFIXES:
+            return 1
+    # Let the server infer rather than assert something we do not know.
+    return None
+
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
@@ -152,10 +177,9 @@ class PaddleOCRVLServerProvider(SavedJSONProvider):
         else:
             assert hosted_source.data is not None
             file_value = base64.b64encode(hosted_source.data).decode("ascii")
-        file_type = 0 if hosted_source.media_type == "application/pdf" else 1
+        file_type = _file_type(source, hosted_source.media_type)
         request_payload: dict[str, Any] = {
             "file": file_value,
-            "fileType": file_type,
             # Visualization is useful for debugging but adds substantial payload
             # and CPU work on high-throughput servers.
             "visualize": bool(options.get("visualize", False)),
@@ -164,6 +188,8 @@ class PaddleOCRVLServerProvider(SavedJSONProvider):
             # bounded hosted responses.
             "returnMarkdownImages": bool(options.get("return_markdown_images", False)),
         }
+        if file_type is not None:
+            request_payload["fileType"] = file_type
         for local_name, api_name in (
             ("use_doc_orientation_classify", "useDocOrientationClassify"),
             ("use_doc_unwarping", "useDocUnwarping"),
