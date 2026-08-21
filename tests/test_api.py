@@ -1123,3 +1123,177 @@ def test_windows_reserved_device_name_does_not_become_an_empty_upload(
     # The staged part falls back to the safe name, exactly as "." and ".." do.
     assert response.status_code == 422
     assert "uploaded file is empty" not in response.text
+
+
+def _fake_hybrid_job(*, passed: bool, score: float):
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        Path(kwargs["output"]).write_bytes(b"editable-docx")
+        return SimpleNamespace(
+            validation=SimpleNamespace(
+                passed=passed, score=score, metrics={"rendered_visual": None}
+            ),
+            phase_seconds={},
+        )
+
+    return fake_run_hybrid_job
+
+
+def test_fast_quality_delivers_the_artifact_with_honest_qa_headers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 97% job used to return nothing at all.
+
+    Real scans rarely clear every one of the 39 gates, and "fast" callers asked
+    for the document, not a proof. The CLI already writes the artifact and
+    reports the failing gates; the API withheld it, which made a public
+    deployment useless for ordinary scans.
+    """
+
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    monkeypatch.setattr(
+        hybrid_job, "run_hybrid_job", _fake_hybrid_job(passed=False, score=0.972222)
+    )
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"# Exact wording", "text/markdown"),
+            "layout": ("layout.png", b"layout-pixels", "image/png"),
+            "evidence": ("ocr.json", b'{"pages": []}', "application/json"),
+        },
+        data={"options": json.dumps({"quality": "fast"})},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"editable-docx"
+    assert response.headers["x-docreconstruct-qa-passed"] == "false"
+    assert response.headers["x-docreconstruct-qa-score"] == "0.972222"
+
+
+def test_fast_quality_marks_a_fully_passing_job_as_passed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", _fake_hybrid_job(passed=True, score=1.0))
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"# Exact wording", "text/markdown"),
+            "layout": ("layout.png", b"layout-pixels", "image/png"),
+            "evidence": ("ocr.json", b'{"pages": []}', "application/json"),
+        },
+        data={"options": json.dumps({"quality": "fast"})},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-docreconstruct-qa-passed"] == "true"
+
+
+def test_verified_quality_still_fails_closed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+
+    renderer = tmp_path / "soffice"
+    renderer.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DOCRECONSTRUCT_LIBREOFFICE_PATH", str(renderer))
+    monkeypatch.setattr(
+        hybrid_job, "run_hybrid_job", _fake_hybrid_job(passed=False, score=0.972222)
+    )
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"# Exact wording", "text/markdown"),
+            "layout": ("layout.png", b"layout-pixels", "image/png"),
+            "evidence": ("ocr.json", b'{"pages": []}', "application/json"),
+        },
+        data={"options": json.dumps({"quality": "verified"})},
+    )
+
+    assert response.status_code == 422
+    assert "no artifact was returned" in response.text
+
+
+def test_server_local_tesseract_can_be_offered_as_free_evidence(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fully free deployment needs a no-credential engine on the hosted list.
+
+    Every other entry requires a paid cloud credential, so an operator without
+    one could never offer best-quality reconstruction: the hybrid endpoint
+    demands evidence, and the only free engine was locked out of generating it.
+    """
+
+    import docreconstruct.api.app as app_module
+
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "tesseract_local")
+    monkeypatch.setattr(app_module, "_local_ocr_is_installed", lambda name: True)
+
+    payload = client.get("/v1/hybrid/capabilities").json()
+    offered = {row["name"]: row for row in payload["hosted_ocr_providers"]}
+
+    assert payload["server_generates_json"] is True
+    assert offered["tesseract_local"]["available"] is True
+    assert offered["tesseract_local"]["cost"] == "free"
+    assert offered["tesseract_local"]["privacy"] == "no_transfer"
+
+
+def test_server_local_tesseract_requires_the_binary(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.api.app as app_module
+
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "tesseract_local")
+    monkeypatch.setattr(app_module, "_local_ocr_is_installed", lambda name: False)
+
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"# Exact wording", "text/markdown"),
+            "layout": ("layout.png", b"layout-pixels", "image/png"),
+        },
+        data={"options": json.dumps({"ocr_provider": "tesseract_local"})},
+    )
+
+    assert response.status_code == 503
+    assert "not configured" in response.text
+
+
+def test_server_local_tesseract_runs_in_local_mode_without_cloud_consent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import docreconstruct.api.app as app_module
+    import docreconstruct.reconstruction.hybrid_job as hybrid_job
+    from docreconstruct.extraction import ExtractionMode
+
+    monkeypatch.setenv("DOCRECONSTRUCT_PUBLIC_OCR_PROVIDERS", "tesseract_local")
+    monkeypatch.setattr(app_module, "_local_ocr_is_installed", lambda name: True)
+    captured: dict[str, Any] = {}
+
+    def fake_run_hybrid_job(content: Path, layout: Path, **kwargs: Any) -> Any:
+        captured["online_ocr"] = kwargs["online_ocr"]
+        Path(kwargs["output"]).write_bytes(b"editable-docx")
+        return SimpleNamespace(
+            validation=SimpleNamespace(passed=True, score=1.0, metrics={}),
+            phase_seconds={},
+        )
+
+    monkeypatch.setattr(hybrid_job, "run_hybrid_job", fake_run_hybrid_job)
+    response = client.post(
+        "/v1/hybrid",
+        files={
+            "content": ("content.md", b"# Exact wording", "text/markdown"),
+            "layout": ("layout.png", b"layout-pixels", "image/png"),
+        },
+        data={"options": json.dumps({"ocr_provider": "tesseract_local"})},
+    )
+
+    assert response.status_code == 200, response.text
+    request = captured["online_ocr"]
+    assert request.providers == ("tesseract_local",)
+    # Local execution: never filtered out by the cloud-only mode, and never
+    # granted cloud consent it does not need.
+    assert request.mode is ExtractionMode.LOCAL
+    assert request.allow_cloud is False
+    assert response.headers["x-docreconstruct-ocr"] == "tesseract_local"

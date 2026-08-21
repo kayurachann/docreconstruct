@@ -68,6 +68,11 @@ _OUTPUT_DETAILS = {
 }
 
 _HOSTED_OCR_LABELS = {
+    # Not "hosted" in the cloud sense: it runs inside this server process and
+    # no document data leaves the machine. It sits in this table so a fully
+    # free deployment can offer best-quality reconstruction without any cloud
+    # credential, behind the same operator allowlist as every other engine.
+    "tesseract_local": "Tesseract OCR (runs on this server)",
     "paddleocr_official": "PaddleOCR official cloud",
     "paddleocr_vl_server": "PaddleOCR-VL compatible server",
     "mistral_ocr": "Mistral Document AI",
@@ -486,7 +491,25 @@ def _public_hosted_ocr_names() -> tuple[str, ...]:
     return tuple(dict.fromkeys(name.strip().casefold() for name in raw.split(",") if name.strip()))
 
 
+# Engines that execute inside this process. They carry no credential groups:
+# "configured" means the executable is actually present on the server.
+_LOCAL_OCR_PROVIDERS = frozenset({"tesseract_local"})
+
+
+def _local_ocr_is_installed(name: str) -> bool:
+    if name == "tesseract_local":
+        try:
+            from docreconstruct.providers.tesseract_local import _find_tesseract
+
+            return _find_tesseract(None) is not None
+        except Exception:  # pragma: no cover - missing optional dependency
+            return False
+    return False
+
+
 def _hosted_ocr_is_configured(name: str) -> bool:
+    if name in _LOCAL_OCR_PROVIDERS:
+        return _local_ocr_is_installed(name)
     groups = _HOSTED_OCR_CONFIGURATION_GROUPS.get(name)
     if groups is None:
         return False
@@ -1062,10 +1085,17 @@ def create_app() -> FastAPI:
                             "use_chart_recognition": parsed.ocr_charts,
                         }
                     }
+                # A server-local engine must not be filtered out by the
+                # cloud-only execution mode, and never needs cloud consent.
+                runs_locally = selected_ocr_provider in _LOCAL_OCR_PROVIDERS
                 online_ocr = hybrid_job.OnlineOCRRequest(
-                    mode=extraction.ExtractionMode.CLOUD,
+                    mode=(
+                        extraction.ExtractionMode.LOCAL
+                        if runs_locally
+                        else extraction.ExtractionMode.CLOUD
+                    ),
                     providers=(selected_ocr_provider,),
-                    allow_cloud=True,
+                    allow_cloud=not runs_locally,
                     maximum_providers=1,
                     languages=tuple(parsed.ocr_languages),
                     handwriting=parsed.ocr_handwriting,
@@ -1093,7 +1123,9 @@ def create_app() -> FastAPI:
                 minimum_visual_score=parsed.minimum_visual_score,
                 qa_report=qa_report,
             )
-            if not result.validation.passed:
+            if not result.validation.passed and parsed.quality is HybridQuality.VERIFIED:
+                # "verified" promises a document that cleared every gate, so it
+                # fails closed rather than shipping something unproven.
                 raise HTTPException(
                     status_code=422,
                     detail=(
@@ -1117,6 +1149,12 @@ def create_app() -> FastAPI:
             headers = {
                 "X-DocReconstruct-OCR": ocr_provenance,
                 "X-DocReconstruct-QA-Score": f"{result.validation.score:.6f}",
+                # Real scans rarely clear all 39 gates, and "fast" callers asked
+                # for the document, not a proof. The CLI already behaves this
+                # way: it writes the artifact and reports the failing gates.
+                # Withholding the file here meant a public deployment returned
+                # nothing for a 97% job.
+                "X-DocReconstruct-QA-Passed": "true" if result.validation.passed else "false",
                 "X-DocReconstruct-Quality": parsed.quality.value,
             }
             rendered_visual = getattr(result.validation, "metrics", {}).get("rendered_visual")
