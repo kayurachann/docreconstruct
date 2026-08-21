@@ -702,6 +702,15 @@ def _merge_visual_rows(rows: list[PixelBox], line_pitch: float) -> list[PixelBox
     return merged
 
 
+# A numerator, its bar and its denominator are stacked inside one horizontal
+# span, so genuine fragments always share some of it: the narrowest genuine
+# overlap observed across the corpus is 25% of the smaller box, and most are
+# 97-100%. A heading swallowed by the equation beside it shared none at all.
+# The threshold only has to exclude that degenerate case, so it sits well below
+# the genuine minimum rather than being tuned to any particular document.
+_FRAGMENT_STACK_OVERLAP = 0.12
+
+
 def _merge_single_column_row_fragments(
     rows: list[PixelBox],
     line_pitch: float,
@@ -749,8 +758,22 @@ def _merge_single_column_row_fragments(
             previous_fragment.width,
         )
         component_shape = horizontal_change >= minimum_edge_shift or width_ratio <= 0.92
+        # A numerator, its fraction bar and its denominator are stacked inside
+        # the same horizontal span, so genuine fragments overlap almost
+        # completely: across the showcase corpus every real merge shares 97-100%
+        # of the narrower box. Two pieces of ink that barely share horizontal
+        # extent are separate baselines, and joining them swallowed a short
+        # left-margin heading into the display equation beside it.
+        horizontal_overlap = max(
+            0.0,
+            min(box.x1, previous_fragment.x1) - max(box.x0, previous_fragment.x0),
+        )
+        narrower_width = max(1.0, min(box.width, previous_fragment.width))
+        stacked = horizontal_overlap / narrower_width >= _FRAGMENT_STACK_OVERLAP
         component_pair = (
-            min(box.height, previous_fragment.height) <= component_height and component_shape
+            min(box.height, previous_fragment.height) <= component_height
+            and component_shape
+            and stacked
         )
         # Scan line detectors commonly dilate adjacent prose baselines until
         # their boxes overlap by one or two pixels.  Treating that overlap as

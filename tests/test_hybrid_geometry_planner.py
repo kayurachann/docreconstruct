@@ -9,6 +9,7 @@ from docreconstruct.reconstruction.asset_matching import AssetMatch
 from docreconstruct.reconstruction.evidence_matching import EvidenceMatch
 from docreconstruct.reconstruction.hybrid_planner import (
     HybridBlockPlacement,
+    _merge_single_column_row_fragments,
     apply_page_vertical_fit_budget,
     build_hybrid_layout_plan,
     build_page_vertical_fit_budget,
@@ -1724,3 +1725,52 @@ def test_a_page_anchored_to_an_oversized_run_still_plans() -> None:
     first_page = [placement.block_index for placement in plan.pages[0].placements]
     assert first_page[-1] >= per_page - 1
     assert len(plan.pages) == 2
+
+
+def test_left_margin_heading_is_not_absorbed_by_the_equation_beside_it() -> None:
+    """Fragment merging joined ink that shares no horizontal extent at all.
+
+    On the calculus showcase a three-character heading at the left margin sat
+    17px below an indented display equation, inside the 17.5px fragment gap the
+    page's 50px rhythm allows. It was merged into a 133px mega-row spanning the
+    equation above and the fraction numerator below, which collapsed the page's
+    source geometry to 0% slots, 0% blocks and 0% vertical span.
+    """
+
+    fragments = [
+        # Indented display equation, x 355-721.
+        PixelBox(x0=355, y0=401, x1=721, y1=448),
+        # The heading: short, at the left margin, sharing no x range with it.
+        PixelBox(x0=90, y0=465, x1=157, y1=484),
+        # The next equation's numerator.
+        PixelBox(x0=126, y0=499, x1=683, y1=534),
+    ]
+
+    rows = _merge_single_column_row_fragments(fragments, 50.0, fragmented_page=False)
+
+    # The equation keeps its own row instead of swallowing the heading, so the
+    # 133px mega-row that collapsed the page's geometry cannot form.
+    assert PixelBox(x0=355, y0=401, x1=721, y1=448) in rows
+    assert all(row.y0 >= 465 or row.y1 <= 448 for row in rows), (
+        f"a row still spans the equation and the heading: {rows}"
+    )
+    assert max(row.height for row in rows) <= 70, f"mega-row produced: {rows}"
+
+
+def test_stacked_fraction_fragments_still_merge() -> None:
+    """A numerator offset from its bar shares only part of its width.
+
+    The narrowest genuine overlap in the corpus is 25% of the smaller box, so
+    the guard must sit well below that rather than demanding near-alignment.
+    """
+
+    fragments = [
+        PixelBox(x0=422, y0=228, x1=700, y1=247),
+        PixelBox(x0=380, y0=254, x1=436, y1=259),
+        PixelBox(x0=356, y0=261, x1=704, y1=273),
+        PixelBox(x0=380, y0=278, x1=569, y1=289),
+    ]
+
+    rows = _merge_single_column_row_fragments(fragments, 22.5, fragmented_page=False)
+
+    assert rows == [PixelBox(x0=356, y0=228, x1=704, y1=289)]
