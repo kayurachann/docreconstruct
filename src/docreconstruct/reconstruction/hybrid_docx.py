@@ -1194,6 +1194,15 @@ def _source_option_grid(
     # option owns which column. Preserve the established content fallback.
     if len(coordinates) != len(resolved):
         return None
+    # Sliver boxes far thinner than a text row are alignment noise (a stray
+    # fragment of a tall fraction, a punctuation blob).  They cannot say
+    # which row an option lives on, so they must not define the grid.
+    grid_page = layout.pages[resolved[0].page_number - 1]
+    minimum_row_height = max(4.0, float(grid_page.line_pitch) * 0.35)
+    if any(
+        cast(PixelBox, placement.source_bbox).height < minimum_row_height for placement in resolved
+    ):
+        return None
 
     row_groups: list[list[HybridBlockPlacement]] = []
     for placement in resolved:
@@ -2482,6 +2491,411 @@ def _wrap_column_blocks(
     return result
 
 
+_TWIPS_PER_POINT = 20.0
+_EMU_PER_POINT = 12700.0
+# Average Times-family advance per character, expressed in em.  The balanced
+# value sizes pinning spacers; the tall value bounds the same content from
+# above and is what the end-of-page overflow guard consumes, so a spacer can
+# fill genuine source whitespace without ever pushing real content past the
+# printable page.
+_ESTIMATED_CHARACTER_EM = 0.50
+_ESTIMATED_CHARACTER_EM_TALL = 0.53
+
+
+def _attribute_points(element: Any, attribute: str) -> float:
+    value = element.get(qn(attribute))
+    try:
+        return float(value) / _TWIPS_PER_POINT
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _estimated_paragraph_height(
+    paragraph: Any,
+    *,
+    width_points: float,
+    default_line_height: float,
+    default_size: float,
+    tall: bool = False,
+) -> float:
+    """Estimate the vertical space one emitted paragraph occupies, in points.
+
+    Reads only what the renderer itself wrote (exact spacing, indents, image
+    extents), so the estimate tracks the emitted layout rather than source
+    geometry.  Wrapped line counts are the one true unknown; the balanced
+    estimate stays close to the renderer's mean while ``tall`` rounds every
+    wrap up through a wide per-character advance and never undershoots.
+    """
+
+    before = after = 0.0
+    line: float | None = None
+    rule: str | None = None
+    left = right = 0.0
+    properties = paragraph.find(qn("w:pPr"))
+    if properties is not None:
+        spacing = properties.find(qn("w:spacing"))
+        if spacing is not None:
+            before = _attribute_points(spacing, "w:before")
+            after = _attribute_points(spacing, "w:after")
+            raw_line = spacing.get(qn("w:line"))
+            rule = spacing.get(qn("w:lineRule"))
+            if raw_line is not None:
+                try:
+                    line = float(raw_line) / _TWIPS_PER_POINT
+                except ValueError:
+                    line = None
+        indents = paragraph.find(qn("w:pPr") + "/" + qn("w:ind"))
+        if indents is not None:
+            left = max(0.0, _attribute_points(indents, "w:left"))
+            right = max(0.0, _attribute_points(indents, "w:right"))
+    drawing_heights = [
+        float(extent.get("cy") or 0.0) / _EMU_PER_POINT
+        for extent in paragraph.iter(qn("wp:extent"))
+    ]
+    size = default_size
+    run_sizes = [
+        float(value) / 2.0
+        for node in paragraph.iter(qn("w:sz"))
+        if (value := node.get(qn("w:val"))) is not None
+    ]
+    if run_sizes:
+        size = max(run_sizes)
+    characters = sum(
+        len(node.text or "") for node in paragraph.iter() if node.tag in {qn("w:t"), qn("m:t")}
+    )
+    if drawing_heights:
+        return before + after + max(drawing_heights)
+    exact_box = line if line is not None and rule in {"exact", "atLeast"} else None
+    if characters <= 0:
+        return before + after + (exact_box if exact_box is not None else max(1.0, size * 1.25))
+    usable = max(36.0, width_points - left - right)
+    advance = _ESTIMATED_CHARACTER_EM_TALL if tall else _ESTIMATED_CHARACTER_EM
+    lines = characters * max(1.0, size) * advance / usable
+    lines = max(1.0, float(math.ceil(lines)) if tall else lines)
+    array_rows = sum(len(array.findall(qn("m:e"))) for array in paragraph.iter(qn("m:eqArr")))
+    lines = max(lines, float(array_rows))
+    if exact_box is not None:
+        line_box = exact_box
+        if rule == "atLeast" and next(paragraph.iter(qn("m:f")), None) is not None:
+            # Stacked fractions grow an at-least line well past its floor.
+            line_box = max(line_box, size * (2.3 if tall else 2.2))
+    else:
+        line_box = max(default_line_height, size * 1.25)
+    return before + after + lines * line_box
+
+
+def _estimated_table_height(
+    table: Any,
+    *,
+    width_points: float,
+    default_line_height: float,
+    default_size: float,
+    tall: bool = False,
+) -> float:
+    grid_element = table.find(qn("w:tblGrid"))
+    grid = (
+        [_attribute_points(column, "w:w") for column in grid_element.findall(qn("w:gridCol"))]
+        if grid_element is not None
+        else []
+    )
+    total = 0.0
+    for row in table.findall(qn("w:tr")):
+        floor = 0.0
+        row_properties = row.find(qn("w:trPr"))
+        if row_properties is not None:
+            height = row_properties.find(qn("w:trHeight"))
+            if height is not None:
+                floor = _attribute_points(height, "w:val")
+        cells = row.findall(qn("w:tc"))
+        column = 0
+        tallest = 0.0
+        for cell in cells:
+            span = 1
+            cell_properties = cell.find(qn("w:tcPr"))
+            if cell_properties is not None:
+                grid_span = cell_properties.find(qn("w:gridSpan"))
+                if grid_span is not None:
+                    try:
+                        span = max(1, int(grid_span.get(qn("w:val")) or 1))
+                    except ValueError:
+                        span = 1
+            if grid and column < len(grid):
+                cell_width = sum(grid[column : column + span])
+            else:
+                cell_width = width_points / max(1, len(cells))
+            column += span
+            tallest = max(
+                tallest,
+                _estimated_flow_height(
+                    [child for child in cell if child.tag in {qn("w:p"), qn("w:tbl")}],
+                    width_points=max(24.0, cell_width - 10.0),
+                    default_line_height=default_line_height,
+                    default_size=default_size,
+                    tall=tall,
+                ),
+            )
+        total += max(floor, tallest)
+    return total
+
+
+def _estimated_flow_height(
+    elements: Sequence[Any],
+    *,
+    width_points: float,
+    default_line_height: float,
+    default_size: float,
+    tall: bool = False,
+) -> float:
+    total = 0.0
+    for element in elements:
+        if element.tag == qn("w:p"):
+            total += _estimated_paragraph_height(
+                element,
+                width_points=width_points,
+                default_line_height=default_line_height,
+                default_size=default_size,
+                tall=tall,
+            )
+        elif element.tag == qn("w:tbl"):
+            total += _estimated_table_height(
+                element,
+                width_points=width_points,
+                default_line_height=default_line_height,
+                default_size=default_size,
+                tall=tall,
+            )
+    return total
+
+
+def _document_flow_elements(document: WordDocumentType) -> list[Any]:
+    return [child for child in document._element.body if child.tag in {qn("w:p"), qn("w:tbl")}]
+
+
+_SOLID_BAND_DARK_LUMA = 100
+_SOLID_BAND_MIN_ROW_FRACTION = 0.45
+_SOLID_BAND_MIN_HEIGHT_PIXELS = 8
+
+
+def _unclaimed_ink_bands(
+    page: Any,
+    placements: Sequence[HybridBlockPlacement],
+) -> list[tuple[int, int]]:
+    """Detect near-solid full-width source bands no Markdown block claims.
+
+    Censor bars and similar page furniture are real source ink but carry no
+    reconstructable text; the manifest permits them as raster fragments.  Only
+    almost-solid rows qualify, so ordinary text, math, and figures (all far
+    sparser) are never captured, and any band overlapping claimed geometry is
+    dropped in favour of the editable content that owns that area.
+    """
+
+    content = page.content_bbox
+    if content.width <= 0 or content.height <= 0:
+        return []
+    image = page.image.convert("L").crop((content.x0, content.y0, content.x1, content.y1))
+    mask = image.point(lambda value: 255 if value < _SOLID_BAND_DARK_LUMA else 0)
+    rows = mask.resize((1, mask.height), Image.Resampling.BOX).tobytes()
+    floor = round(255 * _SOLID_BAND_MIN_ROW_FRACTION)
+    bands: list[list[int]] = []
+    for index, value in enumerate(rows):
+        if value < floor:
+            continue
+        row = content.y0 + index
+        if bands and row - bands[-1][1] <= 2:
+            bands[-1][1] = row + 1
+        else:
+            bands.append([row, row + 1])
+
+    def _strip_solid(top: int, bottom: int) -> bool:
+        # A claimed row that is itself almost completely ink is a censor strip
+        # the OCR text layer happens to sit under, not a row the renderer will
+        # fill with editable glyphs.  Text and even dense display math stay
+        # far below this coverage.
+        start = max(0, top - content.y0)
+        end = min(len(rows), bottom - content.y0)
+        if end <= start:
+            return False
+        return sum(rows[start:end]) / (end - start) >= 255 * 0.70
+
+    claimed: list[tuple[int, int]] = []
+    padding = 3
+    for placement in placements:
+        for row in placement.source_rows:
+            if not _strip_solid(row.y0, row.y1):
+                claimed.append((row.y0 - padding, row.y1 + padding))
+        if not placement.source_rows and placement.source_bbox is not None:
+            claimed.append((placement.source_bbox.y0 - padding, placement.source_bbox.y1 + padding))
+    claimed.sort()
+    if not claimed and not any(placement.source_bbox is not None for placement in placements):
+        # Without any claimed geometry a solid strip cannot be told apart
+        # from dense unmapped source text, so restore nothing.
+        return []
+    minimum_height = max(
+        _SOLID_BAND_MIN_HEIGHT_PIXELS,
+        round(float(getattr(page, "line_pitch", 0.0) or 0.0) * 0.5),
+    )
+    unclaimed: list[tuple[int, int]] = []
+    for band_top, band_bottom in bands:
+        # Subtract every claimed interval: the editable content owns that
+        # area, while the remnants stay restorable raster furniture.
+        remnants = [(band_top, band_bottom)]
+        for top, bottom in claimed:
+            trimmed: list[tuple[int, int]] = []
+            for start, end in remnants:
+                if bottom <= start or top >= end:
+                    trimmed.append((start, end))
+                    continue
+                if top > start:
+                    trimmed.append((start, top))
+                if bottom < end:
+                    trimmed.append((bottom, end))
+            remnants = trimmed
+        unclaimed.extend((start, end) for start, end in remnants if end - start >= minimum_height)
+    unclaimed.sort()
+    return unclaimed
+
+
+def _group_target_advance(
+    group: Sequence[MarkdownBlock],
+    placements: dict[str, HybridBlockPlacement],
+    *,
+    page_offset: float,
+    vertical_scale: float,
+    top_margin: float,
+) -> float | None:
+    """Map a group's topmost source ink to a body-flow advance in points."""
+
+    tops = [
+        box.y0
+        for block in group
+        if (placement := placements.get(block.id)) is not None
+        and (box := placement.source_bbox) is not None
+    ]
+    if not tops:
+        return None
+    return page_offset + min(tops) * vertical_scale - top_margin
+
+
+class _AdvancePinner:
+    """Pin a single-column page's flow to its source vertical positions.
+
+    Native line boxes are shorter than the source baseline rhythm, so without
+    a positional anchor every page drifts upward and the lower half stays
+    empty.  The cursor sums the tall estimate of everything already emitted;
+    a group whose source position lies below that estimate receives one exact
+    spacer for the difference.  Sizing spacers against the tall cursor means
+    that even when the real layout runs taller than estimated, content still
+    lands at or above its source position, so source geometry keeps vouching
+    that the page cannot overflow.
+    """
+
+    def __init__(
+        self,
+        document: WordDocumentType,
+        layout: ScanDocumentLayout,
+        *,
+        page_index: int,
+        page_plan: Any,
+        source_page: Any,
+        render_frame: PixelBox,
+        checkpoint: int,
+        available_width: float,
+        body_size: float,
+        line_height: float,
+        printable_height: float,
+        page_offset: float,
+        top_margin: float,
+        horizontal_scale: float,
+        vertical_scale: float,
+    ) -> None:
+        self.document = document
+        self.layout = layout
+        self.page_index = page_index
+        self.page_plan = page_plan
+        self.source_page = source_page
+        self.render_frame = render_frame
+        self.measured_elements = checkpoint
+        self.available_width = available_width
+        self.body_size = body_size
+        self.line_height = line_height
+        self.printable_height = printable_height
+        self.page_offset = page_offset
+        self.top_margin = top_margin
+        self.horizontal_scale = horizontal_scale
+        self.vertical_scale = vertical_scale
+        self.estimated_tall = 0.0
+        self.bottom_reserve = max(line_height, printable_height * 0.015)
+
+    def band_target(self, band_top: int) -> float:
+        return self.page_offset + band_top * self.vertical_scale - self.top_margin
+
+    def measure(self) -> None:
+        flow = _document_flow_elements(self.document)
+        if len(flow) > self.measured_elements:
+            self.estimated_tall += _estimated_flow_height(
+                flow[self.measured_elements :],
+                width_points=self.available_width * 72.0,
+                default_line_height=self.line_height,
+                default_size=self.body_size,
+                tall=True,
+            )
+            self.measured_elements = len(flow)
+
+    def pin_to(self, target: float) -> None:
+        deficit = min(
+            target - self.estimated_tall,
+            self.printable_height - self.estimated_tall - self.bottom_reserve,
+        )
+        if deficit > 1.5:
+            _add_vertical_spacer(self.document, deficit)
+            self.measure()
+
+    def emit_band(self, band_top: int, band_bottom: int) -> None:
+        band_target = self.band_target(band_top)
+        if band_target < 0.0:
+            band_top += math.ceil(-band_target / self.vertical_scale)
+            band_target = 0.0
+        # Trim the crop to the room the page still has instead of dropping
+        # it: bottom furniture legitimately ends flush with the printable
+        # area.
+        room = min(
+            self.printable_height - 4.0 - band_target,
+            self.printable_height - self.bottom_reserve - self.estimated_tall,
+        )
+        band_bottom = min(band_bottom, band_top + int(room / self.vertical_scale))
+        band_height = (band_bottom - band_top) * self.vertical_scale
+        if band_height < 3.0:
+            return
+        self.pin_to(band_target)
+        content = self.source_page.content_bbox
+        left_outdent = max(0.0, (self.render_frame.x0 - content.x0) * self.horizontal_scale)
+        right_outdent = max(0.0, (content.x1 - self.render_frame.x1) * self.horizontal_scale)
+        display_width = min(
+            self.page_plan.pdf_width / 72.0,
+            self.available_width + (left_outdent + right_outdent) / 72.0,
+            content.width * self.horizontal_scale / 72.0,
+        )
+        paragraph = _add_picture(
+            self.document,
+            _crop_bytes(
+                self.layout,
+                self.page_index + 1,
+                PixelBox(x0=content.x0, y0=band_top, x1=content.x1, y1=band_bottom),
+            ),
+            width_inches=display_width,
+            alignment=(
+                WD_ALIGN_PARAGRAPH.LEFT
+                if left_outdent or right_outdent
+                else WD_ALIGN_PARAGRAPH.CENTER
+            ),
+        )
+        if left_outdent:
+            paragraph.paragraph_format.left_indent = Pt(-left_outdent)
+        if right_outdent:
+            paragraph.paragraph_format.right_indent = Pt(-right_outdent)
+        self.measure()
+
+
 def _add_vertical_spacer(document: WordDocumentType, points: float) -> None:
     if points <= 1.0:
         return
@@ -3244,6 +3658,91 @@ def _masthead_entries(
     )
 
 
+def _split_masthead_plan(
+    blocks: list[MarkdownBlock],
+    placements: dict[str, HybridBlockPlacement],
+    page: Any,
+) -> (
+    tuple[
+        int,
+        list[MarkdownBlock],
+        list[tuple[MarkdownBlock, str, bool]],
+        list[tuple[MarkdownBlock, str, bool]],
+        float,
+        PixelBox,
+    ]
+    | None
+):
+    """Decide one native two-zone masthead for renderer and QA identically.
+
+    Structural QA counts expected mastheads through this same function, so a
+    renderer fallback and the validation expectation can never drift apart.
+    """
+
+    if page.metadata.get("header_column_count") != 2 or page.metadata.get("column_count") != 1:
+        return None
+    divider = page.metadata.get("header_divider")
+    if not isinstance(divider, (int, float)):
+        return None
+    section_index = next(
+        (
+            index
+            for index, block in enumerate(blocks)
+            if block.metadata.get("role") == "section_heading"
+        ),
+        None,
+    )
+    if section_index is None or section_index < 2:
+        return None
+    render_frame = _page_render_content_bbox(page)
+    preamble = blocks[:section_index]
+    sides = {
+        block.id: _masthead_geometry_side(
+            placements.get(block.id),
+            render_frame=render_frame,
+            divider=float(divider),
+        )
+        for block in preamble
+    }
+    if section_index < 4 and not {"left", "right"} <= set(sides.values()):
+        # A tiny preamble is only a masthead when saved geometry proves text
+        # on both sides of the detected divider.
+        return None
+    # A full-width banner line above both zones (a fanpage/serial strip) is
+    # ordinary flow, not column furniture; keep it out of the zone table.
+    sided_tops = [
+        box.y0
+        for block in preamble
+        if sides[block.id] is not None
+        and (placement := placements.get(block.id)) is not None
+        and (box := placement.source_bbox) is not None
+    ]
+    banner: list[MarkdownBlock] = []
+    zone_preamble = list(preamble)
+    while sided_tops and zone_preamble:
+        block = zone_preamble[0]
+        placement = placements.get(block.id)
+        box = placement.source_bbox if placement is not None else None
+        if (
+            sides[block.id] is None
+            and block.kind in {MarkdownBlockKind.PARAGRAPH, MarkdownBlockKind.HEADING}
+            and box is not None
+            and box.y1 <= min(sided_tops)
+        ):
+            banner.append(zone_preamble.pop(0))
+            continue
+        break
+    entries = _masthead_entries(
+        zone_preamble,
+        placements,
+        render_frame=render_frame,
+        divider=float(divider),
+    )
+    if entries is None:
+        return None
+    return section_index, banner, entries[0], entries[1], float(divider), render_frame
+
+
 def _render_split_masthead(
     document: WordDocumentType,
     blocks: list[MarkdownBlock],
@@ -3253,37 +3752,28 @@ def _render_split_masthead(
     width: float,
     size: float,
     line_height: float,
+    layout: ScanDocumentLayout | None = None,
 ) -> tuple[bool, list[MarkdownBlock]]:
     """Render a two-zone masthead above an independently single-column body."""
 
-    if page.metadata.get("header_column_count") != 2 or page.metadata.get("column_count") != 1:
+    plan = _split_masthead_plan(blocks, placements, page)
+    if plan is None:
         return False, blocks
-    section_index = next(
-        (
-            index
-            for index, block in enumerate(blocks)
-            if block.metadata.get("role") == "section_heading"
-        ),
-        None,
-    )
-    if section_index is None or section_index < 4:
-        return False, blocks
-    preamble = blocks[:section_index]
-    divider = page.metadata.get("header_divider")
-    if not isinstance(divider, (int, float)):
-        return False, blocks
-    render_frame = _page_render_content_bbox(page)
-    left_fraction = (float(divider) - render_frame.x0) / max(1, render_frame.width)
+    section_index, banner, left_entries, right_entries, divider, render_frame = plan
+    left_fraction = (divider - render_frame.x0) / max(1, render_frame.width)
     left_fraction = max(0.25, min(0.55, left_fraction))
-    entries = _masthead_entries(
-        preamble,
-        placements,
-        render_frame=render_frame,
-        divider=float(divider),
-    )
-    if entries is None:
-        return False, blocks
-    left_entries, right_entries = entries
+    for block in banner:
+        _new_paragraph(
+            document,
+            block.text,
+            size=size,
+            line_height=line_height,
+            kind=block.kind,
+            role=str(block.metadata.get("role", "")) or None,
+            available_width_points=width * 72.0,
+            placement=placements.get(block.id),
+            layout=layout,
+        )
 
     table = document.add_table(rows=1, cols=2)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -3557,6 +4047,14 @@ def render_hybrid_docx(
         )
         source_page = layout.pages[page_index]
         page_top_margin = top_margin
+        page_offset = (
+            0.0
+            if source_page.metadata.get("source_kind") == "image"
+            else max(
+                0.0,
+                (source_page.pdf_height - source_page.height * horizontal_scales[page_index]) / 2,
+            )
+        )
         first_block_index = min(
             (placement.block_index for placement in page_plan.placements),
             default=0,
@@ -3569,18 +4067,9 @@ def render_hybrid_docx(
             and block_by_id[placement.block_id].kind is MarkdownBlockKind.IMAGE
         ]
         if leading_image_tops:
-            source_offset = (
-                0.0
-                if source_page.metadata.get("source_kind") == "image"
-                else max(
-                    0.0,
-                    (source_page.pdf_height - source_page.height * horizontal_scales[page_index])
-                    / 2,
-                )
-            )
             page_top_margin = min(
                 page_top_margin,
-                source_offset + min(leading_image_tops) * vertical_scales[page_index],
+                page_offset + min(leading_image_tops) * vertical_scales[page_index],
             )
         section.page_width = Pt(page_plan.pdf_width)
         section.page_height = Pt(page_plan.pdf_height)
@@ -3594,6 +4083,8 @@ def render_hybrid_docx(
         section.header_distance = Pt(12)
         section.footer_distance = Pt(12)
         available_width = (page_plan.pdf_width - left_margin - right_margin) / 72.0
+        printable_height = page_plan.pdf_height - page_top_margin - page_bottom_margin
+        page_flow_checkpoint = len(_document_flow_elements(document))
         if (
             page_index == 0
             and source_page.metadata.get("source_kind") == "pdf"
@@ -3631,7 +4122,7 @@ def render_hybrid_docx(
         vertical_budget = build_page_vertical_fit_budget(
             source_page,
             body_placements,
-            printable_height_points=(page_plan.pdf_height - page_top_margin - page_bottom_margin),
+            printable_height_points=printable_height,
             font_size_points=body_size,
             **budget_options,
         )
@@ -3664,6 +4155,7 @@ def render_hybrid_docx(
             width=available_width,
             size=page_body_size,
             line_height=page_line_height,
+            layout=layout,
         )
         if masthead_rendered:
             _add_vertical_spacer(document, page_line_height * 0.05)
@@ -3695,6 +4187,37 @@ def render_hybrid_docx(
             )
         if not rendered_columns:
             # Preserve source order while grouping semantically related blocks.
+            # Advance pinning trusts source positions, so it requires the same
+            # evidence quality the budget was calibrated from: nearly every
+            # placement must carry real geometry.  A page of partially guessed
+            # boxes (math-exam showcase: 58% coverage, wrong vertical span)
+            # would otherwise be pinned to misplaced targets and overflow.
+            pinner = (
+                _AdvancePinner(
+                    document,
+                    layout,
+                    page_index=page_index,
+                    page_plan=page_plan,
+                    source_page=source_page,
+                    render_frame=render_frames[page_index],
+                    checkpoint=page_flow_checkpoint,
+                    available_width=available_width,
+                    body_size=page_body_size,
+                    line_height=page_line_height,
+                    printable_height=printable_height,
+                    page_offset=page_offset,
+                    top_margin=page_top_margin,
+                    horizontal_scale=horizontal_scales[page_index],
+                    vertical_scale=vertical_scales[page_index],
+                )
+                if vertical_budget.calibrated and vertical_budget.geometry_coverage >= 0.9
+                else None
+            )
+            pending_bands = (
+                _unclaimed_ink_bands(source_page, page_plan.placements)
+                if pinner is not None
+                else []
+            )
             cursor = 0
             while cursor < len(blocks):
                 group_id = blocks[cursor].group_id
@@ -3704,6 +4227,19 @@ def render_hybrid_docx(
                     end = cursor + 1
                     while end < len(blocks) and blocks[end].group_id == group_id:
                         end += 1
+                if pinner is not None:
+                    pinner.measure()
+                    target = _group_target_advance(
+                        blocks[cursor:end],
+                        body_placement_by_id,
+                        page_offset=page_offset,
+                        vertical_scale=vertical_scales[page_index],
+                        top_margin=page_top_margin,
+                    )
+                    if target is not None:
+                        while pending_bands and pinner.band_target(pending_bands[0][0]) < target:
+                            pinner.emit_band(*pending_bands.pop(0))
+                        pinner.pin_to(target)
                 _render_group(
                     document,
                     blocks[cursor:end],
@@ -3715,6 +4251,10 @@ def render_hybrid_docx(
                     layout=layout,
                 )
                 cursor = end
+            if pinner is not None and pending_bands:
+                pinner.measure()
+                for band in pending_bands:
+                    pinner.emit_band(*band)
         if blocks and blocks[-1].kind is MarkdownBlockKind.HEADING:
             for paragraph in reversed(document.paragraphs):
                 if paragraph.text == blocks[-1].text:

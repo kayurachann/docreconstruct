@@ -793,7 +793,7 @@ def _detect_header_layout(
     # mistakes side-by-side multiple-choice answers for header columns on exam
     # sheets, so stop before ordinary body rows begin.
     top_limit = content.y0 + round(content.height * 0.16)
-    gap_candidates: list[tuple[float, int, ScanTextLine]] = []
+    gap_candidates: list[tuple[float, float, ScanTextLine]] = []
     for line in text_lines:
         if line.bbox.y0 >= top_limit or len(line.segments) < 2:
             continue
@@ -815,46 +815,43 @@ def _detect_header_layout(
         )
         if len(ordered) < 2:
             continue
-        gaps = [
-            (right.x0 - left.x1, (left.x1 + right.x0) / 2, line)
-            for left, right in zip(ordered, ordered[1:], strict=False)
-        ]
-        for gap, midpoint, candidate_line in gaps:
+        for left, right in zip(ordered, ordered[1:], strict=False):
+            gap = right.x0 - left.x1
+            midpoint = (left.x1 + right.x0) / 2
             relative_midpoint = (midpoint - content.x0) / max(1, content.width)
             if gap >= content.width * 0.018 and 0.22 <= relative_midpoint <= 0.78:
-                gap_candidates.append((midpoint, gap, candidate_line))
+                gap_candidates.append((float(left.x1), float(right.x0), line))
     if len(gap_candidates) < 2:
         return {"header_column_count": 1}
 
-    # A real masthead produces approximately the same gutter on several
-    # consecutive rows.  Choose that modal gutter instead of the single widest
-    # gap per row: a short subject or document-code line may legitimately leave
-    # a much wider empty area inside one column.
-    cluster_radius = max(12.0, content.width * 0.045)
-    cluster = max(
-        gap_candidates,
-        key=lambda item: (
-            len(
-                {
-                    candidate[2].bbox.y0
-                    for candidate in gap_candidates
-                    if abs(candidate[0] - item[0]) <= cluster_radius
-                }
-            ),
-            sum(
-                min(candidate[1], round(content.width * 0.16))
-                for candidate in gap_candidates
-                if abs(candidate[0] - item[0]) <= cluster_radius
-            ),
+    # A real masthead leaves one shared gutter strip empty on several
+    # consecutive rows.  Intersect the free intervals instead of clustering
+    # gap midpoints: a short line inside one column legitimately leaves a much
+    # wider empty area on its own row, which moves that row's midpoint deep
+    # into the neighbouring column even though the true gutter stays empty.
+    def _rows_sharing(point: float) -> list[tuple[float, float, ScanTextLine]]:
+        return [item for item in gap_candidates if item[0] <= point < item[1]]
+
+    best = max(
+        (_rows_sharing(start) for start, _end, _line in gap_candidates),
+        key=lambda items: (
+            len({item[2].bbox.y0 for item in items}),
+            min((end for _start, end, _item in items), default=0.0)
+            - max((start for start, _end, _item in items), default=0.0),
         ),
     )
-    candidates = [
-        (midpoint, line)
-        for midpoint, _gap, line in gap_candidates
-        if abs(midpoint - cluster[0]) <= cluster_radius
-    ]
-    if len({line.bbox.y0 for _, line in candidates}) < 2:
+    if len({item[2].bbox.y0 for item in best}) < 2:
         return {"header_column_count": 1}
+    strip_start = max(start for start, _end, _line in best)
+    strip_end = min(end for _start, end, _line in best)
+    strip_center = (strip_start + strip_end) / 2
+    relative_center = (strip_center - content.x0) / max(1, content.width)
+    # The strip must sit where a masthead gutter can live.  Prose beside a
+    # right-hand figure also shares one empty strip, but that strip hugs the
+    # right third of the page; the renderer models left zones of at most 55%.
+    if not 0.22 <= relative_center <= 0.62:
+        return {"header_column_count": 1}
+    candidates = [(strip_center, line) for _start, _end, line in best]
 
     candidate_lines = [line for _, line in candidates]
     outer_left = min(line.bbox.x0 for line in candidate_lines)

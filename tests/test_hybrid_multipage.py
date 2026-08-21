@@ -71,7 +71,11 @@ def _section_text(payload: bytes) -> list[str]:
     assert body is not None
     sections = [""]
     for child in body:
-        sections[-1] += "".join(node.text or "" for node in child.iter(_WORD + "t"))
+        text = "".join(node.text or "" for node in child.iter(_WORD + "t"))
+        # Advance-pinning spacers restore source whitespace with a bare
+        # no-break space; they carry no editable content.
+        if text != " ":
+            sections[-1] += text
         if child.find(".//" + _WORD + "sectPr") is not None:
             sections.append("")
     # The final body-level sectPr describes the current section rather than
