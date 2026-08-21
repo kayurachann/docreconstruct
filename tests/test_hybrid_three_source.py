@@ -135,7 +135,11 @@ def test_json_evidence_seeds_planner_geometry_and_native_style(tmp_path: Path) -
     payload = render_hybrid_docx(content, scan, plan, [])
     with zipfile.ZipFile(io.BytesIO(payload)) as package:
         root = ElementTree.fromstring(package.read("word/document.xml"))
-    first = next(root.iter(_WORD + "p"))
+    first = next(
+        paragraph
+        for paragraph in root.iter(_WORD + "p")
+        if "".join(node.text or "" for node in paragraph.iter(_WORD + "t")) != " "
+    )
     justification = first.find(f"{_WORD}pPr/{_WORD}jc")
     assert justification is not None
     assert justification.get(_WORD + "val") == "center"

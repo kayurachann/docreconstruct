@@ -702,6 +702,111 @@ def _body_foreground_metrics(
     }
 
 
+_RENDERED_FILL_CENTROID_TOLERANCE = 0.10
+_RENDERED_FILL_ROW_INK_FLOOR = 2
+
+
+def _vertical_ink_profile(foreground: Any, api: Any) -> tuple[float, float, float] | None:
+    """Return (centroid, top, bottom) of page ink as fractions of page height."""
+
+    width, height = foreground.size
+    if width <= 0 or height <= 0:
+        return None
+    mask = foreground.point(lambda value: 255 if value < 128 else 0)
+    rows = list(mask.resize((1, height), api["Image"].Resampling.BOX).tobytes())
+    total = float(sum(rows))
+    if total <= 0.0:
+        return None
+    centroid = sum((index + 0.5) * value for index, value in enumerate(rows)) / total / height
+    inked = [index for index, value in enumerate(rows) if value >= _RENDERED_FILL_ROW_INK_FLOOR]
+    if not inked:
+        return None
+    return centroid, inked[0] / height, (inked[-1] + 1) / height
+
+
+def _rendered_fill_metrics(
+    layout: ScanDocumentLayout,
+    rendered_pages: tuple[bytes, ...],
+) -> dict[str, Any]:
+    """Compare vertical ink distribution between source and rendered pages.
+
+    The plan-side vertical-span metric measures source geometry only, so a
+    render that compresses every block toward the page top still scores 1.0
+    there.  This metric measures the pixels the Office renderer actually
+    produced.  It is an explanatory soft signal: pages report their centroid
+    drift, but no acceptance gate is derived from it because a source page
+    may hold unreconstructable ink (censor bars, stamps) that legitimately
+    lowers any faithful text render's centroid.
+    """
+
+    from docreconstruct.evaluation.visual import (
+        _document_foreground,
+        _load_image,
+        _pillow,
+    )
+
+    api = _pillow()
+    pages: list[dict[str, Any]] = []
+    for page, rendered in zip(layout.pages, rendered_pages, strict=False):
+        reference = _load_image(page.image, api)
+        candidate = _load_image(io.BytesIO(rendered), api)
+        if candidate.size != reference.size:
+            candidate = candidate.resize(reference.size, api["Image"].Resampling.LANCZOS)
+        source_profile = _vertical_ink_profile(
+            _document_foreground(reference, api).convert("L"), api
+        )
+        rendered_profile = _vertical_ink_profile(
+            _document_foreground(candidate, api).convert("L"), api
+        )
+        if source_profile is None or rendered_profile is None:
+            pages.append(
+                {
+                    "page": page.number,
+                    "measured": False,
+                    "source_centroid": None,
+                    "rendered_centroid": None,
+                    "centroid_delta": None,
+                    "source_span": None,
+                    "rendered_span": None,
+                    "span_coverage": None,
+                    "within_tolerance": None,
+                }
+            )
+            continue
+        source_centroid, source_top, source_bottom = source_profile
+        rendered_centroid, rendered_top, rendered_bottom = rendered_profile
+        delta = rendered_centroid - source_centroid
+        source_span = max(1e-6, source_bottom - source_top)
+        overlap = max(
+            0.0,
+            min(source_bottom, rendered_bottom) - max(source_top, rendered_top),
+        )
+        pages.append(
+            {
+                "page": page.number,
+                "measured": True,
+                "source_centroid": round(source_centroid, 6),
+                "rendered_centroid": round(rendered_centroid, 6),
+                "centroid_delta": round(delta, 6),
+                "source_span": [round(source_top, 6), round(source_bottom, 6)],
+                "rendered_span": [round(rendered_top, 6), round(rendered_bottom, 6)],
+                "span_coverage": round(overlap / source_span, 6),
+                "within_tolerance": abs(delta) <= _RENDERED_FILL_CENTROID_TOLERANCE,
+            }
+        )
+    measured = [page for page in pages if page["measured"]]
+    return {
+        "centroid_tolerance": _RENDERED_FILL_CENTROID_TOLERANCE,
+        "measured_pages": len(measured),
+        "pages": pages,
+        "minimum_centroid_delta": min(
+            (float(page["centroid_delta"]) for page in measured),
+            default=0.0,
+        ),
+        "within_tolerance": all(bool(page["within_tolerance"]) for page in measured),
+    }
+
+
 def _layout_utilization(
     content: MarkdownContent,
     layout: ScanDocumentLayout,
@@ -1073,10 +1178,14 @@ def _expected_layout_furniture(
     layout: ScanDocumentLayout,
     plan: HybridLayoutPlan,
 ) -> tuple[int, list[str], set[str]]:
-    # Keep structural QA on the exact same generic footer classifier as the
-    # renderer.  The local import avoids coupling module initialization while
-    # remaining cycle-safe (hybrid_docx does not import the evaluator).
-    from docreconstruct.reconstruction.hybrid_docx import _partition_source_footer
+    # Keep structural QA on the exact same generic footer and masthead
+    # classifiers as the renderer.  The local import avoids coupling module
+    # initialization while remaining cycle-safe (hybrid_docx does not import
+    # the evaluator).
+    from docreconstruct.reconstruction.hybrid_docx import (
+        _partition_source_footer,
+        _split_masthead_plan,
+    )
 
     blocks = {block.id: block for block in content.blocks}
     placements = {
@@ -1089,22 +1198,9 @@ def _expected_layout_furniture(
     footer_block_ids: set[str] = set()
     for page, page_plan in zip(layout.pages, plan.pages, strict=False):
         page_blocks = [blocks[placement.block_id] for placement in page_plan.placements]
-        section_index = next(
-            (
-                index
-                for index, block in enumerate(page_blocks)
-                if block.metadata.get("role") == "section_heading"
-            ),
-            None,
-        )
-        if (
-            page.metadata.get("header_column_count") == 2
-            and page.metadata.get("column_count") == 1
-            and section_index is not None
-            and section_index >= 4
-        ):
+        body, footer = _partition_source_footer(page_blocks, placements, page)
+        if _split_masthead_plan(body, placements, page) is not None:
             expected_mastheads += 1
-        _body, footer = _partition_source_footer(page_blocks, placements, page)
         expected_footers.extend(block.text for block in footer)
         footer_block_ids.update(block.id for block in footer)
     return expected_mastheads, expected_footers, footer_block_ids
@@ -1727,6 +1823,7 @@ def validate_hybrid(
     render_seconds = perf_counter() - render_started
     visual_metrics = None
     body_foreground = None
+    rendered_fill = None
     render_diff_localization: dict[str, Any] | None = None
     render_diff_localization_status = "not_measured"
     render_diff_localization_error_type: str | None = None
@@ -1743,6 +1840,7 @@ def validate_hybrid(
             normalize_illumination=True,
         )
         body_foreground = _body_foreground_metrics(scan, render_result.pages)
+        rendered_fill = _rendered_fill_metrics(scan, render_result.pages)
         if render_output_dir is not None:
             artifact_directory = Path(render_output_dir).expanduser().resolve()
             artifact_directory.mkdir(parents=True, exist_ok=True)
@@ -2350,6 +2448,7 @@ def validate_hybrid(
             "enforced": render_result.rendered or minimum_visual_score is not None,
         },
         "rendered_body_foreground": body_foreground,
+        "rendered_fill": rendered_fill,
         "rendered_diff_localization": render_diff_localization,
         "rendered_diff_localization_status": render_diff_localization_status,
         "rendered_diff_localization_error_type": render_diff_localization_error_type,
@@ -2374,6 +2473,7 @@ def validate_hybrid(
         if visual_metrics is not None
         else [
             "rendered_pixel_similarity",
+            "rendered_fill",
             "office_font_substitution",
             "office_line_wrapping",
             "renderer_confirmed_pagination",

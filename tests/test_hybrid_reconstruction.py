@@ -734,7 +734,18 @@ def test_source_geometry_drives_eighteen_visual_slots_without_clipping(
     math = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
     body = root.find(f"{word}body")
     assert body is not None
-    paragraphs = [child for child in body if child.tag == f"{word}p"]
+
+    def _is_advance_spacer(paragraph: ElementTree.Element) -> bool:
+        spacing = paragraph.find(f"{word}pPr/{word}spacing")
+        return (
+            spacing is not None
+            and spacing.get(f"{word}line") == "20"
+            and spacing.get(f"{word}lineRule") == "exact"
+        )
+
+    paragraphs = [
+        child for child in body if child.tag == f"{word}p" and not _is_advance_spacer(child)
+    ]
     assert len(paragraphs) == len(blocks)
     display_paragraphs = [
         paragraph for paragraph in paragraphs if paragraph.find(f".//{math}oMathPara") is not None
