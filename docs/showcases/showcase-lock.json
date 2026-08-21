@@ -3,21 +3,21 @@
     "media_parts": 0,
     "office_math": 18,
     "pages": 1,
-    "qa_gates_passed": 34,
-    "qa_gates_total": 35
+    "qa_gates_passed": 35,
+    "qa_gates_total": 36
   },
   "math-exam": {
     "media_parts": 0,
     "office_math": 30,
     "pages": 1,
-    "qa_gates_passed": 26,
-    "qa_gates_total": 35
+    "qa_gates_passed": 27,
+    "qa_gates_total": 36
   },
   "vietnamese-exam": {
     "media_parts": 0,
     "office_math": 0,
     "pages": 1,
-    "qa_gates_passed": 34,
-    "qa_gates_total": 35
+    "qa_gates_passed": 35,
+    "qa_gates_total": 36
   }
 }
