@@ -227,15 +227,15 @@ class MistralOCRProvider(SavedJSONProvider):
         if not isinstance(raw_pages, Sequence) or isinstance(raw_pages, (str, bytes)):
             raise ProviderInputError("Mistral OCR response must contain a pages array")
         pages_payload = [page for page in raw_pages if isinstance(page, Mapping)]
-        zero_based = any(_integer(page.get("index")) == 0 for page in pages_payload)
         pages: list[Page] = []
         used_numbers: set[int] = set()
         model = str(root.get("model") or "mistral-ocr")
         for position, page_payload in enumerate(pages_payload):
             raw_index = _integer(page_payload.get("index"))
-            number = (raw_index + 1 if zero_based and raw_index is not None else raw_index) or (
-                position + 1
-            )
+            # Mistral's "index" is always zero-based. Inferring that from the
+            # presence of index 0 mislabelled every page-range response, where
+            # the first page returned is index 1 and became page 1.
+            number = max(1, raw_index + 1) if raw_index is not None else position + 1
             while number in used_numbers:
                 number += 1
             used_numbers.add(number)
@@ -250,8 +250,15 @@ class MistralOCRProvider(SavedJSONProvider):
                 if text is None and kind is ElementType.TABLE:
                     html = block.get("html")
                     text = html if isinstance(html, str) else None
-                if bbox is None or text is None:
+                if text is None:
                     continue
+                # A block without geometry is still recognized content. Sibling
+                # providers keep it against a whole-page box and label the
+                # coordinate system; dropping it here also suppressed the
+                # markdown fallback, so the page came back empty.
+                geometry_fallback = bbox is None
+                if bbox is None:
+                    bbox = BBox(x0=0, y0=0, x1=width, y1=height)
                 score = _record_confidence(block)
                 if kind is ElementType.TEXT and text.lstrip().startswith("# "):
                     kind = ElementType.TITLE
@@ -262,6 +269,7 @@ class MistralOCRProvider(SavedJSONProvider):
                     "content_format": "markdown"
                     if isinstance(block.get("markdown"), str)
                     else "text",
+                    "coordinate_system": "full_page_fallback" if geometry_fallback else "source",
                     "raw": safe_raw(block),
                 }
                 if kind is ElementType.TABLE:
@@ -317,8 +325,9 @@ class MistralOCRProvider(SavedJSONProvider):
 
             for image_index, image in enumerate(_mistral_images(page_payload)):
                 bbox = _record_bbox(image)
+                image_fallback = bbox is None
                 if bbox is None:
-                    continue
+                    bbox = BBox(x0=0, y0=0, x1=width, y1=height)
                 image_id = str(image.get("id") or f"image-{image_index + 1}")
                 elements.append(
                     _element(
@@ -335,6 +344,9 @@ class MistralOCRProvider(SavedJSONProvider):
                         metadata={
                             "image_ref": image_id,
                             "image": _mistral_image_asset(image, image_id),
+                            "coordinate_system": (
+                                "full_page_fallback" if image_fallback else "source"
+                            ),
                             "raw": safe_raw(image),
                         },
                     )

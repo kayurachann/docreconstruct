@@ -94,6 +94,13 @@ def _analyze_image(path: Path) -> InputAnalysis:
             if exif_orientation is not None
             else 0.0
         )
+        if exif_orientation in {5, 6, 7, 8}:
+            # EXIF 5-8 are quarter turns. ``image.size`` is the stored raster,
+            # but preprocessing.image applies exif_transpose before any provider
+            # sees the pixels, so the page frame has to be the transposed one —
+            # matching how _analyze_pdf reports PyMuPDF's display rect.
+            width, height = height, width
+            dpi_x, dpi_y = dpi_y, dpi_x
         orientation = "square" if width == height else "landscape" if width > height else "portrait"
         pages = [
             PageAnalysis(

@@ -240,3 +240,48 @@ def test_benchmark_reports_failures_and_exits_nonzero(
     assert result.exit_code == 3, result.output
     assert "0 succeeded, 3 failed" in result.output
     assert "mean score: unavailable" in result.output
+
+
+@pytest.mark.parametrize(
+    ("exif_orientation", "expected"),
+    [(1, (1200, 800)), (3, (1200, 800)), (5, (800, 1200)), (6, (800, 1200)), (8, (800, 1200))],
+)
+def test_exif_quarter_turns_are_reflected_in_the_page_frame(
+    tmp_path: Path, exif_orientation: int, expected: tuple[int, int]
+) -> None:
+    """``image.size`` is the stored raster, not what a provider receives.
+
+    preprocessing.image applies exif_transpose before any provider sees the
+    pixels, so an EXIF 6 photo stored 1200x800 arrives as 800x1200. Reporting
+    the stored size handed every downstream consumer a transposed page frame
+    and the wrong orientation label.
+    """
+
+    source = tmp_path / f"exif{exif_orientation}.jpg"
+    image = Image.new("RGB", (1200, 800), "white")
+    exif = image.getexif()
+    exif[274] = exif_orientation
+    image.save(source, "JPEG", exif=exif)
+
+    page = analyze_source(source).pages[0]
+
+    assert (page.width, page.height) == expected
+    assert page.orientation == ("landscape" if expected[0] > expected[1] else "portrait")
+
+
+def test_exif_transposed_page_frame_matches_the_transposed_raster(tmp_path: Path) -> None:
+    from PIL import ImageOps
+
+    source = tmp_path / "rotated.jpg"
+    image = Image.new("RGB", (1200, 800), "white")
+    exif = image.getexif()
+    exif[274] = 6
+    image.save(source, "JPEG", exif=exif)
+
+    page = analyze_source(source).pages[0]
+    with Image.open(source) as raw:
+        transposed = ImageOps.exif_transpose(raw)
+        actual = transposed.size if transposed is not None else raw.size
+
+    assert (page.width, page.height) == actual
+    assert page.rotation == 90.0
