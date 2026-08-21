@@ -2956,3 +2956,87 @@ def test_multilingual_page_fraction_footer_fallback_is_unique_per_section(
         "Open source: https://example.invalid/document Page 1/2",
         "Open source: https://example.invalid/document Страница 2/2",
     ]
+
+
+def _math_page(tmp_path: Path, *, line_pitch: float) -> ScanDocumentLayout:
+    """A page whose rows are inflated by display mathematics, not by type size."""
+
+    page = ScanPageLayout(
+        number=1,
+        width=600,
+        height=800,
+        pdf_width=600,
+        pdf_height=800,
+        content_bbox=PixelBox(x0=0, y0=0, x1=600, y1=800),
+        line_pitch=line_pitch,
+        image=Image.new("RGB", (600, 800), "white"),
+        metadata={"source_kind": "image"},
+    )
+    return ScanDocumentLayout(source=str(tmp_path / "math.png"), pages=[page])
+
+
+def test_heading_row_height_is_scaled_against_the_page_row_rhythm(tmp_path: Path) -> None:
+    """A row's ink height is not a font size on a page of display mathematics.
+
+    Reading it as one blew a body-size heading up to 2.5x on the calculus
+    showcase: its rows run 23-80pt because of fractions and integrals while the
+    body type is ~10pt, so a heading matched to any ordinary math row inherited
+    a 40pt "measurement".
+    """
+
+    layout = _math_page(tmp_path, line_pitch=50.0)
+    tall_row = PixelBox(x0=40, y0=300, x1=560, y1=341)
+    placement = HybridBlockPlacement(
+        block_id="md-1",
+        block_index=0,
+        page_number=1,
+        source_bbox=tall_row,
+        source_rows=[tall_row],
+        geometry_source="json_consensus",
+    )
+
+    paragraph = _new_paragraph(
+        WordDocument(),
+        "方法二",
+        size=12.0,
+        line_height=30.0,
+        kind=MarkdownBlockKind.HEADING,
+        available_width_points=600.0,
+        placement=placement,
+        layout=layout,
+    )
+
+    size = paragraph.runs[0].font.size.pt
+    # The row is 41pt but the page's own rhythm is 50pt, so this row is not a
+    # step up in type at all and the heading must stay near body size.
+    assert size <= 14.0, f"heading inflated to {size}pt"
+
+
+def test_heading_genuinely_larger_than_the_page_rhythm_still_grows(tmp_path: Path) -> None:
+    """The page-relative rule must still honour a real type-size step."""
+
+    layout = _math_page(tmp_path, line_pitch=14.0)
+    tall_row = PixelBox(x0=40, y0=300, x1=560, y1=328)
+    placement = HybridBlockPlacement(
+        block_id="md-1",
+        block_index=0,
+        page_number=1,
+        source_bbox=tall_row,
+        source_rows=[tall_row],
+        geometry_source="json_consensus",
+    )
+
+    paragraph = _new_paragraph(
+        WordDocument(),
+        "Section title",
+        size=10.0,
+        line_height=14.0,
+        kind=MarkdownBlockKind.HEADING,
+        available_width_points=600.0,
+        placement=placement,
+        layout=layout,
+    )
+
+    size = paragraph.runs[0].font.size.pt
+    # A 28pt row against a 14pt rhythm is a genuine 2x heading.
+    assert size >= 14.0, f"heading failed to grow: {size}pt"

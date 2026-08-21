@@ -273,10 +273,14 @@ integrals, limits, scripts, aligned derivations, and mixed Chinese prose. The
 generic planner maps 10 editable blocks to all 18 source rows; the final DOCX
 renders as one A4 page, keeps 8 native Office Math expressions and 13 display
 rows, and does not expose TeX alignment markers. Project QA passed 34/34 measured
-gates when the showcase artifact was produced. Its archived `92.58%` visual
-figure predates metric v2.1 and must not be compared with current v2.1 scores;
-rerun the current benchmark for a versioned measurement. Automated similarity
-is not proof that every glyph or mathematical statement is semantically correct.
+gates when the showcase artifact was produced; the gate set has since grown to
+39. The archived `92.58%` visual figure predates the current metric and must not
+be compared with it: re-measured under `VISUAL_METRIC_VERSION = 2.2` this same
+artifact scores **31.46%**, because 2.2 scores foreground, edge and region
+agreement rather than raw pixel agreement (its pixel similarity is 94.71%). See
+[docs/showcases/README.md](docs/showcases/README.md) for the re-measured table
+of all three showcases. Automated similarity is not proof that every glyph or
+mathematical statement is semantically correct.
 
 ### Tuyen Quang gifted school - Vietnamese 2nd exam (Source: VNExpress)
 

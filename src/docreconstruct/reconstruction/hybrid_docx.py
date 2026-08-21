@@ -160,6 +160,31 @@ def _set_native_page_background(document: WordDocumentType, color: str) -> None:
         )
 
 
+def _page_row_pitch_points(
+    placement: HybridBlockPlacement | None,
+    layout: ScanDocumentLayout | None,
+) -> float | None:
+    """Return the page's detected row rhythm in physical points.
+
+    This is the same signal the ordinary-paragraph branch uses to reject an
+    inflated row envelope, expressed once so heading sizing can normalize
+    against the page it came from.
+    """
+
+    if placement is None or layout is None:
+        return None
+    page = layout.pages[placement.page_number - 1]
+    pitch = float(getattr(page, "line_pitch", 0.0) or 0.0)
+    if pitch <= 0.0:
+        return None
+    vertical_scale = (
+        page.pdf_height / page.height
+        if page.metadata.get("source_kind") == "image"
+        else page.pdf_width / page.width
+    )
+    return pitch * vertical_scale
+
+
 def _placement_geometry_points(
     placement: HybridBlockPlacement | None,
     layout: ScanDocumentLayout | None,
@@ -538,10 +563,27 @@ def _new_paragraph(
                     min(112.0, display_height * 0.80, width_fit),
                 )
             else:
-                rendered_size = max(
-                    rendered_size,
-                    min(rendered_size * 2.15, measured_row_height * 0.82),
-                )
+                # ``measured_row_height * 0.82`` reads a row's ink height as a
+                # font size. That holds for a plain text row and fails badly on
+                # a page of display mathematics, where every row is inflated by
+                # fractions, integrals and radicals rather than by type size:
+                # on the calculus showcase the page's rows run 23-80pt while the
+                # body type is ~10pt, so a heading matched to any ordinary math
+                # row was blown up to 2.5x its true size.
+                #
+                # Scale by how exceptional the row is for *this* page instead.
+                # ``line_pitch`` is the detected row rhythm, so the ratio is a
+                # type-size step rather than an absolute ink measurement, and it
+                # degrades gracefully when a heading is matched to the wrong row.
+                page_row_pitch = _page_row_pitch_points(placement, layout)
+                if page_row_pitch is not None and page_row_pitch > 0.0:
+                    prominence = min(2.15, max(1.0, measured_row_height / page_row_pitch))
+                    rendered_size = max(rendered_size, rendered_size * prominence)
+                else:
+                    rendered_size = max(
+                        rendered_size,
+                        min(rendered_size * 2.15, measured_row_height * 0.82),
+                    )
         # Ink envelopes are evidence for baseline rhythm, not native Word text
         # frames.  In particular, a paragraph separated by a figure can have a
         # tall union bbox even though every source row is ordinary body text.
